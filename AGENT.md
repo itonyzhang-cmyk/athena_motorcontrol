@@ -185,5 +185,6 @@ Do not record secrets, access tokens, or private credentials here.
 - Updated `_sbrk()` for current Newlib and verified both safe and unsafe profiles
   compile.
 - Performed no controller connection, erase or flash operation.
-- Committed the implementation locally as `803da04`; it has not yet been pushed
-  to the user's fork.
+- Committed the implementation as `803da04`; handoff documentation followed in
+  `8968b03`. Branch `cyberdog-safe-bringup` was pushed to the user's `fork`
+  remote without changing its default branch.
