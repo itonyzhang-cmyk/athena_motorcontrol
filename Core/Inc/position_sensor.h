@@ -31,11 +31,29 @@ typedef struct{
 	int m_zero, e_zero;
 	int offset_lut[N_LUT];
 	uint8_t first_sample;
+	uint8_t valid;
+	uint8_t diagnostics_valid;
+	uint16_t last_frame;
+	uint16_t raw14;
+	uint16_t last_raw14;
+	uint16_t diaagc;
+	uint16_t magnitude;
+	uint16_t error_flags;
+	uint16_t consecutive_errors;
+	uint32_t sample_count;
+	uint32_t valid_count;
+	uint32_t invalid_count;
+	uint32_t spi_timeout_count;
+	uint32_t parity_error_count;
+	uint32_t sensor_error_count;
+	uint32_t jump_error_count;
+	uint32_t unchanged_count;
 } EncoderStruct;
 
 
 void ps_warmup(EncoderStruct * encoder, int n);
 void ps_sample(EncoderStruct * encoder, float dt);
 void ps_print(EncoderStruct * encoder, int dt_ms);
+int ps_read_diagnostics(EncoderStruct *encoder);
 
 #endif /* INC_POSITION_SENSOR_H_ */

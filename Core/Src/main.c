@@ -58,6 +58,7 @@
 #include "math_ops.h"
 #include "calibration.h"
 #include "safety.h"
+#include "diagnostics.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -196,12 +197,24 @@ int main(void)
   info(">> Version: %d.%d.%d <<\r\n",
       VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
 #ifdef SAFE_BRINGUP
-  info(">> SAFE_BRINGUP: gate drive, motion, calibration and flash writes are disabled <<\r\n");
+  info(">> SAFE_DIAGNOSTIC: gate drive, motion, calibration and flash writes are disabled <<\r\n");
 #endif
 
   /* Load settings from flash */
+#ifdef SAFE_BRINGUP
+  /* Do not interpret legacy or corrupt configuration during the first-flash
+   * diagnostic phase. The reserved pages are neither read nor written. */
+  memset(__float_reg, 0, sizeof(__float_reg));
+  memset(__int_reg, 0, sizeof(__int_reg));
+  I_BW = 1000.0f;
+  I_MAX = 0.0f;
+  PPAIRS = 1.0f;
+  GR = 1.0f;
+  KT = 1.0f;
+#else
   preference_writer_init(&prefs, 6);
   preference_writer_load(prefs);
+#endif
 
   /* Sanitize configs in case flash is empty*/
   if(E_ZERO==-1){E_ZERO = 0;}
@@ -247,14 +260,24 @@ int main(void)
   comm_encoder.m_zero = M_ZERO;
   comm_encoder.e_zero = E_ZERO;
   comm_encoder.ppairs = PPAIRS;
+#ifndef STM32F446
+  /* AS5047P requires up to 10 ms from power-on before the first valid angle. */
+  delay_1ms(10U);
+#endif
   ps_warmup(&comm_encoder, 100);			// clear the noisy data when the encoder first turns on
 
+#ifdef SAFE_BRINGUP
+  /* A first-flash diagnostic image must not interpret an unknown legacy LUT as
+   * calibration. Raw AS5047 data is still reported separately. */
+  memset(&comm_encoder.offset_lut, 0, sizeof(comm_encoder.offset_lut));
+#else
   if (EN_ENC_LINEARIZATION) {
     // Copy the linearization lookup table
     memcpy(&comm_encoder.offset_lut, &ENCODER_LUT, sizeof(comm_encoder.offset_lut));
   } else {
     memset(&comm_encoder.offset_lut, 0, sizeof(comm_encoder.offset_lut));
   }
+#endif
 
 #ifdef DEBUG_PS
   for (int i = 0; i < 8; i++) {
@@ -358,7 +381,9 @@ int main(void)
   nvic_irq_enable(TIMER0_UP_IRQn, 0U, 0);
   nvic_irq_enable(EXTI10_15_IRQn, 0U, 1);
   nvic_irq_enable(USBD_LP_CAN0_RX0_IRQn, 0U, 2);
+#ifndef SAFE_BRINGUP
   nvic_irq_enable(USART1_IRQn, 2U, 0);
+#endif
 
   /* Start the FSM */
   state.state = INIT_TEMP_MODE;
@@ -373,6 +398,15 @@ int main(void)
   while (1)
   {
     delay_1ms(1000);
+#ifdef SAFE_BRINGUP
+    safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+    /* Refresh the low-rate DMA diagnostic channels. These conversions are
+     * read-only and do not participate in motor control. */
+    adc_software_trigger_enable(ADC0, ADC_REGULAR_CHANNEL);
+    adc_software_trigger_enable(ADC2, ADC_REGULAR_CHANNEL);
+    delay_1ms(1U);
+    diagnostics_uart_report();
+#endif
 #ifndef SAFE_BRINGUP
     loop_count += 1;
 

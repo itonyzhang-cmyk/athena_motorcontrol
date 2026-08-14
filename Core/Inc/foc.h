@@ -45,6 +45,9 @@ typedef struct{
     float i_max;											// Maximum current
     float inverter_tab[128];								// Inverter linearization table
     uint8_t invert_dtc;										// Inverter duty cycle inverting/non-inverting
+    uint8_t adc_valid;
+    uint32_t adc_sample_count;
+    uint32_t adc_timeout_count;
     } ControllerStruct;
 
 typedef struct{

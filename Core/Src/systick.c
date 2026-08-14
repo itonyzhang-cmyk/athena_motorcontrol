@@ -39,6 +39,7 @@ OF SUCH DAMAGE.
 #include "systick.h"
 
 volatile static uint32_t delay;
+volatile static uint32_t uptime_ms;
 
 /*!
     \brief      configure systick
@@ -80,7 +81,13 @@ void delay_1ms(uint32_t count)
 */
 void delay_decrement(void)
 {
+    uptime_ms++;
     if (0U != delay){
         delay--;
     }
+}
+
+uint32_t systick_uptime_ms(void)
+{
+    return uptime_ms;
 }

@@ -14,10 +14,17 @@
 # target
 ######################################
 TARGET = motorcontrol
+HOST_CC ?= cc
 
 # Safe by default. Set SAFE_BRINGUP=0 only after the Phase-0 hardware and safety
 # gates in docs/PROJECT_PLAN.md have passed and the resulting diff is reviewed.
 SAFE_BRINGUP ?= 1
+
+ifeq ($(SAFE_BRINGUP), 1)
+override BUILD_PROFILE := safe
+else
+override BUILD_PROFILE := unsafe
+endif
 
 
 ######################################
@@ -36,6 +43,7 @@ OPT += -fsingle-precision-constant
 #######################################
 # Build path
 BUILD_DIR = build
+override OUTPUT_DIR := $(BUILD_DIR)/$(BUILD_PROFILE)
 
 ######################################
 # source
@@ -47,6 +55,9 @@ Core/Src/safety.c \
 Core/Src/gpio.c \
 Core/Src/adc.c \
 Core/Src/can.c \
+Core/Src/as5047_protocol.c \
+Core/Src/diag_protocol.c \
+Core/Src/diagnostics.c \
 Core/Src/spi.c \
 Core/Src/tim.c \
 Core/Src/usart.c \
@@ -110,6 +121,7 @@ AS = $(PREFIX)gcc -x assembler-with-cpp
 CP = $(PREFIX)objcopy
 SZ = $(PREFIX)size
 endif
+NM = $(patsubst %gcc,%nm,$(CC))
 HEX = $(CP) -O ihex
 BIN = $(CP) -O binary -S
  
@@ -175,43 +187,69 @@ LDSCRIPT = GD32F303RETx_FLASH.ld
 # libraries
 LIBS = -lc -lm -lnosys 
 LIBDIR = 
-LDFLAGS = $(MCU) -specs=nano.specs -T$(LDSCRIPT) $(LIBDIR) $(LIBS) -Wl,-Map=$(BUILD_DIR)/$(TARGET).map,--cref -Wl,--gc-sections
+LDFLAGS = $(MCU) -specs=nano.specs -T$(LDSCRIPT) $(LIBDIR) $(LIBS) -Wl,-Map=$(OUTPUT_DIR)/$(TARGET).map,--cref -Wl,--gc-sections
 
 # printf support float, 6Kbytes
 LDFLAGS += -u _printf_float
 
 # default action: build all
-all: $(BUILD_DIR)/$(TARGET).elf $(BUILD_DIR)/$(TARGET).hex $(BUILD_DIR)/$(TARGET).bin
+all: $(OUTPUT_DIR)/$(TARGET).elf $(OUTPUT_DIR)/$(TARGET).hex $(OUTPUT_DIR)/$(TARGET).bin
+
+ifeq ($(SAFE_BRINGUP), 1)
+all: verify-safe
+endif
+
+host-test:
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -ICore/Inc \
+		Core/Src/diag_protocol.c Core/Src/as5047_protocol.c \
+		tests/diag_protocol_test.c tests/as5047_protocol_test.c \
+		-o /tmp/athena_diag_protocol_test
+	/tmp/athena_diag_protocol_test
+
+verify-safe: $(OUTPUT_DIR)/$(TARGET).elf
+	sh tools/verify_safe_image.sh $(NM) $<
+
+.PHONY: all host-test verify-safe clean
 
 
 #######################################
 # build the application
 #######################################
 # list of objects
-OBJECTS = $(addprefix $(BUILD_DIR)/,$(notdir $(C_SOURCES:.c=.o)))
+OBJECTS = $(addprefix $(OUTPUT_DIR)/,$(notdir $(C_SOURCES:.c=.o)))
 vpath %.c $(sort $(dir $(C_SOURCES)))
 # list of ASM program objects
-OBJECTS += $(addprefix $(BUILD_DIR)/,$(notdir $(ASM_SOURCES:.s=.o)))
+OBJECTS += $(addprefix $(OUTPUT_DIR)/,$(notdir $(ASM_SOURCES:.s=.o)))
 vpath %.s $(sort $(dir $(ASM_SOURCES)))
 
-$(BUILD_DIR)/%.o: %.c Makefile | $(BUILD_DIR) 
-	$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(BUILD_DIR)/$(notdir $(<:.c=.lst)) $< -o $@
+$(OUTPUT_DIR)/%.o: %.c Makefile | $(OUTPUT_DIR)
+	$(CC) -c $(CFLAGS) -Wa,-a,-ad,-alms=$(OUTPUT_DIR)/$(notdir $(<:.c=.lst)) $< -o $@
 
-$(BUILD_DIR)/%.o: %.s Makefile | $(BUILD_DIR)
+$(OUTPUT_DIR)/%.o: %.s Makefile | $(OUTPUT_DIR)
 	$(AS) -c $(CFLAGS) $< -o $@
 
-$(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) Makefile
+$(OUTPUT_DIR)/$(TARGET).elf: $(OBJECTS) Makefile tools/verify_safe_image.sh
+ifeq ($(SAFE_BRINGUP), 1)
+	$(CC) $(OBJECTS) $(LDFLAGS) -o $@.unverified
+	$(SZ) $@.unverified
+	@if ! sh tools/verify_safe_image.sh $(NM) $@.unverified; then \
+		rm -f $@.unverified; \
+		exit 1; \
+	fi
+	mv $@.unverified $@
+else
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
 	$(SZ) $@
+endif
 
-$(BUILD_DIR)/%.hex: $(BUILD_DIR)/%.elf | $(BUILD_DIR)
+$(OUTPUT_DIR)/%.hex: $(OUTPUT_DIR)/%.elf | $(OUTPUT_DIR)
 	$(HEX) $< $@
 	
-$(BUILD_DIR)/%.bin: $(BUILD_DIR)/%.elf | $(BUILD_DIR)
+$(OUTPUT_DIR)/%.bin: $(OUTPUT_DIR)/%.elf | $(OUTPUT_DIR)
 	$(BIN) $< $@	
 	
-$(BUILD_DIR):
-	mkdir $@		
+$(OUTPUT_DIR):
+	mkdir -p $@
 
 #######################################
 # clean up
@@ -222,6 +260,6 @@ clean:
 #######################################
 # dependencies
 #######################################
--include $(wildcard $(BUILD_DIR)/*.d)
+-include $(wildcard $(OUTPUT_DIR)/*.d)
 
 # *** EOF ***

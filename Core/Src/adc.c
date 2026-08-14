@@ -19,6 +19,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "adc.h"
+#include "safety.h"
 
 /* USER CODE BEGIN 0 */
 
@@ -309,6 +310,34 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* adcHandle)
 
 #else
 
+#ifdef SAFE_BRINGUP
+#define ADC_CALIBRATION_POLL_LIMIT 1000000U
+
+static int adc_calibration_enable_bounded(uint32_t adc_periph)
+{
+  uint32_t remaining = ADC_CALIBRATION_POLL_LIMIT;
+  ADC_CTL1(adc_periph) |= ADC_CTL1_RSTCLB;
+  while ((ADC_CTL1(adc_periph) & ADC_CTL1_RSTCLB) != 0U) {
+    if (remaining-- == 0U) {
+      safety_force_outputs_off(SAFETY_FAULT_ADC_TIMEOUT);
+      adc_disable(adc_periph);
+      return -1;
+    }
+  }
+
+  remaining = ADC_CALIBRATION_POLL_LIMIT;
+  ADC_CTL1(adc_periph) |= ADC_CTL1_CLB;
+  while ((ADC_CTL1(adc_periph) & ADC_CTL1_CLB) != 0U) {
+    if (remaining-- == 0U) {
+      safety_force_outputs_off(SAFETY_FAULT_ADC_TIMEOUT);
+      adc_disable(adc_periph);
+      return -1;
+    }
+  }
+  return 0;
+}
+#endif
+
 #if 0
 uint16_t adc_channel_sample(uint8_t channel)
 {
@@ -449,8 +478,13 @@ void MX_ADC01_Init(void)
   adc_enable(ADC1);
   delay_1ms(1);
 
+#ifdef SAFE_BRINGUP
+  (void)adc_calibration_enable_bounded(ADC0);
+  (void)adc_calibration_enable_bounded(ADC1);
+#else
   adc_calibration_enable(ADC0);
   adc_calibration_enable(ADC1);
+#endif
 }
 
 void MX_ADC2_Init(void)
@@ -500,7 +534,11 @@ void MX_ADC2_Init(void)
   adc_enable(ADC2);
   delay_1ms(1);
 
+#ifdef SAFE_BRINGUP
+  (void)adc_calibration_enable_bounded(ADC2);
+#else
   adc_calibration_enable(ADC2);
+#endif
 }
 
 #endif

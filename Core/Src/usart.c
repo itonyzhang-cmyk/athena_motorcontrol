@@ -133,24 +133,41 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 /* USER CODE END 1 */
 #else
 
+#define UART_TX_POLL_LIMIT 4096U
+volatile uint32_t uart_tx_timeout_count;
+
 void MX_USART1_Init(void)
 {
     /* USART configure */
     usart_deinit(USART1);
     usart_baudrate_set(USART1, 115200U);
+#ifdef SAFE_BRINGUP
+    /* The first-flash image is intentionally TX-only. No byte received on the
+     * header can enter the legacy CLI/FSM. */
+    usart_receive_config(USART1, USART_RECEIVE_DISABLE);
+#else
     usart_receive_config(USART1, USART_RECEIVE_ENABLE);
+#endif
     usart_transmit_config(USART1, USART_TRANSMIT_ENABLE);
     usart_enable(USART1);
-    
+
+#ifndef SAFE_BRINGUP
     /* enable USART RBNE interrupt */ 
     usart_interrupt_enable(USART1, USART_INT_RBNE);
+#endif
 }
 
 /* retarget the C library printf function to the USART */
 int __io_putchar(int ch)
 {
+  uint32_t remaining = UART_TX_POLL_LIMIT;
   usart_data_transmit(USART1, (uint8_t)ch);
-  while(RESET == usart_flag_get(USART1, USART_FLAG_TBE));
+  while(RESET == usart_flag_get(USART1, USART_FLAG_TBE)) {
+    if (remaining-- == 0U) {
+      uart_tx_timeout_count++;
+      return -1;
+    }
+  }
   return ch;
 }
 #endif

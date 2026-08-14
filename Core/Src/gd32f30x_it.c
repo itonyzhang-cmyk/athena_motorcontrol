@@ -51,6 +51,7 @@ OF SUCH DAMAGE.
 #include "hw_config.h"
 #include "user_config.h"
 #include "safety.h"
+#include "diagnostics.h"
 
 
 /*!
@@ -167,6 +168,7 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
 
 #ifdef SAFE_BRINGUP
     safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+    diagnostics_handle_can(&can_rx);
     return;
 #endif
 
@@ -220,6 +222,18 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
 void TIMER0_UP_IRQHandler(void)
 {
     timer_interrupt_flag_clear(TIMER0, TIMER_INT_FLAG_UP);
+
+#ifdef SAFE_BRINGUP
+	safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+	/* Motor-control-rate sampling is unnecessary with the power stage hard
+	 * disabled. Divide 30 kHz down to 1 kHz to leave ample ISR margin. */
+	static uint8_t safe_diagnostic_divider;
+	if (++safe_diagnostic_divider < 30U) {
+		controller.loop_count++;
+		return;
+	}
+	safe_diagnostic_divider = 0U;
+#endif
     
     if (state.state == MOTOR_MODE) {
         gpio_bit_set(GPIOC, GPIO_PIN_13);
@@ -229,10 +243,16 @@ void TIMER0_UP_IRQHandler(void)
 	analog_sample(&controller);
 
 	/* Sample position sensor */
+#ifdef SAFE_BRINGUP
+	ps_sample(&comm_encoder, 0.001f);
+#else
 	ps_sample(&comm_encoder, DT);
+#endif
 
 	/* Run Finite State Machine */
+#ifndef SAFE_BRINGUP
 	run_fsm(&state);
+#endif
 
 #ifdef DEBUG_TIMER
                             //cyberdog layout      //mbed
@@ -273,6 +293,11 @@ void USART1_IRQHandler(void)
     if(RESET != usart_interrupt_flag_get(USART1, USART_INT_FLAG_RBNE)){
         /* receive data */
         char c = usart_data_receive(USART1);
+#ifdef SAFE_BRINGUP
+        (void)c;
+        safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+#else
 	    update_fsm(&state, c);
+#endif
     }
 }

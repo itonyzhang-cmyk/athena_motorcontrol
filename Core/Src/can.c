@@ -19,6 +19,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "can.h"
+#include "diag_protocol.h"
 
 /* USER CODE BEGIN 0 */
 #include "hw_config.h"
@@ -217,7 +218,11 @@ void MX_CAN0_Init(void)
     can_parameter.time_triggered = DISABLE;
     can_parameter.auto_bus_off_recovery = DISABLE;
     can_parameter.auto_wake_up = DISABLE;
+#ifdef SAFE_BRINGUP
+    can_parameter.no_auto_retrans = ENABLE;
+#else
     can_parameter.no_auto_retrans = DISABLE;
+#endif
     can_parameter.rec_fifo_overwrite = DISABLE;
     can_parameter.trans_fifo_order = DISABLE;
     can_parameter.prescaler = 6;
@@ -234,10 +239,19 @@ void can_rx_init(can_receive_message_struct *msg)
     can_struct_para_init(CAN_FILTER_STRUCT, &can_filter);
 
     /* initialize filter */    
+#ifdef SAFE_BRINGUP
+    /* Fixed read-only diagnostic ID. Include IDE and RTR in the hardware mask
+     * so extended or remote frames do not reach the parser. */
+    can_filter.filter_list_high = DIAG_CAN_REQUEST_ID << 5;
+    can_filter.filter_list_low = 0x0000;
+    can_filter.filter_mask_high = 0xFFE0;
+    can_filter.filter_mask_low = 0x0006;
+#else
     can_filter.filter_list_high = CAN_ID << 5;
     can_filter.filter_list_low = 0x0000;
     can_filter.filter_mask_high = 0xFFE0;
     can_filter.filter_mask_low = 0x0000;  
+#endif
     can_filter.filter_fifo_number = CAN_FIFO0;
     can_filter.filter_number = 0;
     can_filter.filter_mode = CAN_FILTERMODE_MASK;
@@ -249,12 +263,17 @@ void can_rx_init(can_receive_message_struct *msg)
 void can_tx_init(can_trasnmit_message_struct *msg)
 {
   can_struct_para_init(CAN_TX_MESSAGE_STRUCT, msg);
-  
+
+#ifdef SAFE_BRINGUP
+  msg->tx_sfid = DIAG_CAN_RESPONSE_ID;
+  msg->tx_dlen = 8U;
+#else
   msg->tx_sfid = CAN_MASTER;
+  msg->tx_dlen = 6U;
+#endif
   msg->tx_efid = 0U;
   msg->tx_ft = CAN_FT_DATA;
   msg->tx_ff = CAN_FF_STANDARD;
-  msg->tx_dlen = 6U;
 }
 
 /// CAN Reply Packet Structure ///

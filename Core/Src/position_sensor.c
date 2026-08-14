@@ -10,14 +10,81 @@
 #include "math_ops.h"
 #include "hw_config.h"
 #include "user_config.h"
+#include "safety.h"
+#include "as5047_protocol.h"
 
-#define PARD_BIT		0x8000
-#define READ_BIT		0x4000
-#define READ_NOP		(0x0000 | READ_BIT | PARD_BIT)
-#define READ_DIAAGC		(0x3FFC | READ_BIT | PARD_BIT)
-#define READ_MAG		(0x3FFD | READ_BIT)
-#define READ_ANGLEUNC	(0x3FFE | READ_BIT)
-#define READ_ANGLECOM	(0x3FFF | READ_BIT | PARD_BIT)
+#define AS5047_REG_ERRFL	0x0001
+#define AS5047_REG_DIAAGC	0x3FFC
+#define AS5047_REG_MAG		0x3FFD
+#define AS5047_REG_ANGLECOM	0x3FFF
+#define AS5047_MAX_SAMPLE_DELTA 512
+
+#ifndef STM32F446
+static int as5047_exchange(uint16_t command, uint16_t *response)
+{
+	int status;
+
+	SPI_SET_NSS_LOW(ENC_CS);
+	spi_chip_select_delay();
+	status = spi_transmit_receive(ENC_SPI, &command, response);
+	spi_chip_select_delay();
+	SPI_SET_NSS_HIGH(ENC_CS);
+	spi_chip_select_delay();
+
+	return status;
+}
+
+static int as5047_frame_valid(EncoderStruct *encoder, uint16_t frame)
+{
+	const int status = as5047_response_status(frame);
+	encoder->last_frame = frame;
+
+	if (status == -1) {
+		encoder->parity_error_count++;
+		return 0;
+	}
+
+	if (status == -2) {
+		encoder->sensor_error_count++;
+		return 0;
+	}
+
+	return 1;
+}
+
+static int as5047_read_register(EncoderStruct *encoder, uint16_t address,
+								uint16_t *value)
+{
+	uint16_t discard;
+	uint16_t response;
+	const uint16_t command = as5047_make_read_command(address);
+	const uint16_t angle_command = as5047_make_read_command(AS5047_REG_ANGLECOM);
+
+	/* AS5047 SPI is pipelined: the response belongs to the previous command. */
+	if (as5047_exchange(command, &discard) != SPI_TRANSFER_OK ||
+		as5047_exchange(angle_command, &response) != SPI_TRANSFER_OK) {
+		encoder->spi_timeout_count++;
+		safety_force_outputs_off(SAFETY_FAULT_SPI_TIMEOUT);
+		return -1;
+	}
+
+	if (!as5047_frame_valid(encoder, response)) {
+		return -2;
+	}
+
+	*value = response & AS5047_DATA_MASK;
+
+	/* One more angle command consumes the pending angle response and leaves the
+	 * pipeline primed for the normal one-transfer-per-sample path. */
+	if (as5047_exchange(angle_command, &discard) != SPI_TRANSFER_OK) {
+		encoder->spi_timeout_count++;
+		safety_force_outputs_off(SAFETY_FAULT_SPI_TIMEOUT);
+		return -1;
+	}
+
+	return 0;
+}
+#endif
 
 void ps_warmup(EncoderStruct * encoder, int n){
 #ifdef STM32F446
@@ -30,79 +97,73 @@ void ps_warmup(EncoderStruct * encoder, int n){
 		HAL_GPIO_WritePin(ENC_CS, GPIO_PIN_SET ); 	// CS high
 	}
 #else
+	const uint16_t angle_command = as5047_make_read_command(AS5047_REG_ANGLECOM);
 
-	for (int i = 0; i < n; i++)
-	{
-		encoder->spi_tx_word = READ_ANGLECOM;
+	encoder->valid = 0U;
+	encoder->diagnostics_valid = 0U;
+	encoder->consecutive_errors = 0U;
+	uint32_t consecutive_good = 0U;
 
-		SPI_SET_NSS_LOW(ENC_CS);
+	for (int i = 0; i < n; i++) {
+		uint16_t response;
+		if (as5047_exchange(angle_command, &response) != SPI_TRANSFER_OK) {
+			encoder->spi_timeout_count++;
+			encoder->consecutive_errors++;
+			encoder->valid = 0U;
+			consecutive_good = 0U;
+			safety_force_outputs_off(SAFETY_FAULT_SPI_TIMEOUT);
+			continue;
+		}
 
-		spi_transmit_receive(ENC_SPI, &encoder->spi_tx_word, &encoder->spi_rx_word);
-
-		SPI_SET_NSS_HIGH(ENC_CS);
-
-#ifdef DEBUG_PS
-		uint16_t raw = encoder->spi_rx_word & 0x3FFF;
-		info("ANGLECOM: raw: %04x angle: %d\r\n", raw, (int)(360.0f * raw / 0x3FFF));
-		delay_1ms(200);
-#endif
+		/* The first response is for the command that preceded warm-up. */
+		if (i > 0 && as5047_frame_valid(encoder, response)) {
+			encoder->raw14 = response & AS5047_DATA_MASK;
+			encoder->valid = 1U;
+			encoder->consecutive_errors = 0U;
+			consecutive_good++;
+		} else if (i > 0) {
+			encoder->valid = 0U;
+			consecutive_good = 0U;
+		}
+	}
+	if (consecutive_good < 32U) {
+		encoder->valid = 0U;
+		safety_force_outputs_off(SAFETY_FAULT_ENCODER);
 	}
 
-#ifdef DEBUG_PS
+	encoder->diagnostics_valid = (ps_read_diagnostics(encoder) == 0) ? 1U : 0U;
 
-	encoder->spi_tx_word = READ_DIAAGC;
-
-	SPI_SET_NSS_LOW(ENC_CS);
-
-	spi_transmit_receive(ENC_SPI, &encoder->spi_tx_word, &encoder->spi_rx_word);
-
-	SPI_SET_NSS_HIGH(ENC_CS);
-
-	info("DIAAGC: %04x\r\n", encoder->spi_rx_word);
-
-	encoder->spi_tx_word = READ_MAG;
-
-	SPI_SET_NSS_LOW(ENC_CS);
-
-	spi_transmit_receive(ENC_SPI, &encoder->spi_tx_word, &encoder->spi_rx_word);
-
-	SPI_SET_NSS_HIGH(ENC_CS);
-
-	info("MAG: %04x\r\n", encoder->spi_rx_word);
-
-	encoder->spi_tx_word = READ_ANGLEUNC;
-
-	SPI_SET_NSS_LOW(ENC_CS);
-
-	spi_transmit_receive(ENC_SPI, &encoder->spi_tx_word, &encoder->spi_rx_word);
-
-	SPI_SET_NSS_HIGH(ENC_CS);
-
-	info("ANGLEUNC: %04x\r\n", encoder->spi_rx_word);
-
-	encoder->spi_tx_word = READ_ANGLECOM;
-
-	SPI_SET_NSS_LOW(ENC_CS);
-
-	spi_transmit_receive(ENC_SPI, &encoder->spi_tx_word, &encoder->spi_rx_word);
-
-	SPI_SET_NSS_HIGH(ENC_CS);
-
-	info("ANGLECOM: %04x\r\n", encoder->spi_rx_word);
 #endif
+}
 
+int ps_read_diagnostics(EncoderStruct *encoder)
+{
+#ifdef STM32F446
+	(void)encoder;
+	return -1;
+#else
+	uint16_t diaagc;
+	uint16_t magnitude;
+	uint16_t error_flags;
+
+	if (as5047_read_register(encoder, AS5047_REG_DIAAGC, &diaagc) != 0 ||
+		as5047_read_register(encoder, AS5047_REG_MAG, &magnitude) != 0 ||
+		as5047_read_register(encoder, AS5047_REG_ERRFL, &error_flags) != 0) {
+		encoder->diagnostics_valid = 0U;
+		return -1;
+	}
+
+	encoder->diaagc = diaagc;
+	encoder->magnitude = magnitude;
+	encoder->error_flags = error_flags;
+	encoder->diagnostics_valid = 1U;
+	return 0;
 #endif
 }
 
 void ps_sample(EncoderStruct * encoder, float dt){
 	/* updates EncoderStruct encoder with the latest sample
 	 * after elapsed time dt */
-
-	/* Shift around previous samples */
-	encoder->old_angle = encoder->angle_singleturn;
-	for(int i = N_POS_SAMPLES-1; i>0; i--){encoder->angle_multiturn[i] = encoder->angle_multiturn[i-1];}
-	//for(int i = N_POS_SAMPLES-1; i>0; i--){encoder->count_buff[i] = encoder->count_buff[i-1];}
-	//memmove(&encoder->angle_multiturn[1], &encoder->angle_multiturn[0], (N_POS_SAMPLES-1)*sizeof(float)); // this is much slower for some reason
 
 	/* SPI read/write */
 #ifdef STM32F446
@@ -113,16 +174,60 @@ void ps_sample(EncoderStruct * encoder, float dt){
 	HAL_GPIO_WritePin(ENC_CS, GPIO_PIN_SET ); 	// CS high
 	encoder->raw = encoder ->spi_rx_word;
 #else
-	encoder->spi_tx_word = READ_ANGLECOM;
+	const uint16_t angle_command = as5047_make_read_command(AS5047_REG_ANGLECOM);
+	uint16_t response;
+	encoder->sample_count++;
 
-	SPI_SET_NSS_LOW(ENC_CS);
+	if (as5047_exchange(angle_command, &response) != SPI_TRANSFER_OK) {
+		encoder->spi_timeout_count++;
+		encoder->invalid_count++;
+		encoder->consecutive_errors++;
+		encoder->valid = 0U;
+		safety_force_outputs_off(SAFETY_FAULT_SPI_TIMEOUT);
+		return;
+	}
 
-	spi_transmit_receive(ENC_SPI, &encoder->spi_tx_word, &encoder->spi_rx_word);
+	if (!as5047_frame_valid(encoder, response)) {
+		encoder->invalid_count++;
+		encoder->consecutive_errors++;
+		encoder->valid = 0U;
+		if (encoder->consecutive_errors >= 3U) {
+			safety_force_outputs_off(SAFETY_FAULT_ENCODER);
+		}
+		return;
+	}
 
-	SPI_SET_NSS_HIGH(ENC_CS);
+	const uint16_t raw14 = response & AS5047_DATA_MASK;
+	if (encoder->valid_count > 0U) {
+		const int delta = as5047_wrapped_delta(raw14, encoder->last_raw14);
 
-	encoder->raw = (encoder->spi_rx_word & 0x3FFF) << 2;
+		if (delta > AS5047_MAX_SAMPLE_DELTA || delta < -AS5047_MAX_SAMPLE_DELTA) {
+			encoder->jump_error_count++;
+			encoder->invalid_count++;
+			encoder->consecutive_errors++;
+			encoder->valid = 0U;
+			if (encoder->consecutive_errors >= 3U) {
+				safety_force_outputs_off(SAFETY_FAULT_ENCODER);
+			}
+			return;
+		}
+
+		if (raw14 == encoder->last_raw14) {
+			encoder->unchanged_count++;
+		}
+	}
+
+	encoder->raw14 = raw14;
+	encoder->last_raw14 = raw14;
+	encoder->raw = raw14 << 2;
+	encoder->valid = 1U;
+	encoder->valid_count++;
+	encoder->consecutive_errors = 0U;
 #endif
+
+	/* Shift previous position samples only after accepting a valid frame. */
+	encoder->old_angle = encoder->angle_singleturn;
+	for(int i = N_POS_SAMPLES-1; i>0; i--){encoder->angle_multiturn[i] = encoder->angle_multiturn[i-1];}
 
 	/* Linearization */
 	int off_1 = encoder->offset_lut[(encoder->raw)>>9];				// lookup table lower entry
@@ -192,7 +297,11 @@ void ps_print(EncoderStruct * encoder, int loop_count){
 	printf("  Single Turn:% 4.3f", encoder->angle_singleturn);
 	printf("  Multi Turn:% 5.3f", encoder->angle_multiturn[0]);
 	printf("  Electrical:% 5.3f", encoder->elec_angle);
-	printf("  Turns:% 2d\r\n", encoder->turns);
+	printf("  Turns:% 2d", encoder->turns);
+	printf("  Valid:%u", encoder->valid);
+	printf("  SPI:%lu", (unsigned long)encoder->spi_timeout_count);
+	printf("  Parity:%lu", (unsigned long)encoder->parity_error_count);
+	printf("  EF:%lu\r\n", (unsigned long)encoder->sensor_error_count);
 
 	ps_print_mark = loop_count;
 }

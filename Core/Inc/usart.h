@@ -47,6 +47,7 @@ int __io_putchar(int ch);
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart);
 /* USER CODE END Prototypes */
 #else
+extern volatile uint32_t uart_tx_timeout_count;
 void MX_USART1_Init(void);
 #endif
 
@@ -55,4 +56,3 @@ void MX_USART1_Init(void);
 #endif
 
 #endif /* __USART_H__ */
-

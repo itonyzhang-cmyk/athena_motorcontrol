@@ -12,6 +12,22 @@
 #include "math_ops.h"
 #include "hw_config.h"
 #include "user_config.h"
+#include "safety.h"
+
+#ifndef STM32F446
+#define ADC_EOIC_POLL_LIMIT 2048U
+
+static int adc_wait_for_eoic(uint32_t adc_periph)
+{
+	uint32_t remaining = ADC_EOIC_POLL_LIMIT;
+	while (RESET == adc_flag_get(adc_periph, ADC_FLAG_EOIC)) {
+		if (remaining-- == 0U) {
+			return -1;
+		}
+	}
+	return 0;
+}
+#endif
 
 void set_dtc(ControllerStruct *controller){
 
@@ -91,8 +107,15 @@ void analog_sample (ControllerStruct *controller){
     adc_software_trigger_enable(ADC_CH_MAIN, ADC_INSERTED_CHANNEL);
     adc_software_trigger_enable(ADC_CH_VBUS, ADC_INSERTED_CHANNEL);
 
-    while(!(SET == adc_flag_get(ADC_CH_MAIN, ADC_FLAG_EOIC)));
-    while(!(SET == adc_flag_get(ADC_CH_VBUS, ADC_FLAG_EOIC)));
+    if (adc_wait_for_eoic(ADC_CH_MAIN) != 0 ||
+        adc_wait_for_eoic(ADC_CH_VBUS) != 0) {
+        adc_flag_clear(ADC_CH_MAIN, ADC_FLAG_EOIC);
+        adc_flag_clear(ADC_CH_VBUS, ADC_FLAG_EOIC);
+        controller->adc_valid = 0U;
+        controller->adc_timeout_count++;
+        safety_force_outputs_off(SAFETY_FAULT_ADC_TIMEOUT);
+        return;
+    }
 
     adc_flag_clear(ADC_CH_MAIN, ADC_FLAG_EOIC);
     adc_flag_clear(ADC_CH_VBUS, ADC_FLAG_EOIC);
@@ -104,6 +127,8 @@ void analog_sample (ControllerStruct *controller){
     controller->i_b = controller->i_scale * (float)(controller->adc_b_raw - controller->adc_b_offset);
     controller->i_c = controller->i_scale * (float)(controller->adc_c_raw - controller->adc_c_offset);
     controller->i_a = -controller->i_b - controller->i_c;
+    controller->adc_valid = 1U;
+    controller->adc_sample_count++;
 #endif
 
 }
