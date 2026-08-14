@@ -17,6 +17,88 @@
 #include "math_ops.h"
 #include "position_sensor.h"
 #include "drv8323.h"
+#include "safety.h"
+
+#ifdef SAFE_BRINGUP
+
+void run_fsm(FSMStruct *fsmstate)
+{
+	safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+
+	if (fsmstate->next_state != MENU_MODE &&
+	    fsmstate->next_state != ENCODER_MODE) {
+		fsmstate->next_state = MENU_MODE;
+	}
+
+	if (fsmstate->state == INIT_TEMP_MODE) {
+		fsmstate->state = MENU_MODE;
+		fsmstate->next_state = MENU_MODE;
+		fsmstate->ready = 1U;
+		enter_menu_state();
+	} else if (fsmstate->next_state != fsmstate->state) {
+		fsm_exit_state(fsmstate);
+		fsmstate->state = fsmstate->next_state;
+		fsm_enter_state(fsmstate);
+	}
+
+	if (fsmstate->state == ENCODER_MODE) {
+		ps_print(&comm_encoder, controller.loop_count);
+	}
+}
+
+void update_fsm(FSMStruct *fsmstate, char fsm_input)
+{
+	safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+
+	if (fsm_input == ESC_CMD) {
+		fsmstate->next_state = MENU_MODE;
+	} else if (fsmstate->state == MENU_MODE && fsm_input == ENCODER_CMD) {
+		fsmstate->next_state = ENCODER_MODE;
+	}
+}
+
+void fsm_enter_state(FSMStruct *fsmstate)
+{
+	safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+	fsmstate->ready = 1U;
+	if (fsmstate->state == MENU_MODE) {
+		enter_menu_state();
+	}
+}
+
+void fsm_exit_state(FSMStruct *fsmstate)
+{
+	safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+	fsmstate->ready = 1U;
+}
+
+void enter_menu_state(void)
+{
+	printf("\r\n SAFE_BRINGUP commands:\r\n");
+	printf(" e   - Display encoder (read-only)\r\n");
+	printf(" esc - Exit to safe menu\r\n");
+	printf(" Motor, calibration, setup, zero and Flash writes are disabled.\r\n");
+}
+
+void enter_setup_state(void)
+{
+	printf("\r\n Setup is disabled by SAFE_BRINGUP.\r\n");
+}
+
+void process_user_input(FSMStruct *fsmstate)
+{
+	safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+	fsmstate->bytecount = 0;
+	fsmstate->cmd_id = 0;
+	memset(fsmstate->cmd_buff, 0, sizeof(fsmstate->cmd_buff));
+}
+
+void enter_motor_mode(void)
+{
+	safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+}
+
+#else
 
  void run_fsm(FSMStruct * fsmstate){
 	 /* run_fsm is run every commutation interrupt cycle */
@@ -363,3 +445,4 @@
 
  }
 
+#endif /* SAFE_BRINGUP */

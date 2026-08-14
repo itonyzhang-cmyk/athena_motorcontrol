@@ -428,7 +428,7 @@ void MX_ADC01_Init(void)
   adc_regular_channel_config(ADC1, 0U, ADC_CHANNEL_5, ADC_SAMPLETIME_1POINT5);
   adc_regular_channel_config(ADC1, 1U, ADC_CHANNEL_14, ADC_SAMPLETIME_1POINT5);
   adc_regular_channel_config(ADC1, 2U, ADC_CHANNEL_4, ADC_SAMPLETIME_1POINT5);
-  adc_regular_channel_config(ADC0, 3U, ADC_CHANNEL_12, ADC_SAMPLETIME_1POINT5);
+  adc_regular_channel_config(ADC1, 3U, ADC_CHANNEL_12, ADC_SAMPLETIME_1POINT5);
 
   adc_external_trigger_source_config(ADC0, ADC_REGULAR_CHANNEL, ADC0_1_2_EXTTRIG_REGULAR_NONE);
   adc_external_trigger_config(ADC0, ADC_REGULAR_CHANNEL, ENABLE);

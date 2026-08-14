@@ -207,7 +207,11 @@ void MX_TIM0_Init(void)
 
     /* Channel output */
     timer_channel_output_struct_para_init(&timer_ocintpara);
+#ifdef SAFE_BRINGUP
+    timer_ocintpara.outputstate  = TIMER_CCX_DISABLE;
+#else
     timer_ocintpara.outputstate  = TIMER_CCX_ENABLE;
+#endif
     timer_ocintpara.outputnstate = TIMER_CCXN_DISABLE;
     timer_ocintpara.ocpolarity   = TIMER_OC_POLARITY_LOW;
     timer_ocintpara.ocnpolarity  = TIMER_OCN_POLARITY_HIGH;
@@ -244,7 +248,11 @@ void MX_TIM0_Init(void)
     
     timer_break_config(TIMER0, &timer_breakpara);
 
-    timer_primary_output_config(TIMER0,ENABLE);
+#ifdef SAFE_BRINGUP
+    timer_primary_output_config(TIMER0, DISABLE);
+#else
+    timer_primary_output_config(TIMER0, ENABLE);
+#endif
     
     timer_interrupt_enable(TIMER0, TIMER_INT_UP);
     timer_enable(TIMER0);

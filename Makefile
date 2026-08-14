@@ -15,6 +15,10 @@
 ######################################
 TARGET = motorcontrol
 
+# Safe by default. Set SAFE_BRINGUP=0 only after the Phase-0 hardware and safety
+# gates in docs/PROJECT_PLAN.md have passed and the resulting diff is reviewed.
+SAFE_BRINGUP ?= 1
+
 
 ######################################
 # building variables
@@ -39,6 +43,7 @@ BUILD_DIR = build
 # C sources
 C_SOURCES =  \
 Core/Src/main.c \
+Core/Src/safety.c \
 Core/Src/gpio.c \
 Core/Src/adc.c \
 Core/Src/can.c \
@@ -130,6 +135,10 @@ AS_DEFS =
 # C defines
 C_DEFS =  \
 -DGD32F30X_HD
+
+ifeq ($(SAFE_BRINGUP), 1)
+C_DEFS += -DSAFE_BRINGUP=1
+endif
 
 
 # AS includes

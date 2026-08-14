@@ -6,15 +6,16 @@
 **
 **  Author		: STM32CubeMX
 **
-**  Abstract    : Linker script for STM32F446RETx series
-**                512Kbytes FLASH and 128Kbytes RAM
+**  Abstract    : Linker script for the GD32F303RET6 CyberDog controller
+**                512 Kbytes FLASH and 64 Kbytes RAM. The application is
+**                intentionally limited below the reserved configuration pages.
 **
 **                Set heap size, stack size and stack location according
 **                to application requirements.
 **
 **                Set memory bank area and size if external memory is used.
 **
-**  Target      : STMicroelectronics STM32
+**  Target      : GigaDevice GD32F303RET6
 **
 **  Distribution: The file is distributed “as is,” without any warranty
 **                of any kind.
@@ -61,8 +62,9 @@ _Min_Stack_Size = 0x400; /* required amount of stack */
 /* Specify the memory areas */
 MEMORY
 {
-RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 64K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 512K
+RAM (xrw)       : ORIGIN = 0x20000000, LENGTH = 64K
+FLASH (rx)      : ORIGIN = 0x08000000, LENGTH = 240K
+CONFIG (r)      : ORIGIN = 0x0803C000, LENGTH = 4K
 }
 
 /* Define output sections */
@@ -184,6 +186,11 @@ SECTIONS
   }
 
   .ARM.attributes 0 : { *(.ARM.attributes) }
-}
 
+  __flash_image_end__ = LOADADDR(.data) + SIZEOF(.data);
+  __config_start__ = ORIGIN(CONFIG);
+  __config_end__ = ORIGIN(CONFIG) + LENGTH(CONFIG);
+  ASSERT(__flash_image_end__ <= __config_start__,
+         "firmware image overlaps reserved configuration pages")
+}
 

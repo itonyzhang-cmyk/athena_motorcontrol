@@ -57,6 +57,7 @@
 #include "foc.h"
 #include "math_ops.h"
 #include "calibration.h"
+#include "safety.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -183,6 +184,9 @@ int main(void)
   MX_ADC01_Init();
   MX_ADC2_Init();
   MX_EXTI_Init();
+#ifdef SAFE_BRINGUP
+  safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+#endif
 #endif
   /* USER CODE BEGIN 2 */
 
@@ -191,6 +195,9 @@ int main(void)
   info(">> Athean Motor Controller <<\r\n");
   info(">> Version: %d.%d.%d <<\r\n",
       VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
+#ifdef SAFE_BRINGUP
+  info(">> SAFE_BRINGUP: gate drive, motion, calibration and flash writes are disabled <<\r\n");
+#endif
 
   /* Load settings from flash */
   preference_writer_init(&prefs, 6);
@@ -332,7 +339,11 @@ int main(void)
   /* USER CODE END 3 */
 #else
 
+#ifdef SAFE_BRINGUP
+  safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+#else
   drv_init_config(drv);
+#endif
 
 #ifdef DEBUG_ADC
   info("ADC OFFSET  B: %d  C: %d\r\n",
@@ -354,16 +365,20 @@ int main(void)
   state.next_state = MENU_MODE;
   state.ready = 1;
 
+#ifndef SAFE_BRINGUP
   uint32_t loop_count = 0;
+#endif
   FlagStatus status = RESET;
 
   while (1)
   {
     delay_1ms(1000);
+#ifndef SAFE_BRINGUP
     loop_count += 1;
 
     if (drv.fault != 0)
       drv_print_faults(drv, loop_count);
+#endif
 
     if (status == RESET && state.state != MOTOR_MODE) {
       gpio_bit_reset(GPIOC, GPIO_PIN_13);
@@ -492,7 +507,10 @@ void MX_RCU_Init(void)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+  safety_force_outputs_off(SAFETY_FAULT_ERROR_HANDLER);
+
+  while (1) {
+  }
 
   /* USER CODE END Error_Handler_Debug */
 }

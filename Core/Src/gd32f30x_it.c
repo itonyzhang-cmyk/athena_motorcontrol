@@ -50,6 +50,7 @@ OF SUCH DAMAGE.
 #include "position_sensor.h"
 #include "hw_config.h"
 #include "user_config.h"
+#include "safety.h"
 
 
 /*!
@@ -70,6 +71,7 @@ void NMI_Handler(void)
 */
 void HardFault_Handler(void)
 {
+    safety_force_outputs_off(SAFETY_FAULT_HARDFAULT);
     /* if Hard Fault exception occurs, go to infinite loop */
     while (1){
     }
@@ -83,6 +85,7 @@ void HardFault_Handler(void)
 */
 void MemManage_Handler(void)
 {
+    safety_force_outputs_off(SAFETY_FAULT_MEMMANAGE);
     /* if Memory Manage exception occurs, go to infinite loop */
     while (1){
     }
@@ -96,6 +99,7 @@ void MemManage_Handler(void)
 */
 void BusFault_Handler(void)
 {
+    safety_force_outputs_off(SAFETY_FAULT_BUSFAULT);
     /* if Bus Fault exception occurs, go to infinite loop */
     while (1){
     }
@@ -109,6 +113,7 @@ void BusFault_Handler(void)
 */
 void UsageFault_Handler(void)
 {
+    safety_force_outputs_off(SAFETY_FAULT_USAGEFAULT);
     /* if Usage Fault exception occurs, go to infinite loop */
     while (1){
     }
@@ -159,6 +164,11 @@ void SysTick_Handler(void)
 void USBD_LP_CAN0_RX0_IRQHandler(void)
 {
     can_message_receive(CAN0, CAN_FIFO0, &can_rx);
+
+#ifdef SAFE_BRINGUP
+    safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+    return;
+#endif
 
 #ifdef DEBUG_CAN
     debug("sid: 0x%04lx eid: 0x%08lx format: %u type: %u length: %u\r\n",
@@ -244,20 +254,18 @@ void EXTI10_15_IRQHandler(void)
 {
     exti_interrupt_flag_clear(EXTI_12);
 
-    if (RESET == exti_interrupt_flag_get(EXTI_12)) {
-        // DRV8323 fault
-        drv.fsr1 = drv_read_FSR1(drv);
-        drv.fsr2 = drv_read_FSR2(drv);
-        drv.fault = (drv.fsr1 >> 10) & 1;
-        if (drv.fault) {
-            debug("Fault FSR1: %04x FSR2: %04x\r\n", drv.fsr1, drv.fsr2);
-        }
-    } else {
-        // DRV8323 recovery, clear fault bit
-        drv_clear_fault(drv);
-        drv.fault = 0;
-        debug("Recovery\r\n");
+    /* nFAULT is active-low. Shut down before attempting SPI or logging, and
+     * latch the fault. Recovery will require an explicit, validated command in
+     * a later phase. */
+    if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+        safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
+        drv.fault = 1U;
+        return;
     }
+
+#ifdef SAFE_BRINGUP
+    safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+#endif
 }
 
 void USART1_IRQHandler(void)

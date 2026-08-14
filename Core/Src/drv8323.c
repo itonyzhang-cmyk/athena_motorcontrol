@@ -11,6 +11,7 @@
 #include "structs.h"
 #include "hw_config.h"
 #include "user_config.h"
+#include "safety.h"
 
 uint16_t drv_spi_write(DRVStruct * drv, uint16_t val){
 #ifdef STM32F446
@@ -67,8 +68,13 @@ void drv_write_CSACR(DRVStruct drv, int CSA_FET, int VREF_DIV, int LS_REF, int C
 	drv_spi_write(&drv, val);
 }
 void drv_enable_gd(DRVStruct drv){
+#ifdef SAFE_BRINGUP
+	(void)drv;
+	safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+#else
 	uint16_t val = (drv_read_register(drv, DCR)) & (~(0x1<<2));
 	drv_write_register(drv, DCR, val);
+#endif
 }
 void drv_disable_gd(DRVStruct drv){
 	uint16_t val = (drv_read_register(drv, DCR)) | (0x1<<2);
@@ -117,6 +123,12 @@ void drv_init_config(DRVStruct drv)
 {
 	/* DRV8323 setup */
 
+#ifdef SAFE_BRINGUP
+	(void)drv;
+	safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+	return;
+#else
+
 	// Up to 40A use 40X amplifier gain
 	// From 40-60A use 20X amplifier gain.  (Make this generic in the future)
 	int CSA_GAIN = I_MAX <= 40.0f ? CSA_GAIN_40 : CSA_GAIN_20;
@@ -142,6 +154,7 @@ void drv_init_config(DRVStruct drv)
 
 	// all MOSFETs in the Hi-Z state, disable output
 	drv_disable_gd(drv);
+#endif
 }
 
 void drv_clear_fault(DRVStruct drv)
