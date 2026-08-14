@@ -49,7 +49,7 @@ this MIT repository. Use hardware facts as evidence and write our own code.
 
 ### P0 — Baseline, hardware truth, and fail-safe behavior
 
-- [ ] Add the user's GitHub fork as the writable remote without replacing the
+- [x] Add the user's GitHub fork as the writable remote without replacing the
   read-only upstream relationship.
 - [ ] Install/pin an Arm GNU embedded toolchain and document its version.
 - [x] Produce a reproducible SAFE_BRINGUP ELF/HEX/BIN and record hashes.

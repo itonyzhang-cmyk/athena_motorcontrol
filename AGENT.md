@@ -20,9 +20,11 @@ factory firmware.
 - Active branch: `cyberdog-safe-bringup`
 - Baseline commit: `4c443e6aa1341babeb4229dadb221d366d2ce639`
 - Baseline commit message: `port to gd32f303, support cyberdog motor`
-- Configured remote at start of work: `https://github.com/zbwu/athena_motorcontrol.git`
-- User has created a personal GitHub fork, but its URL has not yet been added as
-  a local remote.
+- Read-only upstream remote `origin`:
+  `https://github.com/zbwu/athena_motorcontrol.git`
+- User fork remote `fork`:
+  `https://github.com/itonyzhang-cmyk/athena_motorcontrol.git`
+- Initial safe baseline implementation commit: `803da04`
 - User-owned pre-existing modification: `STM32F446RETX_FLASH.ld`. Do not revert,
   overwrite, stage, or commit it unless explicitly requested. It is not the
   GD32 link script selected by the current Makefile.
@@ -183,3 +185,5 @@ Do not record secrets, access tokens, or private credentials here.
 - Updated `_sbrk()` for current Newlib and verified both safe and unsafe profiles
   compile.
 - Performed no controller connection, erase or flash operation.
+- Committed the implementation locally as `803da04`; it has not yet been pushed
+  to the user's fork.
