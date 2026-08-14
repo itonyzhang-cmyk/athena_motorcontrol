@@ -25,6 +25,7 @@ factory firmware.
 - User fork remote `fork`:
   `https://github.com/itonyzhang-cmyk/athena_motorcontrol.git`
 - Initial safe baseline implementation commit: `803da04`
+- First-flash read-only diagnostic implementation commit: `ccf6522`
 - User-owned pre-existing modification: `STM32F446RETX_FLASH.ld`. Do not revert,
   overwrite, stage, or commit it unless explicitly requested. It is not the
   GD32 link script selected by the current Makefile.
@@ -74,32 +75,44 @@ factory firmware.
   warning from the inherited linker layout; this remains to be cleaned up.
 - Two independent output directories produced byte-identical ELF/HEX/BIN files.
 
-Safe build command used:
+Current first-flash safe build command:
 
 ```sh
 make BUILD_DIR=/tmp/athena-safe-build \
   GCC_PATH=/tmp/arm-gnu-toolchain-15.3-root/bin -j4
 ```
 
+Outputs are always profile-isolated under
+`/tmp/athena-safe-build/safe/`. An unsafe build made with
+`SAFE_BRINGUP=0` goes under `/tmp/athena-safe-build/unsafe/` and cannot share
+objects with the safe image. The safe ELF is first linked as `.unverified` and
+only renamed to `.elf` after `tools/verify_safe_image.sh` passes; HEX/BIN are
+then generated from that verified ELF.
+
 Safe build result:
 
 - Toolchain: Arm GNU Toolchain 15.3.rel1 / GCC 15.3.1
-- text: 27,248 bytes
+- Source commit: `ccf6522`
+- text: 28,912 bytes
 - data: 468 bytes
-- bss: 16,836 bytes
-- ELF SHA-256: `ed930acba21385bfef601ef750effc72f06d078098b93c7cac9f586e5985990f`
-- HEX SHA-256: `f05e1ba423a9914baa905d3ed59dd90c1e4eee9900f5a7309851789d34701b63`
-- BIN SHA-256: `5120e67615d98a96591c0db2b1f6fc4d58e8612c5be3f87013f32c2ffd4f201b`
-- Flash image end: `0x08006C44`
+- bss: 16,972 bytes
+- ELF SHA-256: `821c411e927787d249b875883ef8f37e214a35e114e2cd34b826d3bcd9afe44e`
+- HEX SHA-256: `4468e3d53148958f74e21c8da13cdafcdb50e8b35db882b8d5e3f2a5913bea06`
+- BIN SHA-256: `9824e0587281bd6bcf6b1915c764c46d30a1843b24d4ee488ea1b308513c1e82`
+- Flash image end: `0x080072C4`
 - Reserved configuration range: `0x0803C000..0x0803CFFF`
-- Symbol audit found `safety_force_outputs_off()` and found none of the
-  dangerous write/drive symbols (`fmc_page_erase`, `fmc_word_program`,
-  `preference_writer_flush`, `drv_enable_gd`, `torque_control`, `commutate`, or
-  calibration routines) in the linked safe image.
+- Two fresh output roots produced byte-identical ELF/HEX/BIN files.
+- Host tests cover ATHENA-DIAG request CRC/bit corruption/response layout and
+  AS5047 read-command parity, response parity/EF, and angle wraparound.
+- Symbol audit found `safety_force_outputs_off()` and the read-only diagnostic
+  handler, and found no Flash/option-byte write, preference load/write,
+  gate-enable, PWM duty, FOC, legacy FSM/MIT unpack, or calibration symbols.
+- Persistent reviewed artifacts are under
+  `/Users/choqy/workspace/xiaomi_dog/artifacts/athena_safe_diagnostic_ccf6522/`.
 - `SAFE_BRINGUP=0` also compiles, but that image is explicitly unsafe and was
   produced only as a compile-regression check. It must not be flashed.
 
-### Open P0 Questions
+### Open hardware gates before any energized PWM
 
 - Confirm the GD32 linker memory map against the exact controller marking. The
   `MEMORY` block uses 512 KiB Flash/64 KiB SRAM and agrees with the DGM Keil
@@ -108,8 +121,8 @@ Safe build result:
 - Verify shunt resistance, DRV8323 CSA gain, ADC reference, and bus divider
   before trusting `I_SCALE` or `V_SCALE`.
 - Verify encoder model, SPI mode, parity/error-bit handling, and magnetic status.
-- Audit default gate-enable behavior and make the diagnostic build incapable of
-  enabling PWM, including from UART/CAN commands.
+- Confirm with a meter/scope that the board-level reset interval also holds
+  PA11 low before firmware GPIO initialization.
 
 ## Milestones and Gates
 
@@ -188,3 +201,33 @@ Do not record secrets, access tokens, or private credentials here.
 - Committed the implementation as `803da04`; handoff documentation followed in
   `8968b03`. Branch `cyberdog-safe-bringup` was pushed to the user's `fork`
   remote without changing its default branch.
+
+### 2026-08-14 — First-flash SAFE_DIAGNOSTIC image
+
+- Added bounded TBE/RBNE/BUSY SPI transfers and explicit AS5047 chip-select
+  timing; implemented the AS5047 one-frame pipeline, command/response parity,
+  EF rejection, ERRFL/DIAAGC/MAG startup reads, angle-jump rejection, and
+  validity/error counters.
+- Added bounded ADC inserted-conversion and startup-calibration waits. ADC or
+  SPI failure latches a fault while independently keeping PA11/PWM off.
+- Safe TIMER0 ISR reinforces hard shutdown at 30 kHz and performs passive ADC
+  and encoder sampling at 1 kHz.
+- Added ATHENA-DIAG/1 read-only CAN on standard request `0x701`/response
+  `0x781`, exact DATA/DLC8/CRC validation, response limiting, and raw snapshot
+  counters. Legacy MIT/Xiaomi frames cannot enter a state machine.
+- Made UART TX-only at 115200 8N1 and added 1 Hz raw safety/encoder/ADC reports;
+  no ISR performs `printf`.
+- Safe startup no longer reads or interprets legacy Flash preferences. Existing
+  configuration pages remain reserved and unchanged.
+- Added build-profile isolation and release gating: safe/unsafe objects cannot
+  mix, and no final safe ELF/HEX/BIN is published until symbol/config-range
+  audit passes.
+- Independent final safety review found zero software P0 blockers for the
+  read-only image. This approval does not extend to gate enable, PWM, motor
+  motion, or `SAFE_BRINGUP=0`.
+- Host tests, two clean reproducible builds, unsafe-then-safe contamination
+  regression, and automated image audit passed. No hardware was connected,
+  erased, or flashed.
+- `fanmyu/dgm-xiaomi` was not re-fetched during this step; its previously
+  recorded pin cross-check remains supporting evidence, while the official
+  AS5047P data sheet was treated as the protocol authority.

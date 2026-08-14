@@ -76,10 +76,10 @@ this MIT repository. Use hardware facts as evidence and write our own code.
 
 ### P1 — Passive diagnostics and controlled motor bring-up
 
-- [ ] Add UART diagnostics for firmware ID, reset reason, clock frequencies,
-  gate state, DRV registers/faults, encoder raw/diagnostics, ADC raw values,
-  converted voltage/current/temperature, Hall channels, and CAN counters.
-- [ ] Add a read-only CAN diagnostic/heartbeat frame separate from motor enable.
+- [x] Add UART diagnostics for safe-profile identity, gate/PWM state,
+  encoder raw/diagnostics, ADC raw values, Hall channels, and CAN state. Reset
+  reason and fully verified physical scaling remain follow-up work.
+- [x] Add a read-only CAN diagnostic protocol separate from motor enable.
 - [ ] Validate the diagnostic image on one controller with no motor motion.
 - [ ] Verify timer PWM on a scope while DRV gate output remains disabled.
 - [ ] Verify current-sense zero offsets and noise with PWM disabled.
