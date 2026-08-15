@@ -266,3 +266,22 @@ Do not record secrets, access tokens, or private credentials here.
   then run read-only `preflight` and the two-read current-state backup. Connect
   UC12 only after the safe image has been programmed, verified, and explicitly
   booted.
+
+### 2026-08-15 — `独板` read-only SWD connection attempt
+
+- Test target label: `独板`; controller board only, no motor connected.
+- The controller was externally powered without the planned current-limited
+  bench supply. No main-Flash or Option Bytes write was authorized or issued.
+- Sandboxed USB access initially made the ST-LINK appear unavailable. A direct
+  system-level read confirmed ST-LINK V2J37S7, serial
+  `E1007200D0D2139393740544`.
+- OpenOCD consistently measured target voltage at approximately 3.193 V, so
+  ST-LINK USB, VTref, and common ground are present.
+- Normal SWD at 100 kHz, reduced-speed SWD at 10 kHz, and connect-under-reset
+  at 10 kHz all failed before target identification with `unable to connect to
+  the target`. No chip ID, Flash, or Option Bytes were read.
+- The established seven-pin orientation is pin 1 VTref, pin 3 SWCLK, pin 4
+  SWDIO, pin 5 NRST candidate, and pin 7 GND. The next action is power-off
+  inspection/continuity of pins 3 and 4 and verification that the ST-LINK-end
+  SWCLK/SWDIO labels were not crossed. Do not proceed to backup or programming
+  until a read-only preflight identifies the Cortex-M4 and 512 KiB Flash.
