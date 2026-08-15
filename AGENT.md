@@ -316,3 +316,16 @@ Do not record secrets, access tokens, or private credentials here.
 - This entire operation was read-only. No main Flash or Option Bytes erase or
   program command was issued. The original firmware was reset to run after
   each read, and no motor was connected.
+
+### 2026-08-16 — per-board UID identification
+
+- Read the factory-programmed 96-bit device UID from `0x1FFFF7E8..0x1FFFF7F3`
+  over SWD without modifying the target. `独板` is registered as
+  `39305137-14303434-47456052`, formatted as
+  `UID[95:64]-UID[63:32]-UID[31:0]`.
+- Added the read-only `tools/athena_safe_flash.sh identify` action. Preflight
+  and future backup metadata now also capture the UID automatically.
+- The local board registry is
+  `/Users/choqy/workspace/xiaomi_dog/backups/BOARD_REGISTRY.md`. The earlier
+  2026-08-12 board cannot be assigned a UID from its main-Flash backup alone;
+  reconnect it once to register it.

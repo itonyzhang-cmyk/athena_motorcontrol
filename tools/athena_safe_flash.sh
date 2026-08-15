@@ -26,6 +26,9 @@ CONFIG_BASE=0x0803C000
 CONFIG_SIZE=4096
 OPTION_BASE=0x1FFFF800
 OPTION_SIZE=16
+UID0_ADDR=0x1FFFF7E8
+UID1_ADDR=0x1FFFF7EC
+UID2_ADDR=0x1FFFF7F0
 EXPECTED_OPTION_SHA256="c0b942fbb9fe967ec0e7b675e080d48c930fc5fe3fde70f6dd6f9646fdffc0d3"
 EXPECTED_DEBUG_WORD="17010414"
 
@@ -40,6 +43,7 @@ TEMP_DIR=""
 usage() {
     cat <<'EOF'
 Usage:
+  tools/athena_safe_flash.sh identify
   tools/athena_safe_flash.sh preflight
   tools/athena_safe_flash.sh self-test
   tools/athena_safe_flash.sh backup [--output DIR]
@@ -127,7 +131,7 @@ probe_and_read_options() {
     local commands target_voltage
 
     check_path_for_tcl "${option_file}"
-    commands="init; reset halt; echo [format {DBG_WORD=0x%08X} [mrw 0xE0042000]]; echo [format {FLASH_SIZE=0x%04X} [mrh 0x1FFFF7E0]]; echo [format {OBSTAT=0x%08X} [mrw 0x4002201C]]; echo [format {WP=0x%08X} [mrw 0x40022020]]; dump_image {${option_file}} ${OPTION_BASE} ${OPTION_SIZE}; reset run; shutdown"
+    commands="init; reset halt; echo [format {DBG_WORD=0x%08X} [mrw 0xE0042000]]; echo [format {FLASH_SIZE=0x%04X} [mrh 0x1FFFF7E0]]; echo [format {UID0=0x%08X} [mrw ${UID0_ADDR}]]; echo [format {UID1=0x%08X} [mrw ${UID1_ADDR}]]; echo [format {UID2=0x%08X} [mrw ${UID2_ADDR}]]; echo [format {OBSTAT=0x%08X} [mrw 0x4002201C]]; echo [format {WP=0x%08X} [mrw 0x40022020]]; dump_image {${option_file}} ${OPTION_BASE} ${OPTION_SIZE}; reset run; shutdown"
     openocd_capture "${log_file}" "${commands}"
 
     target_voltage="$(sed -n 's/.*Target voltage:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' "${log_file}" | head -1)"
@@ -138,10 +142,41 @@ probe_and_read_options() {
         fail "unexpected debug/device word; see ${log_file}"
     grep -Eiq "FLASH_SIZE=0x0200" "${log_file}" ||
         fail "target does not report 512 KiB Flash; see ${log_file}"
+    uid_from_log "${log_file}" >/dev/null
     [[ "$(file_size "${option_file}")" == "${OPTION_SIZE}" ]] ||
         fail "Option Bytes read returned the wrong length"
     [[ "$(sha256_file "${option_file}")" == "${EXPECTED_OPTION_SHA256}" ]] ||
         fail "Option Bytes differ from the verified unprotected baseline"
+}
+
+uid_from_log() {
+    local log_file="$1"
+    local uid0 uid1 uid2
+    uid0="$(sed -n 's/.*UID0=0x\([[:xdigit:]]\{8\}\).*/\1/p' "${log_file}" | head -1)"
+    uid1="$(sed -n 's/.*UID1=0x\([[:xdigit:]]\{8\}\).*/\1/p' "${log_file}" | head -1)"
+    uid2="$(sed -n 's/.*UID2=0x\([[:xdigit:]]\{8\}\).*/\1/p' "${log_file}" | head -1)"
+    [[ -n "${uid0}" && -n "${uid1}" && -n "${uid2}" ]] ||
+        fail "target did not return a complete 96-bit UID; see ${log_file}"
+    printf '%s-%s-%s\n' \
+        "$(printf '%s' "${uid2}" | tr '[:lower:]' '[:upper:]')" \
+        "$(printf '%s' "${uid1}" | tr '[:lower:]' '[:upper:]')" \
+        "$(printf '%s' "${uid0}" | tr '[:lower:]' '[:upper:]')"
+}
+
+identify() {
+    local log_file target_voltage uid
+    make_temp_dir
+    log_file="${TEMP_DIR}/openocd_identify.log"
+    openocd_capture "${log_file}" \
+        "init; reset halt; echo [format {DBG_WORD=0x%08X} [mrw 0xE0042000]]; echo [format {FLASH_SIZE=0x%04X} [mrh 0x1FFFF7E0]]; echo [format {UID0=0x%08X} [mrw ${UID0_ADDR}]]; echo [format {UID1=0x%08X} [mrw ${UID1_ADDR}]]; echo [format {UID2=0x%08X} [mrw ${UID2_ADDR}]]; reset run; shutdown"
+    target_voltage="$(sed -n 's/.*Target voltage:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' "${log_file}" | head -1)"
+    [[ -n "${target_voltage}" ]] || fail "OpenOCD did not report target voltage"
+    grep -Eiq "DBG_WORD=0x${EXPECTED_DEBUG_WORD}" "${log_file}" ||
+        fail "unexpected debug/device word; see ${log_file}"
+    grep -Eiq "FLASH_SIZE=0x0200" "${log_file}" ||
+        fail "target does not report 512 KiB Flash; see ${log_file}"
+    uid="$(uid_from_log "${log_file}")"
+    printf 'UID=%s\nTARGET_VOLTAGE=%s V\n' "${uid}" "${target_voltage}"
 }
 
 make_temp_dir() {
@@ -150,9 +185,11 @@ make_temp_dir() {
 }
 
 preflight() {
+    local uid
     make_temp_dir
     probe_and_read_options "${TEMP_DIR}" preflight
-    printf 'PASS: ST-LINK target, 512 KiB Flash, and Option Bytes match the recorded baseline.\n'
+    uid="$(uid_from_log "${TEMP_DIR}/openocd_preflight.log")"
+    printf 'PASS: UID=%s; ST-LINK target, 512 KiB Flash, and Option Bytes match the recorded baseline.\n' "${uid}"
 }
 
 self_test() {
@@ -172,7 +209,7 @@ self_test() {
 }
 
 backup_current() {
-    local timestamp first second option log1 log2
+    local timestamp first second option log1 log2 uid
     timestamp="$(date '+%Y%m%d_%H%M%S_%Z')"
     if [[ -z "${OUTPUT_DIR}" ]]; then
         OUTPUT_DIR="${WORKSPACE_DIR}/backups/gd32f303ret6_preflash_${timestamp}"
@@ -200,12 +237,14 @@ backup_current() {
     cmp -s "${first}" "${second}" || fail "the two current-state Flash reads differ"
 
     option="${OUTPUT_DIR}/option_bytes_preflight.bin"
+    uid="$(uid_from_log "${OUTPUT_DIR}/openocd_preflight.log")"
     {
         printf '# GD32F303RET6 pre-flash current-state backup\n\n'
         printf -- '- Created: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
         printf -- '- Operation: SWD read-only; no erase/program/unprotect/Option Bytes write\n'
         printf -- '- Flash: two independent 512 KiB reads, byte-identical\n'
         printf -- '- Option Bytes: 16-byte read, matched verified baseline\n'
+        printf -- '- Device UID: `%s` (UID[95:64]..UID[31:0])\n' "${uid}"
         printf -- '- OpenOCD interface: `%s`\n' "${OPENOCD_INTERFACE}"
         printf -- '- OpenOCD target: `%s`\n' "${OPENOCD_TARGET}"
         printf -- '- Adapter speed: %s kHz\n' "${OPENOCD_SPEED_KHZ}"
@@ -330,6 +369,7 @@ done
 
 case "${ACTION}" in
     self-test) self_test ;;
+    identify) identify ;;
     preflight) preflight ;;
     backup) backup_current ;;
     flash-safe) flash_safe ;;
