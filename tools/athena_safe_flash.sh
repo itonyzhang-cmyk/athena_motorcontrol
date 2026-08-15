@@ -10,6 +10,7 @@ OPENOCD_BIN="${OPENOCD_BIN:-openocd}"
 OPENOCD_INTERFACE="${OPENOCD_INTERFACE:-interface/stlink.cfg}"
 OPENOCD_TARGET="${OPENOCD_TARGET:-target/stm32f1x.cfg}"
 OPENOCD_SPEED_KHZ="${OPENOCD_SPEED_KHZ:-100}"
+OPENOCD_CPUTAPID="${OPENOCD_CPUTAPID:-0x2ba01477}"
 
 SAFE_IMAGE_DEFAULT="${WORKSPACE_DIR}/artifacts/athena_safe_diagnostic_ccf6522/motorcontrol.bin"
 SAFE_IMAGE_SHA256="9824e0587281bd6bcf6b1915c764c46d30a1843b24d4ee488ea1b308513c1e82"
@@ -57,7 +58,8 @@ Safety properties:
     leaves the CPU halted.
 
 Environment overrides:
-  OPENOCD_BIN, OPENOCD_INTERFACE, OPENOCD_TARGET, OPENOCD_SPEED_KHZ
+  OPENOCD_BIN, OPENOCD_INTERFACE, OPENOCD_TARGET, OPENOCD_SPEED_KHZ,
+  OPENOCD_CPUTAPID
 EOF
 }
 
@@ -108,6 +110,7 @@ openocd_capture() {
     check_path_for_tcl "${log_file}"
     "${OPENOCD_BIN}" \
         -f "${OPENOCD_INTERFACE}" \
+        -c "set CPUTAPID ${OPENOCD_CPUTAPID}" \
         -f "${OPENOCD_TARGET}" \
         -c "adapter speed ${OPENOCD_SPEED_KHZ}; ${commands}" \
         >"${log_file}" 2>&1 || {
@@ -124,16 +127,16 @@ probe_and_read_options() {
     local commands target_voltage
 
     check_path_for_tcl "${option_file}"
-    commands="init; reset halt; mdw 0xE0042000 1; mdh 0x1FFFF7E0 1; mdw 0x4002201C 1; mdw 0x40022020 1; dump_image {${option_file}} ${OPTION_BASE} ${OPTION_SIZE}; reset run; shutdown"
+    commands="init; reset halt; echo [format {DBG_WORD=0x%08X} [mrw 0xE0042000]]; echo [format {FLASH_SIZE=0x%04X} [mrh 0x1FFFF7E0]]; echo [format {OBSTAT=0x%08X} [mrw 0x4002201C]]; echo [format {WP=0x%08X} [mrw 0x40022020]]; dump_image {${option_file}} ${OPTION_BASE} ${OPTION_SIZE}; reset run; shutdown"
     openocd_capture "${log_file}" "${commands}"
 
     target_voltage="$(sed -n 's/.*Target voltage:[[:space:]]*\([0-9][0-9.]*\).*/\1/p' "${log_file}" | head -1)"
     [[ -n "${target_voltage}" ]] || fail "OpenOCD did not report target voltage"
     awk -v voltage="${target_voltage}" 'BEGIN { exit !(voltage >= 3.0 && voltage <= 3.4) }' ||
         fail "target voltage ${target_voltage} V is outside the accepted 3.0..3.4 V range"
-    grep -Eiq "e0042000:.*${EXPECTED_DEBUG_WORD}" "${log_file}" ||
+    grep -Eiq "DBG_WORD=0x${EXPECTED_DEBUG_WORD}" "${log_file}" ||
         fail "unexpected debug/device word; see ${log_file}"
-    grep -Eiq "1ffff7e0:.*0200" "${log_file}" ||
+    grep -Eiq "FLASH_SIZE=0x0200" "${log_file}" ||
         fail "target does not report 512 KiB Flash; see ${log_file}"
     [[ "$(file_size "${option_file}")" == "${OPTION_SIZE}" ]] ||
         fail "Option Bytes read returned the wrong length"
@@ -207,7 +210,11 @@ backup_current() {
         printf -- '- OpenOCD target: `%s`\n' "${OPENOCD_TARGET}"
         printf -- '- Adapter speed: %s kHz\n' "${OPENOCD_SPEED_KHZ}"
     } >"${OUTPUT_DIR}/README.md"
-    shasum -a 256 "${first}" "${second}" "${option}" >"${OUTPUT_DIR}/SHA256SUMS"
+    (
+        cd "${OUTPUT_DIR}"
+        shasum -a 256 "$(basename "${first}")" "$(basename "${second}")" \
+            "$(basename "${option}")" >SHA256SUMS
+    )
     printf 'PASS: current-state backup created at %s\n' "${OUTPUT_DIR}"
 }
 

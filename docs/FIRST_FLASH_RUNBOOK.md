@@ -52,6 +52,8 @@ The hardware preflight requires:
 
 - target voltage between 3.0 and 3.4 V;
 - debug/device word `0x17010414`;
+- Cortex-M4 SWD DAP ID `0x2BA01477` (explicitly supplied to OpenOCD's
+  `stm32f1x` Flash-driver target template);
 - 512 KiB Flash-size word `0x0200`;
 - Option Bytes identical to the verified unprotected baseline.
 

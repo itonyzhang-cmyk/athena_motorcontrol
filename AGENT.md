@@ -285,3 +285,34 @@ Do not record secrets, access tokens, or private credentials here.
   inspection/continuity of pins 3 and 4 and verification that the ST-LINK-end
   SWCLK/SWDIO labels were not crossed. Do not proceed to backup or programming
   until a read-only preflight identifies the Cortex-M4 and 512 KiB Flash.
+
+### 2026-08-16 — `独板` verified backup and factory-image comparison
+
+- The prior failure was confirmed to be crossed/incorrect SWD wiring. After
+  correction, the target returned Cortex-M4 DAP ID `0x2BA01477`. The generic
+  OpenOCD `stm32f1x` target defaults to the Cortex-M3 ID, so the guarded tool
+  now explicitly supplies the GD32F303 M4 DAP ID before loading that target
+  template.
+- Updated the preflight register output to explicit machine-checked fields.
+  It passed at target voltage 3.193 V with CPU Cortex-M4 r0p1, debug/device
+  word `0x17010414`, Flash size `0x0200` KiB, `OBSTAT=0x03FFFFFC`, and
+  `WP=0xFFFFFFFF`.
+- Created the read-only board-specific backup at
+  `/Users/choqy/workspace/xiaomi_dog/backups/gd32f303ret6_duban_preflash_20260816_01/`.
+  Both independent 512 KiB reads are byte-identical with SHA-256
+  `0840735c361384f96f3674a6acf4d4833890388660fd459ce3586033f8eef981`.
+  Option Bytes match the earlier board byte-for-byte, SHA-256
+  `c0b942fbb9fe967ec0e7b675e080d48c930fc5fe3fde70f6dd6f9646fdffc0d3`.
+- `独板` and the 2026-08-12 factory backup are not full-image identical:
+  49,518 bytes differ across 37 physical pages. Their active motor application
+  range `0x08002000..0x08033FFF` is byte-identical (`0.2.4A`, Git
+  `7b844b0fM`, built 2021-03-23 09:39:01).
+- The active bootloaders are both version `0.1.5` but have different build
+  dates. `独板` carries an older `0.2.3` fallback application at `0x08034000`,
+  while the earlier board carries `0.2.4A`. Board-specific encoder/Hall
+  calibration data also differs at `0x0807D000..0x0807E5C9`.
+- Recovery must use each board's own full backup. The detailed comparison is
+  stored beside the `独板` binaries as `COMPARISON_WITH_FACTORY_20260812.md`.
+- This entire operation was read-only. No main Flash or Option Bytes erase or
+  program command was issued. The original firmware was reset to run after
+  each read, and no motor was connected.
