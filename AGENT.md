@@ -339,7 +339,8 @@ Do not record secrets, access tokens, or private credentials here.
   the small residual risk that a config error could cause a brief current
   event before the supply folds back, bounded by the 0.2 A bench limit and the
   firmware watchdog.
-- New build profile `BRINGUP_INJECT=1` (commit `e44465e`):
+- New build profile `BRINGUP_INJECT=1` (introduced `e44465e`, finalized
+  `89b6629`):
   - Default state is passive: PA11 low, all PWM compares at the all-low
     position, no current path.
   - DRV8323 configured with PA11 low: 3x PWM, COAST clear (PA11 is the only
@@ -368,7 +369,7 @@ Do not record secrets, access tokens, or private credentials here.
   - Inject image: 31,940 bytes, SHA-256
     `98cac3d5bb76601b82214e349a5dba63b41218910b3a052168f207037d9f6de2`,
     image end `0x08007CC4`, stored under
-    `/Users/choqy/workspace/xiaomi_dog/artifacts/athena_inject_bringup_e44465e/`.
+    `/Users/choqy/workspace/xiaomi_dog/artifacts/athena_inject_bringup_89b6629/`.
   - Host protocol tests, UC12 self-test, flash-tool self-test, and inject
     symbol audit all pass.
 - Bench procedure: `docs/INJECT_BRINGUP_RUNBOOK.md`. Hardware state at the end

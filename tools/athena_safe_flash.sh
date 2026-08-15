@@ -18,7 +18,7 @@ SAFE_IMAGE_SIZE=29380
 SAFE_IMAGE_BASE=0x08000000
 SAFE_ERASE_SIZE=0x7800
 
-INJECT_IMAGE_DEFAULT="${WORKSPACE_DIR}/artifacts/athena_inject_bringup_e44465e/motorcontrol.bin"
+INJECT_IMAGE_DEFAULT="${WORKSPACE_DIR}/artifacts/athena_inject_bringup_89b6629/motorcontrol.bin"
 INJECT_IMAGE_SHA256="98cac3d5bb76601b82214e349a5dba63b41218910b3a052168f207037d9f6de2"
 INJECT_IMAGE_SIZE=31940
 INJECT_IMAGE_BASE=0x08000000
@@ -57,7 +57,7 @@ Usage:
       --confirm-safe-sha 9824e058... --i-understand-this-writes-main-flash
   tools/athena_safe_flash.sh boot-safe [--image FILE]
   tools/athena_safe_flash.sh flash-inject \
-      --confirm-inject-sha 4540248e... --i-understand-this-writes-main-flash
+      --confirm-inject-sha 98cac3d5... --i-understand-this-writes-main-flash
   tools/athena_safe_flash.sh boot-inject
   tools/athena_safe_flash.sh restore-factory \
       --confirm-factory-sha 302f25ed... --i-understand-this-writes-main-flash

@@ -7,14 +7,14 @@ motor control.
 
 ## Fixed inputs
 
-- Image: `../artifacts/athena_inject_bringup_e44465e/motorcontrol.bin`
+- Image: `../artifacts/athena_inject_bringup_89b6629/motorcontrol.bin`
 - Base address: `0x08000000`
 - Size: 31,940 bytes
 - SHA-256:
   `98cac3d5bb76601b82214e349a5dba63b41218910b3a052168f207037d9f6de2`
 - Erase range: `0x08000000..0x08007FFF` (16 aligned 2 KiB pages)
 - Reserved configuration range: `0x0803C000..0x0803CFFF`
-- Source commit: `e44465e`
+- Source commit: `89b6629`
 
 ## Bench setup
 
