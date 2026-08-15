@@ -80,6 +80,10 @@ this MIT repository. Use hardware facts as evidence and write our own code.
   encoder raw/diagnostics, ADC raw values, Hall channels, and CAN state. Reset
   reason and fully verified physical scaling remain follow-up work.
 - [x] Add a read-only CAN diagnostic protocol separate from motor enable.
+- [x] Add a hash-locked ST-LINK/OpenOCD backup, safe-flash, readback, and
+  factory-recovery tool that never writes Option Bytes.
+- [x] Add a UC12 client that can only issue ATHENA-DIAG read requests and export
+  passive-test data to CSV.
 - [ ] Validate the diagnostic image on one controller with no motor motion.
 - [ ] Verify timer PWM on a scope while DRV gate output remains disabled.
 - [ ] Verify current-sense zero offsets and noise with PWM disabled.

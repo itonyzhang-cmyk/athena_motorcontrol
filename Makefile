@@ -206,10 +206,14 @@ host-test:
 		-o /tmp/athena_diag_protocol_test
 	/tmp/athena_diag_protocol_test
 
+host-tools-test:
+	$(MAKE) -C tools/athena_diag_uc12 test
+	bash tools/athena_safe_flash.sh self-test
+
 verify-safe: $(OUTPUT_DIR)/$(TARGET).elf
 	sh tools/verify_safe_image.sh $(NM) $<
 
-.PHONY: all host-test verify-safe clean
+.PHONY: all host-test host-tools-test verify-safe clean
 
 
 #######################################

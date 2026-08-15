@@ -231,3 +231,38 @@ Do not record secrets, access tokens, or private credentials here.
 - `fanmyu/dgm-xiaomi` was not re-fetched during this step; its previously
   recorded pin cross-check remains supporting evidence, while the official
   AS5047P data sheet was treated as the protocol authority.
+
+### 2026-08-15 — First-flash and UC12 passive-test tooling
+
+- Added `tools/athena_safe_flash.sh`, a release-specific ST-LINK/OpenOCD tool
+  for the reviewed SAFE_DIAGNOSTIC image. It verifies target voltage,
+  debug/device word, 512 KiB Flash size, exact Option Bytes, artifact size, and
+  SHA-256 before any write.
+- The tool creates two independent full-Flash reads before programming, erases
+  only `0x08000000..0x080077FF`, programs and reads back exactly 29,380 bytes,
+  checks the reserved `0x0803C000..0x0803CFFF` range before/after, and leaves
+  the CPU halted. Booting the safe image is a separate hash-checked action.
+- A separately gated factory-recovery action accepts only the recorded 512 KiB
+  factory image and never writes Option Bytes. It was implemented but not run;
+  its use still requires a separate explicit authorization.
+- Added `tools/athena_diag_uc12`, a direct libusb UC12 client restricted to
+  standard CAN request `0x701` and the four ATHENA-DIAG read opcodes. It offers
+  `ping`, `info`, `snapshot`, `watch`, and `export`, and has no arbitrary CAN,
+  MIT, enable, calibration, configuration, reset, or Flash command.
+- Snapshot/watch/export first require `ATHN` identity and a safe-state check:
+  SAFE must be set while PA11, TIMER0 primary output, and all three PWM-channel
+  enable bits remain clear. Raw responses and operator-entered supply
+  conditions can be recorded to CSV.
+- Added `docs/FIRST_FLASH_RUNBOOK.md` and the `host-tools-test` Make target.
+- Verification commands passed: `make host-test host-tools-test`, flash-tool
+  artifact/range self-test, warning-clean UC12 host build, safe firmware clean
+  rebuild, and `verify-safe` symbol/config-range audit.
+- The clean rebuild BIN was byte-identical to the reviewed release and retained
+  SHA-256 `9824e0587281bd6bcf6b1915c764c46d30a1843b24d4ee488ea1b308513c1e82`.
+- Hardware attempts stopped safely: macOS did not enumerate ST-LINK or UC12;
+  OpenOCD returned `open failed`, and the UC12 client returned device-not-found.
+  No controller was read, halted, erased, programmed, reset, or booted.
+- Next safe action: connect ST-LINK to USB, power the fixed/unloaded controller,
+  then run read-only `preflight` and the two-read current-state backup. Connect
+  UC12 only after the safe image has been programmed, verified, and explicitly
+  booted.
