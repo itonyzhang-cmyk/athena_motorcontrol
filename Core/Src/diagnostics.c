@@ -13,6 +13,9 @@
 #include "systick.h"
 #include "tim.h"
 #include "usart.h"
+#ifdef BRINGUP_INJECT
+#include "inject.h"
+#endif
 
 DiagnosticCounters diagnostic_counters;
 
@@ -32,7 +35,15 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
         switch (request->page) {
         case 0U: return 0x4E485441U; /* "ATHN" little-endian */
         case 1U: return (1U << 16);  /* diagnostic ABI 1.0 */
+#ifdef BRINGUP_INJECT
+        case 2U: return 0x0001000FU; /* safe, gate-off, no flash, UART TX-only, inject */
+        case 5U: return (1U << 24) |
+                       ((uint32_t)DIAG_INJECT_DURATION_TABLE_SIZE << 16) |
+                       ((uint32_t)DIAG_INJECT_DUTY_TABLE_SIZE << 8) |
+                       (uint32_t)DIAG_INJECT_VECTOR_COUNT;
+#else
         case 2U: return 0x0000000FU; /* safe, gate-off, no flash, UART TX-only */
+#endif
         case 3U: return 0xA7E0D101U; /* stable safe-bring-up fingerprint */
         case 4U: return DIAG_NODE_ID | (1000U << 8); /* node + kbit/s */
         default: break;
@@ -88,6 +99,16 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
                          ((TIMER_CH1CV(TIMER0) & 0xFFFFU) << 16);
         case 19U: return (TIMER_CH2CV(TIMER0) & 0xFFFFU) |
                          ((TIMER_CAR(TIMER0) & 0xFFFFU) << 16);
+#ifdef BRINGUP_INJECT
+        case 20U: /* fallthrough to shared handler */
+        case 21U:
+        case 22U:
+        case 23U:
+        case 24U:
+        case 25U:
+        case 26U:
+            return inject_snapshot(request->page, status);
+#endif
         default: break;
         }
         break;

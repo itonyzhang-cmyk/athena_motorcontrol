@@ -28,6 +28,20 @@
 #define OPCODE_INFO 0x01U
 #define OPCODE_SNAPSHOT 0x02U
 #define OPCODE_COUNTER 0x03U
+#define OPCODE_INJECT 0x04U
+#define OPCODE_STOP 0x05U
+
+/* Must match the BRINGUP_INJECT firmware tables exactly. */
+static const double inject_duty_percent[] = {
+    0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0
+};
+static const double inject_duration_ms[] = {10.0, 20.0, 30.0, 40.0, 50.0};
+#define INJECT_VECTOR_COUNT 6U
+#define INJECT_RESULT_OK 1U
+#define INJECT_RESULT_ABORTED 2U
+#define INJECT_RESULT_TIMEOUT 3U
+#define INJECT_RESULT_FAULT 4U
+#define INJECT_RESULT_CURRENT_LIMIT 5U
 
 static volatile sig_atomic_t keep_running = 1;
 
@@ -36,6 +50,7 @@ struct options {
     unsigned timeout_ms;
     unsigned interval_ms;
     unsigned seconds;
+    int confirm_inject;
     const char *csv_path;
     double supply_volts;
     double current_limit_amps;
@@ -74,6 +89,9 @@ static const uint8_t snapshot_pages[] = {
 };
 
 static const uint8_t counter_pages[] = {9, 10, 11, 12, 13};
+
+static const uint8_t inject_result_pages[] = {20, 21, 22, 23};
+static const uint8_t drv_pages[] = {24, 25, 26};
 
 static void print_response(const struct response *response);
 
@@ -147,6 +165,20 @@ static void build_request(uint8_t opcode, uint8_t sequence, uint8_t page,
     data[4] = sequence;
     data[5] = page;
     data[6] = 0U;
+    data[7] = crc8_atm(data, 7U);
+}
+
+static void build_inject_request(uint8_t opcode, uint8_t sequence,
+                                 uint8_t vector, uint8_t duty_idx,
+                                 uint8_t duration_idx, uint8_t data[8])
+{
+    data[0] = 0xA5U;
+    data[1] = 0x5AU;
+    data[2] = DIAG_PROTOCOL_MAJOR;
+    data[3] = opcode;
+    data[4] = sequence;
+    data[5] = vector;
+    data[6] = (uint8_t)((duration_idx << 4) | (duty_idx & 0x0FU));
     data[7] = crc8_atm(data, 7U);
 }
 
@@ -330,15 +362,13 @@ static int read_record(struct client *client,
     return 0;
 }
 
-static int query(struct client *client, uint8_t opcode, uint8_t page,
-                 struct response *response)
+static int query_raw(struct client *client, const uint8_t request[8],
+                     uint8_t opcode, uint8_t page, struct response *response)
 {
-    uint8_t request[8];
     uint8_t record[UC12_RECORD_SIZE];
-    uint8_t sequence = ++client->sequence;
+    uint8_t sequence = request[4];
     uint64_t deadline = monotonic_ms() + client->options.timeout_ms;
 
-    build_request(opcode, sequence, page, request);
     if (transmit_request(client, request) != 0) return -1;
     while (keep_running && monotonic_ms() < deadline) {
         unsigned remaining = (unsigned)(deadline - monotonic_ms());
@@ -353,6 +383,15 @@ static int query(struct client *client, uint8_t opcode, uint8_t page,
     fprintf(stderr, "Timeout waiting for ATHENA-DIAG opcode=%u page=%u.\n",
             opcode, page);
     return -1;
+}
+
+static int query(struct client *client, uint8_t opcode, uint8_t page,
+                 struct response *response)
+{
+    uint8_t request[8];
+    uint8_t sequence = ++client->sequence;
+    build_request(opcode, sequence, page, request);
+    return query_raw(client, request, opcode, page, response);
 }
 
 static const char *status_name(uint8_t status)
@@ -384,6 +423,13 @@ static const char *snapshot_name(uint8_t page)
     case 17: return "loop_count";
     case 18: return "timer_ch0_ch1";
     case 19: return "timer_ch2_period";
+    case 20: return "inject_status";
+    case 21: return "inject_peak_currents";
+    case 22: return "inject_encoder_delta";
+    case 23: return "inject_ticks_faults";
+    case 24: return "drv_fsr1_fsr2";
+    case 25: return "drv_dcr_csacr";
+    case 26: return "drv_ocpcr";
     default: return "unknown_snapshot";
     }
 }
@@ -432,6 +478,37 @@ static int run_passive_safety_gate(struct client *client)
     if (response.status != 0U || !passive_flags_ok(response.payload)) {
         fprintf(stderr,
                 "Refusing continued diagnostics: PA11/TIMER0/PWM safe-state check failed.\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int run_inject_safety_gate(struct client *client)
+{
+    struct response response;
+    uint32_t flags;
+    if (query(client, OPCODE_SNAPSHOT, 3, &response) != 0) return -1;
+    print_response(&response);
+    if (response.status != 0U) {
+        fprintf(stderr, "Inject preflight failed: snapshot status %u.\n",
+                response.status);
+        return -1;
+    }
+    flags = response.payload;
+    if ((flags & (1U << 31)) == 0U) {
+        fprintf(stderr, "Inject preflight failed: not a BRINGUP_INJECT profile.\n");
+        return -1;
+    }
+    if ((flags & (1U << 1)) != 0U) {
+        fprintf(stderr, "Inject preflight failed: PA11 is high.\n");
+        return -1;
+    }
+    if ((flags & 1U) != 0U) {
+        fprintf(stderr, "Inject preflight failed: nFAULT is asserted.\n");
+        return -1;
+    }
+    if ((flags & (1U << 3)) == 0U || (flags & (1U << 4)) == 0U) {
+        fprintf(stderr, "Inject preflight failed: encoder or ADC not valid.\n");
         return -1;
     }
     return 0;
@@ -491,6 +568,122 @@ static int run_snapshot(struct client *client)
                   sizeof(snapshot_pages)) != 0) return -1;
     return run_pages(client, OPCODE_COUNTER, counter_pages,
                      sizeof(counter_pages));
+}
+
+static int find_table_entry(double value, const double *table, size_t count,
+                            size_t *index)
+{
+    size_t i;
+    for (i = 0; i < count; ++i) {
+        if (fabs(value - table[i]) < 1e-9) {
+            *index = i;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static const char *inject_result_name(uint32_t result)
+{
+    switch (result) {
+    case 0: return "NONE";
+    case INJECT_RESULT_OK: return "OK";
+    case INJECT_RESULT_ABORTED: return "ABORTED";
+    case INJECT_RESULT_TIMEOUT: return "TIMEOUT";
+    case INJECT_RESULT_FAULT: return "FAULT";
+    case INJECT_RESULT_CURRENT_LIMIT: return "CURRENT_LIMIT";
+    default: return "INVALID";
+    }
+}
+
+static int run_inject(struct client *client, unsigned vector, double duty,
+                      unsigned duration)
+{
+    struct response response;
+    size_t duty_idx;
+    size_t duration_idx;
+    uint8_t request[8];
+    uint8_t sequence;
+    uint32_t result;
+    uint64_t deadline;
+
+    if (vector >= INJECT_VECTOR_COUNT) {
+        fprintf(stderr, "Vector must be 0..%u.\n", INJECT_VECTOR_COUNT - 1U);
+        return -1;
+    }
+    if (find_table_entry(duty, inject_duty_percent,
+                         sizeof(inject_duty_percent) /
+                             sizeof(inject_duty_percent[0]),
+                         &duty_idx) != 0) {
+        fprintf(stderr, "Duty must be one of: 0.5 1.0 1.5 2.0 2.5 3.0 3.5 4.0 4.5 5.0 (percent).\n");
+        return -1;
+    }
+    if (find_table_entry((double)duration, inject_duration_ms,
+                         sizeof(inject_duration_ms) /
+                             sizeof(inject_duration_ms[0]),
+                         &duration_idx) != 0) {
+        fprintf(stderr, "Duration must be one of: 10 20 30 40 50 (ms).\n");
+        return -1;
+    }
+    if (!client->options.confirm_inject) {
+        fprintf(stderr,
+                "Refusing: pass --confirm-inject to enable the gated single-phase pulse.\n");
+        return -1;
+    }
+    if (run_inject_safety_gate(client) != 0) return -1;
+
+    sequence = ++client->sequence;
+    build_inject_request(OPCODE_INJECT, sequence, (uint8_t)vector,
+                         (uint8_t)duty_idx, (uint8_t)duration_idx, request);
+    printf("Inject vector=%u duty=%.1f%% duration=%ums\n", vector, duty, duration);
+    if (query_raw(client, request, OPCODE_INJECT, (uint8_t)vector,
+                  &response) != 0) {
+        return -1;
+    }
+    print_response(&response);
+    if (response.status != 0U) {
+        fprintf(stderr, "Inject refused by firmware (status %u).\n",
+                response.status);
+        return -1;
+    }
+
+    sleep_ms(duration + 250U);
+    deadline = monotonic_ms() + 3000U;
+    do {
+        if (query(client, OPCODE_SNAPSHOT, 20, &response) != 0) return -1;
+        print_response(&response);
+        if ((response.payload & 0xFU) != 1U) break; /* not ACTIVE */
+        sleep_ms(50U);
+    } while (monotonic_ms() < deadline);
+
+    if (run_pages(client, OPCODE_SNAPSHOT,
+                  inject_result_pages + 1,
+                  sizeof(inject_result_pages) - 1U) != 0) {
+        return -1;
+    }
+    result = (response.payload >> 4) & 0xFU;
+    printf("Inject result: %s\n", inject_result_name(result));
+    return result == INJECT_RESULT_OK ? 0 : -1;
+}
+
+static int run_stop(struct client *client)
+{
+    struct response response;
+    uint8_t request[8];
+    uint8_t sequence = ++client->sequence;
+
+    build_inject_request(OPCODE_STOP, sequence, 0U, 0U, 0U, request);
+    if (query_raw(client, request, OPCODE_STOP, 0U, &response) != 0) return -1;
+    print_response(&response);
+    if (response.status != 0U) return -1;
+    if (query(client, OPCODE_SNAPSHOT, 20, &response) != 0) return -1;
+    print_response(&response);
+    return 0;
+}
+
+static int run_drv(struct client *client)
+{
+    return run_pages(client, OPCODE_SNAPSHOT, drv_pages, sizeof(drv_pages));
 }
 
 static FILE *open_csv(const char *path)
@@ -596,6 +789,16 @@ static int self_test(void)
     build_request(OPCODE_COUNTER, 4, 0, request);
     if (memcmp(request, counter_expected, 8) != 0) return 1;
 
+    build_inject_request(OPCODE_INJECT, 5, 0, 0, 0, request);
+    if (request[3] != OPCODE_INJECT || request[5] != 0U ||
+        request[6] != 0U || crc8_atm(request, 7) != request[7]) return 1;
+    build_inject_request(OPCODE_INJECT, 6, 5, 9, 4, request);
+    if (request[5] != 5U || request[6] != 0x49U ||
+        crc8_atm(request, 7) != request[7]) return 1;
+    build_inject_request(OPCODE_STOP, 7, 0, 0, 0, request);
+    if (request[3] != OPCODE_STOP || request[5] != 0U ||
+        request[6] != 0U || crc8_atm(request, 7) != request[7]) return 1;
+
     record[6] = 8;
     write_le32(record + 7, DIAG_RESPONSE_ID << 5);
     record[11] = OPCODE_SNAPSHOT | 0x80U;
@@ -614,7 +817,17 @@ static int self_test(void)
     record[6] = 7;
     if (parse_response_record(record, 0, OPCODE_SNAPSHOT, 3, 3, &response)) return 1;
 
-    puts("PASS: ATHENA-DIAG golden requests, strict standard/DLC8 response filtering, and response decoding.");
+    record[6] = 8;
+    write_le32(record + 7, DIAG_RESPONSE_ID << 5);
+    record[11] = OPCODE_INJECT | 0x80U;
+    record[12] = 5;
+    record[13] = 0;
+    record[14] = 0;
+    write_le32(record + 15, 0x00000000U);
+    if (!parse_response_record(record, 0, OPCODE_INJECT, 5, 0, &response) ||
+        response.payload != 0U) return 1;
+
+    puts("PASS: ATHENA-DIAG golden requests, INJECT/STOP encoding, strict standard/DLC8 response filtering, and response decoding.");
     return 0;
 }
 
@@ -623,6 +836,7 @@ static void usage(const char *program)
     fprintf(stderr,
             "Usage: %s [OPTIONS] COMMAND\n"
             "Commands: ping, info, snapshot, watch, export\n"
+            "          inject VECTOR DUTY_PCT DURATION_MS, stop, drv\n"
             "Options:\n"
             "  --channel 0|1              UC12 CAN channel (default 0)\n"
             "  --timeout-ms N             response timeout (default 1000)\n"
@@ -631,6 +845,7 @@ static void usage(const char *program)
             "  --csv FILE                 narrow raw response CSV\n"
             "  --supply-volts V           operator-entered value recorded in CSV\n"
             "  --current-limit-amps A     operator-entered value recorded in CSV\n"
+            "  --confirm-inject           required to arm the gated injection pulse\n"
             "  --self-test                offline tests; does not open USB\n",
             program);
 }
@@ -665,6 +880,7 @@ int main(int argc, char **argv)
         {"csv", required_argument, NULL, 'o'},
         {"supply-volts", required_argument, NULL, 'v'},
         {"current-limit-amps", required_argument, NULL, 'a'},
+        {"confirm-inject", no_argument, NULL, 'j'},
         {"self-test", no_argument, NULL, 'T'},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0}
@@ -674,12 +890,16 @@ int main(int argc, char **argv)
     int option;
     int result = 1;
     int do_self_test = 0;
+    unsigned inject_vector = 0;
+    double inject_duty = 0.0;
+    unsigned inject_duration = 0;
+    int have_inject_args = 0;
 
     memset(&client, 0, sizeof(client));
     client.options.timeout_ms = 1000;
     client.options.interval_ms = 25;
     client.options.seconds = 600;
-    while ((option = getopt_long(argc, argv, "c:t:i:s:o:v:a:Th",
+    while ((option = getopt_long(argc, argv, "c:t:i:s:o:v:a:jTh",
                                  long_options, NULL)) != -1) {
         switch (option) {
         case 'c':
@@ -717,22 +937,38 @@ int main(int argc, char **argv)
                 client.options.current_limit_amps <= 0.0) return 2;
             client.options.have_current_limit = 1;
             break;
+        case 'j': client.options.confirm_inject = 1; break;
         case 'T': do_self_test = 1; break;
         case 'h': usage(argv[0]); return 0;
         default: usage(argv[0]); return 2;
         }
     }
     if (do_self_test) return self_test();
-    if (optind + 1 != argc) {
+    if (optind + 1 != argc &&
+        !(optind + 4 == argc && !strcmp(argv[optind], "inject"))) {
         usage(argv[0]);
         return 2;
     }
     command = argv[optind];
     if (strcmp(command, "ping") && strcmp(command, "info") &&
         strcmp(command, "snapshot") && strcmp(command, "watch") &&
-        strcmp(command, "export")) {
+        strcmp(command, "export") && strcmp(command, "inject") &&
+        strcmp(command, "stop") && strcmp(command, "drv")) {
         usage(argv[0]);
         return 2;
+    }
+    if (!strcmp(command, "inject")) {
+        if (parse_unsigned(argv[optind + 1], &inject_vector) != 0 ||
+            inject_vector >= INJECT_VECTOR_COUNT) {
+            fprintf(stderr, "Invalid vector; use 0..%u.\n",
+                    INJECT_VECTOR_COUNT - 1U);
+            return 2;
+        }
+        if (parse_double_value(argv[optind + 2], &inject_duty) != 0 ||
+            !isfinite(inject_duty) || inject_duty <= 0.0) return 2;
+        if (parse_unsigned(argv[optind + 3], &inject_duration) != 0 ||
+            inject_duration == 0U) return 2;
+        have_inject_args = 1;
     }
 
     signal(SIGINT, on_signal);
@@ -754,6 +990,10 @@ int main(int argc, char **argv)
     else if (result == 0 && !strcmp(command, "snapshot")) result = run_snapshot(&client);
     else if (result == 0 && !strcmp(command, "watch")) result = run_watch(&client, 0);
     else if (result == 0 && !strcmp(command, "export")) result = run_watch(&client, 1);
+    else if (result == 0 && !strcmp(command, "inject") && have_inject_args)
+        result = run_inject(&client, inject_vector, inject_duty, inject_duration);
+    else if (result == 0 && !strcmp(command, "stop")) result = run_stop(&client);
+    else if (result == 0 && !strcmp(command, "drv")) result = run_drv(&client);
     close_client(&client);
     return result == 0 ? 0 : 1;
 }

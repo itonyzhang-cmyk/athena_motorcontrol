@@ -59,6 +59,9 @@
 #include "calibration.h"
 #include "safety.h"
 #include "diagnostics.h"
+#ifdef BRINGUP_INJECT
+#include "inject.h"
+#endif
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -185,7 +188,9 @@ int main(void)
   MX_ADC01_Init();
   MX_ADC2_Init();
   MX_EXTI_Init();
-#ifdef SAFE_BRINGUP
+#if defined(BRINGUP_INJECT)
+  inject_init();
+#elif defined(SAFE_BRINGUP)
   safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
 #endif
 #endif
@@ -196,12 +201,14 @@ int main(void)
   info(">> Athean Motor Controller <<\r\n");
   info(">> Version: %d.%d.%d <<\r\n",
       VERSION_MAJOR, VERSION_MINOR, VERSION_PATCH);
-#ifdef SAFE_BRINGUP
+#if defined(BRINGUP_INJECT)
+  info(">> BRINGUP_INJECT: passive by default; gated low-current phase injection via CAN <<\r\n");
+#elif defined(SAFE_BRINGUP)
   info(">> SAFE_DIAGNOSTIC: gate drive, motion, calibration and flash writes are disabled <<\r\n");
 #endif
 
   /* Load settings from flash */
-#ifdef SAFE_BRINGUP
+#if defined(SAFE_BRINGUP) || defined(BRINGUP_INJECT)
   /* Do not interpret legacy or corrupt configuration during the first-flash
    * diagnostic phase. The reserved pages are neither read nor written. */
   memset(__float_reg, 0, sizeof(__float_reg));
@@ -266,7 +273,7 @@ int main(void)
 #endif
   ps_warmup(&comm_encoder, 100);			// clear the noisy data when the encoder first turns on
 
-#ifdef SAFE_BRINGUP
+#if defined(SAFE_BRINGUP) || defined(BRINGUP_INJECT)
   /* A first-flash diagnostic image must not interpret an unknown legacy LUT as
    * calibration. Raw AS5047 data is still reported separately. */
   memset(&comm_encoder.offset_lut, 0, sizeof(comm_encoder.offset_lut));
@@ -362,7 +369,9 @@ int main(void)
   /* USER CODE END 3 */
 #else
 
-#ifdef SAFE_BRINGUP
+#if defined(BRINGUP_INJECT)
+  /* inject_init() configured the driver with PA11 low. */
+#elif defined(SAFE_BRINGUP)
   safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
 #else
   drv_init_config(drv);
@@ -381,7 +390,7 @@ int main(void)
   nvic_irq_enable(TIMER0_UP_IRQn, 0U, 0);
   nvic_irq_enable(EXTI10_15_IRQn, 0U, 1);
   nvic_irq_enable(USBD_LP_CAN0_RX0_IRQn, 0U, 2);
-#ifndef SAFE_BRINGUP
+#if !defined(SAFE_BRINGUP) && !defined(BRINGUP_INJECT)
   nvic_irq_enable(USART1_IRQn, 2U, 0);
 #endif
 
@@ -390,7 +399,7 @@ int main(void)
   state.next_state = MENU_MODE;
   state.ready = 1;
 
-#ifndef SAFE_BRINGUP
+#if !defined(SAFE_BRINGUP) && !defined(BRINGUP_INJECT)
   uint32_t loop_count = 0;
 #endif
   FlagStatus status = RESET;
@@ -398,7 +407,13 @@ int main(void)
   while (1)
   {
     delay_1ms(1000);
-#ifdef SAFE_BRINGUP
+#if defined(BRINGUP_INJECT)
+    adc_software_trigger_enable(ADC0, ADC_REGULAR_CHANNEL);
+    adc_software_trigger_enable(ADC2, ADC_REGULAR_CHANNEL);
+    delay_1ms(1U);
+    diagnostics_uart_report();
+    inject_uart_report();
+#elif defined(SAFE_BRINGUP)
     safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
     /* Refresh the low-rate DMA diagnostic channels. These conversions are
      * read-only and do not participate in motor control. */
@@ -406,8 +421,7 @@ int main(void)
     adc_software_trigger_enable(ADC2, ADC_REGULAR_CHANNEL);
     delay_1ms(1U);
     diagnostics_uart_report();
-#endif
-#ifndef SAFE_BRINGUP
+#else
     loop_count += 1;
 
     if (drv.fault != 0)

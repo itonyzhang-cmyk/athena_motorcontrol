@@ -1,9 +1,12 @@
 # ATHENA-DIAG UC12 client
 
-Restricted read-only host client for the first-flash `SAFE_DIAGNOSTIC`
-firmware. It owns the UC12 directly and only transmits valid standard CAN
-requests to `0x701`. It has no arbitrary CAN, MIT, enable, calibration,
-configuration, reset, or Flash-write interface.
+Restricted host client for the `SAFE_DIAGNOSTIC` and `BRINGUP_INJECT`
+firmware profiles. It owns the UC12 directly and only transmits valid standard
+CAN requests to `0x701`. With the `SAFE_DIAGNOSTIC` profile it has no MIT,
+enable, calibration, configuration, reset, or Flash-write interface. With the
+`BRINGUP_INJECT` profile it additionally exposes the gated single-phase
+injection pulse (`inject`), immediate shutdown (`stop`), and live DRV8323
+register readback (`drv`).
 
 Build and run the offline protocol checks:
 
@@ -33,3 +36,26 @@ and the operator-entered supply conditions.
 The most important output is snapshot page 3. A passive boot passes only when
 bit 31 (`SAFE`) is set and bits 1, 2, 8, 9, and 10 (PA11, TIMER0 primary output,
 and the three PWM channel enables) are all clear.
+
+## BRINGUP_INJECT commands
+
+The injection firmware boots passive (PA11 low, all PWM channels at the
+all-low position) and only opens the gate for a single validated pulse. Duty
+and duration are fixed tables that mirror the firmware limits: 0.5..5.0 %
+high-side duty and 10..50 ms. The vector selects one of six BLDC step
+patterns. An explicit `--confirm-inject` and a passing safety preflight are
+required before the pulse is armed:
+
+```sh
+tools/athena_diag_uc12/athena_diag_uc12 inject 0 0.5 10 --confirm-inject
+```
+
+After the pulse the tool waits and prints snapshot pages 20..23 (status,
+peak current ADC deviations, encoder raw start/end, active ticks, and latched
+faults). `stop` immediately aborts any active pulse and returns the driver to
+the passive state; `drv` prints the DRV8323 fault and configuration registers.
+
+These commands are bench bring-up tools, not a motor API. They are only valid
+against the `BRINGUP_INJECT` firmware and must never be used without the
+current-limited supply, an unloaded/fixed motor, and a reachable emergency
+stop.

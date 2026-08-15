@@ -19,8 +19,14 @@ HOST_CC ?= cc
 # Safe by default. Set SAFE_BRINGUP=0 only after the Phase-0 hardware and safety
 # gates in docs/PROJECT_PLAN.md have passed and the resulting diff is reviewed.
 SAFE_BRINGUP ?= 1
+# Low-current single-phase injection bring-up. Implies SAFE_BRINGUP=0 but adds
+# its own gated profile, banner, symbol audit and fixed limits.
+BRINGUP_INJECT ?= 0
 
-ifeq ($(SAFE_BRINGUP), 1)
+ifeq ($(BRINGUP_INJECT), 1)
+override SAFE_BRINGUP := 0
+override BUILD_PROFILE := inject
+else ifeq ($(SAFE_BRINGUP), 1)
 override BUILD_PROFILE := safe
 else
 override BUILD_PROFILE := unsafe
@@ -99,6 +105,10 @@ Firmware/GD32F30x_standard_peripheral/Source/gd32f30x_usart.c \
 Firmware/GD32F30x_standard_peripheral/Source/gd32f30x_wwdgt.c \
 Firmware/CMSIS/GD/GD32F30x/Source/system_gd32f30x.c
 
+ifeq ($(BRINGUP_INJECT), 1)
+C_SOURCES += Core/Src/inject.c
+endif
+
 # ASM sources
 ASM_SOURCES =  \
 startup_gd32f30x_hd.s
@@ -151,6 +161,9 @@ C_DEFS =  \
 ifeq ($(SAFE_BRINGUP), 1)
 C_DEFS += -DSAFE_BRINGUP=1
 endif
+ifeq ($(BRINGUP_INJECT), 1)
+C_DEFS += -DBRINGUP_INJECT=1
+endif
 
 
 # AS includes
@@ -198,6 +211,9 @@ all: $(OUTPUT_DIR)/$(TARGET).elf $(OUTPUT_DIR)/$(TARGET).hex $(OUTPUT_DIR)/$(TAR
 ifeq ($(SAFE_BRINGUP), 1)
 all: verify-safe
 endif
+ifeq ($(BRINGUP_INJECT), 1)
+all: verify-inject
+endif
 
 host-test:
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -ICore/Inc \
@@ -206,6 +222,12 @@ host-test:
 		-o /tmp/athena_diag_protocol_test
 	/tmp/athena_diag_protocol_test
 
+host-inject-test:
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -DBRINGUP_INJECT=1 -ICore/Inc \
+		Core/Src/diag_protocol.c tests/inject_protocol_test.c \
+		-o /tmp/athena_inject_protocol_test
+	/tmp/athena_inject_protocol_test
+
 host-tools-test:
 	$(MAKE) -C tools/athena_diag_uc12 test
 	bash tools/athena_safe_flash.sh self-test
@@ -213,7 +235,10 @@ host-tools-test:
 verify-safe: $(OUTPUT_DIR)/$(TARGET).elf
 	sh tools/verify_safe_image.sh $(NM) $<
 
-.PHONY: all host-test host-tools-test verify-safe clean
+verify-inject: $(OUTPUT_DIR)/$(TARGET).elf
+	sh tools/verify_inject_image.sh $(NM) $<
+
+.PHONY: all host-test host-inject-test host-tools-test verify-safe verify-inject clean
 
 
 #######################################
@@ -233,7 +258,15 @@ $(OUTPUT_DIR)/%.o: %.s Makefile | $(OUTPUT_DIR)
 	$(AS) -c $(CFLAGS) $< -o $@
 
 $(OUTPUT_DIR)/$(TARGET).elf: $(OBJECTS) Makefile tools/verify_safe_image.sh
-ifeq ($(SAFE_BRINGUP), 1)
+ifeq ($(BRINGUP_INJECT), 1)
+	$(CC) $(OBJECTS) $(LDFLAGS) -o $@.unverified
+	$(SZ) $@.unverified
+	@if ! sh tools/verify_inject_image.sh $(NM) $@.unverified; then \
+		rm -f $@.unverified; \
+		exit 1; \
+	fi
+	mv $@.unverified $@
+else ifeq ($(SAFE_BRINGUP), 1)
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@.unverified
 	$(SZ) $@.unverified
 	@if ! sh tools/verify_safe_image.sh $(NM) $@.unverified; then \

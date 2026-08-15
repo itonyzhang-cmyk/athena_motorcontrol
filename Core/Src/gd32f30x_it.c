@@ -52,6 +52,9 @@ OF SUCH DAMAGE.
 #include "user_config.h"
 #include "safety.h"
 #include "diagnostics.h"
+#ifdef BRINGUP_INJECT
+#include "inject.h"
+#endif
 
 
 /*!
@@ -166,6 +169,11 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
 {
     can_message_receive(CAN0, CAN_FIFO0, &can_rx);
 
+#ifdef BRINGUP_INJECT
+    inject_handle_can(&can_rx);
+    return;
+#endif
+
 #ifdef SAFE_BRINGUP
     safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
     diagnostics_handle_can(&can_rx);
@@ -223,6 +231,18 @@ void TIMER0_UP_IRQHandler(void)
 {
     timer_interrupt_flag_clear(TIMER0, TIMER_INT_FLAG_UP);
 
+#ifdef BRINGUP_INJECT
+    inject_timer_tick();
+    static uint8_t inject_diagnostic_divider;
+    if (++inject_diagnostic_divider >= 30U) {
+        inject_diagnostic_divider = 0U;
+        analog_sample(&controller);
+        ps_sample(&comm_encoder, 0.001f);
+    }
+    controller.loop_count++;
+    return;
+#endif
+
 #ifdef SAFE_BRINGUP
 	safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
 	/* Motor-control-rate sampling is unnecessary with the power stage hard
@@ -243,14 +263,14 @@ void TIMER0_UP_IRQHandler(void)
 	analog_sample(&controller);
 
 	/* Sample position sensor */
-#ifdef SAFE_BRINGUP
+#if defined(SAFE_BRINGUP) || defined(BRINGUP_INJECT)
 	ps_sample(&comm_encoder, 0.001f);
 #else
 	ps_sample(&comm_encoder, DT);
 #endif
 
 	/* Run Finite State Machine */
-#ifndef SAFE_BRINGUP
+#if !defined(SAFE_BRINGUP) && !defined(BRINGUP_INJECT)
 	run_fsm(&state);
 #endif
 
@@ -293,7 +313,9 @@ void USART1_IRQHandler(void)
     if(RESET != usart_interrupt_flag_get(USART1, USART_INT_FLAG_RBNE)){
         /* receive data */
         char c = usart_data_receive(USART1);
-#ifdef SAFE_BRINGUP
+#if defined(BRINGUP_INJECT)
+        (void)c;
+#elif defined(SAFE_BRINGUP)
         (void)c;
         safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
 #else
