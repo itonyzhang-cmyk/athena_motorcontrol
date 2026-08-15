@@ -656,9 +656,17 @@ static int run_inject(struct client *client, unsigned vector, double duty,
         sleep_ms(50U);
     } while (monotonic_ms() < deadline);
 
+    if (query(client, OPCODE_SNAPSHOT, 21, &response) != 0) return -1;
+    print_response(&response);
+    if (response.status == 0U) {
+        int16_t peak_b = (int16_t)(response.payload & 0xFFFFU);
+        int16_t peak_c = (int16_t)(response.payload >> 16);
+        printf("Signed peak ADC deviation: B=%d C=%d (raw counts)\n",
+               (int)peak_b, (int)peak_c);
+    }
     if (run_pages(client, OPCODE_SNAPSHOT,
-                  inject_result_pages + 1,
-                  sizeof(inject_result_pages) - 1U) != 0) {
+                  inject_result_pages + 2,
+                  sizeof(inject_result_pages) - 2U) != 0) {
         return -1;
     }
     result = (response.payload >> 4) & 0xFU;

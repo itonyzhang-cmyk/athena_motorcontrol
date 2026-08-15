@@ -18,6 +18,12 @@ SAFE_IMAGE_SIZE=29380
 SAFE_IMAGE_BASE=0x08000000
 SAFE_ERASE_SIZE=0x7800
 
+INJECT_IMAGE_DEFAULT="${WORKSPACE_DIR}/artifacts/athena_inject_bringup_e44465e/motorcontrol.bin"
+INJECT_IMAGE_SHA256="98cac3d5bb76601b82214e349a5dba63b41218910b3a052168f207037d9f6de2"
+INJECT_IMAGE_SIZE=31940
+INJECT_IMAGE_BASE=0x08000000
+INJECT_ERASE_SIZE=0x8000
+
 FACTORY_IMAGE="${WORKSPACE_DIR}/backups/gd32f303ret6_factory_20260812_170113_CST/factory_flash_0x08000000_512KiB.bin"
 FACTORY_IMAGE_SHA256="302f25ed7848ec22c77dbce177c79f548b6de502be71f06976034f8df9cb1ec7"
 FLASH_SIZE=524288
@@ -50,12 +56,16 @@ Usage:
   tools/athena_safe_flash.sh flash-safe [--image FILE] \
       --confirm-safe-sha 9824e058... --i-understand-this-writes-main-flash
   tools/athena_safe_flash.sh boot-safe [--image FILE]
+  tools/athena_safe_flash.sh flash-inject \
+      --confirm-inject-sha 4540248e... --i-understand-this-writes-main-flash
+  tools/athena_safe_flash.sh boot-inject
   tools/athena_safe_flash.sh restore-factory \
       --confirm-factory-sha 302f25ed... --i-understand-this-writes-main-flash
 
 Safety properties:
   * This tool never writes Option Bytes and never issues mass-erase/unprotect.
   * flash-safe accepts exactly the reviewed 29,380-byte SAFE_DIAGNOSTIC image.
+  * flash-inject accepts exactly the reviewed 31,916-byte BRINGUP_INJECT image.
   * flash-safe leaves the CPU halted after verified programming; boot-safe is a
     separate action.
   * restore-factory accepts only the recorded 512 KiB factory backup and also
@@ -93,6 +103,15 @@ check_safe_image() {
         fail "safe image size is not ${SAFE_IMAGE_SIZE} bytes"
     [[ "$(sha256_file "${IMAGE}")" == "${SAFE_IMAGE_SHA256}" ]] ||
         fail "safe image SHA-256 does not match the reviewed release"
+}
+
+check_inject_image() {
+    [[ -f "${INJECT_IMAGE_DEFAULT}" ]] ||
+        fail "inject image not found: ${INJECT_IMAGE_DEFAULT}"
+    [[ "$(file_size "${INJECT_IMAGE_DEFAULT}")" == "${INJECT_IMAGE_SIZE}" ]] ||
+        fail "inject image size is not ${INJECT_IMAGE_SIZE} bytes"
+    [[ "$(sha256_file "${INJECT_IMAGE_DEFAULT}")" == "${INJECT_IMAGE_SHA256}" ]] ||
+        fail "inject image SHA-256 does not match the reviewed release"
 }
 
 check_factory_image() {
@@ -195,6 +214,7 @@ preflight() {
 self_test() {
     local recorded_options
     check_safe_image
+    check_inject_image
     check_factory_image
     recorded_options="${WORKSPACE_DIR}/backups/gd32f303ret6_factory_20260812_170113_CST/option_bytes_0x1FFFF800_16B.bin"
     [[ -f "${recorded_options}" ]] || fail "recorded Option Bytes backup is missing"
@@ -205,7 +225,11 @@ self_test() {
     (( SAFE_IMAGE_SIZE <= SAFE_ERASE_SIZE )) || fail "safe image exceeds its erase range"
     (( SAFE_IMAGE_BASE + SAFE_ERASE_SIZE <= CONFIG_BASE )) ||
         fail "safe erase range overlaps reserved configuration pages"
-    printf 'PASS: reviewed safe/factory/Option Bytes artifacts and non-overlapping safe erase range.\n'
+    (( INJECT_IMAGE_SIZE <= INJECT_ERASE_SIZE )) ||
+        fail "inject image exceeds its erase range"
+    (( INJECT_IMAGE_BASE + INJECT_ERASE_SIZE <= CONFIG_BASE )) ||
+        fail "inject erase range overlaps reserved configuration pages"
+    printf 'PASS: reviewed safe/inject/factory/Option Bytes artifacts and non-overlapping erase ranges.\n'
 }
 
 backup_current() {
@@ -304,6 +328,47 @@ flash_safe() {
     printf 'The CPU remains halted. Run boot-safe only after the physical bench is ready.\n'
 }
 
+flash_inject() {
+    local backup_dir config_before config_after readback option_after log
+    check_inject_image
+    [[ ${WRITE_ACK} -eq 1 ]] || fail "missing --i-understand-this-writes-main-flash"
+    [[ "${WRITE_CONFIRMATION}" == "${INJECT_IMAGE_SHA256}" ]] ||
+        fail "missing exact --confirm-inject-sha value"
+
+    backup_current
+    backup_dir="${OUTPUT_DIR}"
+    config_before="${backup_dir}/config_before_0x0803C000_4KiB.bin"
+    config_after="${backup_dir}/config_after_0x0803C000_4KiB.bin"
+    readback="${backup_dir}/inject_image_readback_${INJECT_IMAGE_SIZE}B.bin"
+    option_after="${backup_dir}/option_bytes_after_inject_flash.bin"
+
+    dump_config "${config_before}" "${backup_dir}/openocd_config_before.log"
+    check_path_for_tcl "${INJECT_IMAGE_DEFAULT}"
+    log="${backup_dir}/openocd_flash_inject.log"
+    openocd_capture "${log}" \
+        "init; reset halt; flash erase_address ${INJECT_IMAGE_BASE} ${INJECT_ERASE_SIZE}; flash write_image {${INJECT_IMAGE_DEFAULT}} ${INJECT_IMAGE_BASE} bin; verify_image {${INJECT_IMAGE_DEFAULT}} ${INJECT_IMAGE_BASE} bin; shutdown"
+
+    check_path_for_tcl "${readback}"
+    check_path_for_tcl "${option_after}"
+    openocd_capture "${backup_dir}/openocd_postflash_readback.log" \
+        "init; reset halt; dump_image {${readback}} ${INJECT_IMAGE_BASE} ${INJECT_IMAGE_SIZE}; dump_image {${option_after}} ${OPTION_BASE} ${OPTION_SIZE}; shutdown"
+    dump_config "${config_after}" "${backup_dir}/openocd_config_after.log"
+
+    cmp -s "${INJECT_IMAGE_DEFAULT}" "${readback}" ||
+        fail "programmed inject image readback differs; CPU remains halted"
+    cmp -s "${config_before}" "${config_after}" ||
+        fail "reserved configuration range changed; CPU remains halted"
+    [[ "$(sha256_file "${option_after}")" == "${EXPECTED_OPTION_SHA256}" ]] ||
+        fail "Option Bytes changed unexpectedly; CPU remains halted"
+
+    shasum -a 256 "${config_before}" "${config_after}" "${readback}" \
+        "${option_after}" >>"${backup_dir}/SHA256SUMS"
+    printf 'PASS: BRINGUP_INJECT programmed and read back exactly.\n'
+    printf 'Programmed image range: %s..0x%08X; config page is unchanged.\n' \
+        "${INJECT_IMAGE_BASE}" "$((INJECT_IMAGE_BASE + INJECT_IMAGE_SIZE - 1))"
+    printf 'The CPU remains halted. Run boot-inject only after the physical bench is ready.\n'
+}
+
 boot_safe() {
     local readback option_file
     check_safe_image
@@ -319,6 +384,24 @@ boot_safe() {
         fail "Option Bytes differ; refusing to boot"
     openocd_capture "${TEMP_DIR}/openocd_reset_run.log" "init; reset run; shutdown"
     printf 'PASS: reviewed SAFE_DIAGNOSTIC image reset and started.\n'
+}
+
+boot_inject() {
+    local readback option_file
+    check_inject_image
+    make_temp_dir
+    readback="${TEMP_DIR}/inject_image_before_boot.bin"
+    option_file="${TEMP_DIR}/option_bytes_before_boot.bin"
+    check_path_for_tcl "${readback}"
+    check_path_for_tcl "${option_file}"
+    openocd_capture "${TEMP_DIR}/openocd_boot_inject.log" \
+        "init; reset halt; dump_image {${readback}} ${INJECT_IMAGE_BASE} ${INJECT_IMAGE_SIZE}; dump_image {${option_file}} ${OPTION_BASE} ${OPTION_SIZE}; shutdown"
+    cmp -s "${INJECT_IMAGE_DEFAULT}" "${readback}" ||
+        fail "target does not contain the reviewed BRINGUP_INJECT image"
+    [[ "$(sha256_file "${option_file}")" == "${EXPECTED_OPTION_SHA256}" ]] ||
+        fail "Option Bytes differ; refusing to boot"
+    openocd_capture "${TEMP_DIR}/openocd_reset_run.log" "init; reset run; shutdown"
+    printf 'PASS: reviewed BRINGUP_INJECT image reset and started.\n'
 }
 
 restore_factory() {
@@ -373,7 +456,9 @@ case "${ACTION}" in
     preflight) preflight ;;
     backup) backup_current ;;
     flash-safe) flash_safe ;;
+    flash-inject) flash_inject ;;
     boot-safe) boot_safe ;;
+    boot-inject) boot_inject ;;
     restore-factory) restore_factory ;;
     -h|--help|help) usage ;;
     *) usage; fail "unknown action: ${ACTION}" ;;

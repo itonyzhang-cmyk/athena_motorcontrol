@@ -329,3 +329,51 @@ Do not record secrets, access tokens, or private credentials here.
   `/Users/choqy/workspace/xiaomi_dog/backups/BOARD_REGISTRY.md`. The earlier
   2026-08-12 board cannot be assigned a UID from its main-Flash backup alone;
   reconnect it once to register it.
+
+### 2026-08-16 — BRINGUP_INJECT gated single-phase injection profile
+
+- User decision: probing PA8/PA9/PA10/PA11/PA12 on the controller is not
+  practical because the board is dense and conformal-coated, so the logic
+  analyzer gate is replaced by a gated low-current injection bring-up. The
+  motor, encoder, and phase-current ADC are the instruments. The user accepted
+  the small residual risk that a config error could cause a brief current
+  event before the supply folds back, bounded by the 0.2 A bench limit and the
+  firmware watchdog.
+- New build profile `BRINGUP_INJECT=1` (commit `e44465e`):
+  - Default state is passive: PA11 low, all PWM compares at the all-low
+    position, no current path.
+  - DRV8323 configured with PA11 low: 3x PWM, COAST clear (PA11 is the only
+    power gate), VDS OCP latched, sense OCP enabled, gate faults enabled.
+  - CAN opcode `0x04` arms one pulse with vector (0..5), duty
+    (0.5..5.0 %), duration (10..50 ms), all from fixed tables. Opcode `0x05`
+    stops immediately. Read-only diag opcodes are unchanged.
+  - The 30 kHz timer ISR performs the hardware sequencing and aborts on
+    deadline, nFAULT, latched fault, PA11 drop, or ADC deviation above the
+    ~2 A watchdog limit.
+  - Symbol audit (`tools/verify_inject_image.sh`) forbids Flash writes,
+    Option Bytes, calibration, legacy FSM, MIT unpack, and unsafe DRV config;
+    requires the inject state machine, bounded SPI/ADC helpers, and the
+    reserved configuration range.
+- UC12 client gained `inject VECTOR DUTY DURATION --confirm-inject`, `stop`,
+  `drv`, and snapshot pages 20..26 (status, signed peak currents, encoder
+  start/end, ticks/faults, DRV registers).
+- Flash tool gained hash-locked `flash-inject` and `boot-inject` actions.
+  `flash-inject` performs the two-read current-state backup, erases only
+  `0x08000000..0x08007FFF`, programs and reads back the 31,940-byte image,
+  verifies the reserved config range and Option Bytes, and leaves the CPU
+  halted.
+- Verified results:
+  - Safe image rebuilt byte-identical, SHA-256 still
+    `9824e0587281bd6bcf6b1915c764c46d30a1843b24d4ee488ea1b308513c1e82`.
+  - Inject image: 31,940 bytes, SHA-256
+    `98cac3d5bb76601b82214e349a5dba63b41218910b3a052168f207037d9f6de2`,
+    image end `0x08007CC4`, stored under
+    `/Users/choqy/workspace/xiaomi_dog/artifacts/athena_inject_bringup_e44465e/`.
+  - Host protocol tests, UC12 self-test, flash-tool self-test, and inject
+    symbol audit all pass.
+- Bench procedure: `docs/INJECT_BRINGUP_RUNBOOK.md`. Hardware state at the end
+  of this step: no flash write performed; `独板` still runs factory firmware;
+  the 12 V current-limited supply is available; motor bench not yet set up.
+- Next action requires explicit user authorization: connect motor + bench
+  supply, then `flash-inject`, `boot-inject`, passive checks, and the six-
+  vector injection matrix at 0.5 % / 10 ms.

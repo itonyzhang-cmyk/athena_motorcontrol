@@ -88,6 +88,8 @@ typedef struct {
     volatile uint32_t last_end_ms;
     volatile uint16_t start_raw14;
     volatile uint16_t end_raw14;
+    volatile int32_t peak_adc_b;
+    volatile int32_t peak_adc_c;
     volatile uint32_t abs_peak_adc_b;
     volatile uint32_t abs_peak_adc_c;
     volatile uint16_t adc_b_offset;
@@ -165,16 +167,24 @@ static void inject_sample_current_watchdog(void)
 {
     int32_t dev_b;
     int32_t dev_c;
+    int32_t abs_b;
+    int32_t abs_c;
 
     analog_sample(&controller);
     dev_b = (int32_t)controller.adc_b_raw - (int32_t)inject.adc_b_offset;
     dev_c = (int32_t)controller.adc_c_raw - (int32_t)inject.adc_c_offset;
-    if (dev_b < 0) dev_b = -dev_b;
-    if (dev_c < 0) dev_c = -dev_c;
-    if ((uint32_t)dev_b > inject.abs_peak_adc_b) inject.abs_peak_adc_b = (uint32_t)dev_b;
-    if ((uint32_t)dev_c > inject.abs_peak_adc_c) inject.abs_peak_adc_c = (uint32_t)dev_c;
-    if ((uint32_t)dev_b > INJECT_ADC_DEVIATION_LIMIT ||
-        (uint32_t)dev_c > INJECT_ADC_DEVIATION_LIMIT) {
+    abs_b = dev_b < 0 ? -dev_b : dev_b;
+    abs_c = dev_c < 0 ? -dev_c : dev_c;
+    if ((uint32_t)abs_b > inject.abs_peak_adc_b) {
+        inject.abs_peak_adc_b = (uint32_t)abs_b;
+        inject.peak_adc_b = dev_b;
+    }
+    if ((uint32_t)abs_c > inject.abs_peak_adc_c) {
+        inject.abs_peak_adc_c = (uint32_t)abs_c;
+        inject.peak_adc_c = dev_c;
+    }
+    if ((uint32_t)abs_b > INJECT_ADC_DEVIATION_LIMIT ||
+        (uint32_t)abs_c > INJECT_ADC_DEVIATION_LIMIT) {
         inject_finish(INJECT_RESULT_CURRENT_LIMIT);
     }
 }
@@ -279,6 +289,8 @@ static void inject_request_fire(const InjectRequest *request)
         inject.end_faults = 0U;
         inject.abs_peak_adc_b = 0U;
         inject.abs_peak_adc_c = 0U;
+        inject.peak_adc_b = 0;
+        inject.peak_adc_c = 0;
         inject.sample_divider = 0U;
         inject.start_raw14 = comm_encoder.raw14;
         inject.state = INJECT_STATE_ACTIVE;
@@ -350,8 +362,8 @@ uint32_t inject_snapshot(uint8_t page, uint8_t *status)
     switch (page) {
     case 20U: return inject_status_word();
     case 21U:
-        return (inject.abs_peak_adc_b & 0xFFFFU) |
-               ((inject.abs_peak_adc_c & 0xFFFFU) << 16);
+        return ((uint32_t)(uint16_t)inject.peak_adc_b) |
+               (((uint32_t)(uint16_t)inject.peak_adc_c) << 16);
     case 22U:
         return (uint32_t)inject.start_raw14 |
                ((uint32_t)inject.end_raw14 << 16);
@@ -374,10 +386,10 @@ uint32_t inject_snapshot(uint8_t page, uint8_t *status)
 
 void inject_uart_report(void)
 {
-    printf("I1 st=%lu res=%lu vec=%lu duty=%lu dur=%lu ticks=%lu peak_b=%lu peak_c=%lu enc=%u->%u flt=%08lx\r\n",
+    printf("I1 st=%lu res=%lu vec=%lu duty=%lu dur=%lu ticks=%lu peak_b=%ld peak_c=%ld enc=%u->%u flt=%08lx\r\n",
            inject.state, inject.result, inject.vector, inject.duty_idx,
-           inject.duration_idx, inject.active_ticks, inject.abs_peak_adc_b,
-           inject.abs_peak_adc_c, inject.start_raw14, inject.end_raw14,
+           inject.duration_idx, inject.active_ticks, inject.peak_adc_b,
+           inject.peak_adc_c, inject.start_raw14, inject.end_raw14,
            safety_get_faults());
 }
 
