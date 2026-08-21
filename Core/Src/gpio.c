@@ -99,7 +99,9 @@ void MX_GPIO_Init(void)
     /* SPI1_MISO PB14 */
     /* SPI1_MOSI PB15 */
     gpio_init(GPIOB, GPIO_MODE_AF_PP, GPIO_OSPEED_10MHZ, GPIO_PIN_13 | GPIO_PIN_15);
-    gpio_init(GPIOB, GPIO_MODE_IN_FLOATING, GPIO_OSPEED_10MHZ, GPIO_PIN_14);
+    /* DRV8323 SDO is open-drain. Keep the MCU-side input biased high while
+     * the driver releases the line between response bits. */
+    gpio_init(GPIOB, GPIO_MODE_IPU, GPIO_OSPEED_10MHZ, GPIO_PIN_14);
     gpio_init(GPIOB, GPIO_MODE_OUT_PP, GPIO_OSPEED_10MHZ, GPIO_PIN_12);
     gpio_bit_set(GPIOB, GPIO_PIN_12);
 
@@ -138,6 +140,9 @@ void MX_GPIO_Init(void)
     
     /* LED PC13 */
     gpio_init(GPIOC, GPIO_MODE_OUT_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_13);
+    /* Start from a defined state. The heartbeat service owns this pin after
+     * startup; no other path may overwrite it. */
+    gpio_bit_reset(GPIOC, GPIO_PIN_13);
 
     /* USART1_TX PA2 */
     /* USART1_RX PA3 */
@@ -148,7 +153,9 @@ void MX_GPIO_Init(void)
     /* CAN0_TX PB9 */
     gpio_pin_remap_config(GPIO_CAN_PARTIAL_REMAP, ENABLE);
     gpio_init(GPIOB, GPIO_MODE_IPU, GPIO_OSPEED_2MHZ, GPIO_PIN_8);
-    gpio_init(GPIOB, GPIO_MODE_AF_PP, GPIO_OSPEED_2MHZ, GPIO_PIN_9);
+    /* Factory GPIOB_CTL1=0x949342B8 configures PB9 as AF push-pull at
+     * 50 MHz (PB9 nibble 0xB). Keep this exact electrical configuration. */
+    gpio_init(GPIOB, GPIO_MODE_AF_PP, GPIO_OSPEED_50MHZ, GPIO_PIN_9);
 }
 #endif
 /* USER CODE BEGIN 2 */

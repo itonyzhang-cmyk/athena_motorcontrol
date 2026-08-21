@@ -5,10 +5,8 @@
 
 volatile uint32_t safety_fault_latched = SAFETY_FAULT_NONE;
 
-void safety_force_outputs_off(uint32_t reason)
+void safety_outputs_off(void)
 {
-    safety_fault_latched |= reason;
-
 #ifdef STM32F446
     HAL_GPIO_WritePin(ENABLE_PIN, GPIO_PIN_RESET);
     __HAL_TIM_MOE_DISABLE(&TIM_PWM);
@@ -24,6 +22,12 @@ void safety_force_outputs_off(uint32_t reason)
     timer_channel_output_pulse_value_config(TIM_PWM, TIM_CH_V, 0U);
     timer_channel_output_pulse_value_config(TIM_PWM, TIM_CH_W, 0U);
 #endif
+}
+
+void safety_force_outputs_off(uint32_t reason)
+{
+    safety_fault_latched |= reason;
+    safety_outputs_off();
 }
 
 uint32_t safety_get_faults(void)

@@ -1,55 +1,44 @@
-# BRINGUP_INJECT bench runbook
+# BRINGUP_INJECT 台架运行手册
 
-This runbook covers the first powered motor test without a probe/scope on the
-MCU pins. The motor itself, its encoder, and the phase-current ADC channels are
-the instruments. This is not the reviewed `SAFE_DIAGNOSTIC` image and it is not
-motor control.
+本手册用于在 MCU 引脚没有探针或示波器的情况下，首次给电机通电测试。电机本体、编码器和相电流 ADC 通道就是测试仪器。本镜像不是经过评审的 `SAFE_DIAGNOSTIC` 镜像，也不是电机控制固件。
 
-## Fixed inputs
+## 固定输入
 
-- Image: `../artifacts/athena_inject_bringup_89b6629/motorcontrol.bin`
-- Base address: `0x08000000`
-- Size: 31,940 bytes
-- SHA-256:
-  `98cac3d5bb76601b82214e349a5dba63b41218910b3a052168f207037d9f6de2`
-- Erase range: `0x08000000..0x08007FFF` (16 aligned 2 KiB pages)
-- Reserved configuration range: `0x0803C000..0x0803CFFF`
-- Source commit: `89b6629`
+- 镜像：`../artifacts/athena_inject_bringup_drv_spi_rate_fix_20260819/motorcontrol.bin`
+- 基地址：`0x08000000`
+- 大小：32,644 字节
+- SHA-256：
+  `4bb4c470b2fc502ce5e4fe94e0128eeed992a4bff7e7266c166bf6c27beb72ad`
+- 擦除范围：`0x08000000..0x080087FF`（17 个按 2 KiB 对齐的页）
+- 保留配置范围：`0x0803C000..0x0803CFFF`
+- 源码基线：`30a0b2e` 加工作区 CAN/DRV 唤醒状态机、PA11 输出锁存器检查、DRV 10 ms 启动等待和 3.75 MHz SPI 修复
 
-## Bench setup
+## 台架设置
 
-1. Connect the test motor to the controller. Remove any linkage; secure the
-   motor housing and leave the output shaft free.
-2. Power the controller from the current-limited bench supply set to 12 V and
-   **0.2 A** limit. Do not exceed 0.5 A at any point in this runbook.
-3. Keep the supply switch or an emergency stop within reach.
-4. Stop SavvyCAN, the WebUI service, and every other UC12 program. Only one
-   client may own the UC12.
-5. ST-LINK is only needed for the flash steps; unplug it before powered tests
-   if it shares the bench ground path.
+1. 将测试电机连接到控制器。拆除所有连杆；固定电机外壳，并让输出轴保持空载、可自由转动。
+2. 使用限流台式电源给控制器供电，设置为 12 V，限流 **0.2 A**。本手册执行期间任何时刻都不得超过 0.5 A。
+3. 将电源开关或急停装置放在触手可及的位置。
+4. 停止 SavvyCAN、WebUI 服务以及所有其他 UC12 程序。UC12 同时只能由一个客户端占用。
+5. 只有刷写步骤需要 ST-LINK；如果 ST-LINK 与台架共用地线，通电测试前应将其拔下。
 
-## Flash and boot
+## 刷写与启动
 
-The current-state backup is taken automatically by `flash-inject`; it refuses
-to continue unless both full-Flash reads are identical and the Option Bytes
-match the recorded baseline.
+`flash-inject` 会自动创建当前状态备份；只有在两次完整 Flash 读取结果一致且选项字节与记录的基线匹配时，它才会继续执行。应用区按 17 个 2 KiB 页逐页擦除、写入并校验；任一页失败即停止，CPU 保持停机。
 
 ```sh
 tools/athena_safe_flash.sh self-test
 tools/athena_safe_flash.sh identify
 tools/athena_safe_flash.sh flash-inject \
-  --confirm-inject-sha 98cac3d5bb76601b82214e349a5dba63b41218910b3a052168f207037d9f6de2 \
+  --confirm-inject-sha 4bb4c470b2fc502ce5e4fe94e0128eeed992a4bff7e7266c166bf6c27beb72ad \
   --i-understand-this-writes-main-flash
 tools/athena_safe_flash.sh boot-inject
 ```
 
-The CPU remains halted after programming. `boot-inject` re-reads the exact
-image and Option Bytes before resetting. Use it only when the motor is
-connected and the supply is ready.
+编程完成后 CPU 仍保持停机状态。`boot-inject` 会在复位前重新读取并校验完整镜像和选项字节。仅当电机已连接且电源准备就绪时才可使用它。
 
-## Passive first check
+## 首次被动检查
 
-Build and run the client:
+编译并运行客户端：
 
 ```sh
 make -C tools/athena_diag_uc12 test
@@ -58,43 +47,50 @@ tools/athena_diag_uc12/athena_diag_uc12 drv
 tools/athena_diag_uc12/athena_diag_uc12 snapshot
 ```
 
-Pass criteria:
+通过标准：
 
-- Snapshot page 3: `SAFE=1`, `nFAULT=0`, `PA11=0`, `enc=1`, `adc=1`. In this
-  profile `POEN=1` and `CH=111` are expected and safe because PA11 is the only
-  power gate.
-- No motion, no holding torque, no abnormal sound, no heating.
-- DRV registers are readable and plausible. Approximate expected values
-  (readback of self-clearing bits may be lower):
-  - `DCR` around `0x0120` (3x PWM, OTW reported, COAST=0)
-  - `CSACR` around `0x02E0` (gain 40, sense OCP enabled)
-  - `OCPCR` around `0x0415` (VDS latch, 4 us deglitch, 0.45 V level)
-  - `FSR1`/`FSR2` clear (`0`)
+- Snapshot 第 3 页：`SAFE=1`、`nFAULT=0`、`PA11=0`、`enc=1`、`adc=1`。在此配置中，`POEN=1` 和 `CH=111` 是预期且安全的，因为唯一的电源门控信号是 PA11。
+- 不得有运动、保持转矩、异常声音或发热。
+- 普通 `drv` 在 PA11 低时可能全部为 `0xFFFF`，这不代表配置成功；只能用下面的 `drv-wake` 做受限唤醒验证。
 
-If PA11 is high, nFAULT is low, or the encoder/ADC are invalid, stop and
-re-check the connection. Do not continue.
+如果 PA11 为高电平、nFAULT 为低电平，或编码器/ADC 无效，应停止并重新检查连接。不得继续操作。
 
-## Injection procedure
+## DRV 唤醒和配置验证
 
-One pulse per command. The tool requires `--confirm-inject` and a passing
-preflight every time:
+若普通 `drv` 回读为 `0xFFFF`，使用以下命令。它会先禁用 TIMER0 主输出并将三路比较值设为全低，再将 PA11 拉高 10 ms（与原始 DRV 初始化的硬件就绪等待一致）；主循环在窗口结束后写入受限 DRV 配置并读取验证，最后无条件拉低 PA11。该命令成功前，`inject` 会被固件拒绝。
+
+```sh
+tools/athena_diag_uc12/athena_diag_uc12 \
+  --confirm-drv-wake drv-wake
+```
+
+通过条件：命令返回 `drv_ready=1`，后续页显示 `FSR1/FSR2=0`、`DCR=0x00A0` 或 `0x00A1`（清故障位会自清零）、`CSACR=0x02DC`、`OCPCR=0x0415`。任何失败都保持 PA11 为低；不得转而尝试注入。
+
+失败时不要重复执行该命令。一次 `drv-wake` 已锁存页面 31..48：八笔 SPI
+TX/RX 与 TBE/RBNE/BUSY 完成状态、SPI1 控制/状态寄存器，以及 PB12..PB15 和
+PA11/PA12 所在端口的 GPIO 配置、输出锁存和输入状态。保存这一整段输出后再判断，
+避免把 MCU 传输超时、MISO 全高、或引脚复用错误混为一谈。
+
+## 注入流程
+
+每条命令只发出一个脉冲。工具每次都要求 `--confirm-inject`，并且必须通过预检：
 
 ```sh
 tools/athena_diag_uc12/athena_diag_uc12 inject 0 0.5 10 --confirm-inject
 ```
 
-The six vectors are the BLDC step patterns on the three PWM channels:
+以下六个向量是三路 PWM 通道上的 BLDC 步进模式：
 
-| Vector | CH0 (U) | CH1 (V) | CH2 (W) |
+| 向量 | CH0 (U) | CH1 (V) | CH2 (W) |
 | --- | --- | --- | --- |
-| 0 | high-side duty | low | low |
-| 1 | high-side duty | high-side duty | low |
-| 2 | low | high-side duty | low |
-| 3 | low | high-side duty | high-side duty |
-| 4 | low | low | high-side duty |
-| 5 | high-side duty | low | high-side duty |
+| 0 | 高侧占空比 | 低 | 低 |
+| 1 | 高侧占空比 | 高侧占空比 | 低 |
+| 2 | 低 | 高侧占空比 | 低 |
+| 3 | 低 | 高侧占空比 | 高侧占空比 |
+| 4 | 低 | 低 | 高侧占空比 |
+| 5 | 高侧占空比 | 低 | 高侧占空比 |
 
-Run the matrix at the minimum settings first:
+先以最低设置运行完整矩阵：
 
 ```sh
 for v in 0 1 2 3 4 5; do
@@ -102,48 +98,35 @@ for v in 0 1 2 3 4 5; do
 done
 ```
 
-For every pulse record:
+每个脉冲都要记录：
 
-- the reported result (must be `OK`);
-- supply current behavior (should stay at the 0.2 A limit or below);
-- signed peak ADC deviation on B and C from snapshot page 21;
-- whether the encoder raw value moved (page 22);
-- any sound, motion, heating, or nFAULT event.
+- 报告结果（必须为 `OK`）；
+- 电源电流表现（应保持在 0.2 A 限值以内）；
+- Snapshot 第 21 页 B、C 通道 ADC 的带符号峰值偏差；
+- 编码器原始值是否发生变化（第 22 页）；
+- 是否出现声音、运动、发热或 nFAULT 事件。
 
-Then repeat selected vectors at 1.0 % and 20 ms to strengthen the response if
-everything stayed clean. Do not go above 5.0 % / 50 ms in this phase.
+如果所有结果都正常，再对选定向量重复测试，将设置提高到 1.0% 和 20 ms，以增强响应。此阶段不得超过 5.0% / 50 ms。
 
-`stop` is available at any time and always wins:
+任何时候都可以使用 `stop`，且它始终具有最高优先级：
 
 ```sh
 tools/athena_diag_uc12/athena_diag_uc12 stop
 ```
 
-## Interpreting the data
+## 数据解读
 
-The purpose is to establish, from real hardware:
+本流程的目的是通过真实硬件确认以下事项：
 
-1. PA11 really gates the driver (zero current with PA11 low, current only
-   during the armed pulse);
-2. the mapping between CH0/CH1/CH2, the six vectors, and the physical motor
-   terminals;
-3. the mapping and sign convention of SOB/SOC (ADC0/ADC1 inserted channels)
-   relative to those terminals;
-4. the encoder orientation relative to the current vectors.
+1. PA11 确实能够门控驱动器（PA11 为低时电流为零，只有在已使能的脉冲期间有电流）；
+2. CH0/CH1/CH2、六个向量与电机实际端子之间的对应关系；
+3. SOB/SOC（ADC0/ADC1 插入通道）相对于这些端子的映射关系和符号约定；
+4. 编码器方向相对于电流向量的关系。
 
-Each vector should produce a reproducible signed pattern on `peak_b`/`peak_c`
-and, at higher duty, a small deterministic encoder step. A result of
-`CURRENT_LIMIT` or `FAULT` means the watchdog or the driver shut the pulse
-down; power-cycle the board (which also clears latched faults) and investigate
-before repeating.
+每个向量都应在 `peak_b`/`peak_c` 上产生可重复的带符号模式，并且在更高占空比下使编码器产生一个小幅、确定性的步进。如果结果为 `CURRENT_LIMIT` 或 `FAULT`，说明看门狗或驱动器已关闭该脉冲；应给电路板断电（这也会清除锁存故障），在调查清楚前不要重复测试。
 
-If the motor produces no current at all on any vector, the most likely causes
-are a wrong phase connector, PA11 not actually reaching the driver, or the DRV
-SPI configuration not taking effect; re-check `drv` register readback.
+如果所有向量都完全没有电流，最可能的原因是相线接头错误、PA11 实际未到达驱动器，或 DRV SPI 配置没有生效；请重新检查 `drv` 寄存器回读值。
 
-## Next step after this runbook
+## 完成本手册后的下一步
 
-The measured vector/current/encoder table is the evidence needed to fix the
-phase order, current-sense sign, and scale constants in the control firmware.
-No closed-loop MIT test starts from this image; a new reviewed control image
-and another explicit authorization are required.
+测得的向量/电流/编码器表格是修正控制固件中相序、电流采样符号和比例常数所需的证据。不得从本镜像直接开始闭环 MIT 测试；必须准备新的、经过评审的控制镜像，并获得另一份明确授权。

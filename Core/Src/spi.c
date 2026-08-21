@@ -210,7 +210,9 @@ void MX_SPI1_Init(void)
   spi_init_struct.nss = SPI_NSS_SOFT;
   spi_init_struct.endian = SPI_ENDIAN_MSB;
   spi_init_struct.clock_polarity_phase = SPI_CK_PL_LOW_PH_2EDGE;
-  spi_init_struct.prescale = SPI_PSC_8;
+  /* APB1 is 60 MHz in the 120 MHz GD32 clock profile. The DRV8323 specifies
+   * a 100 ns minimum SCLK period (10 MHz maximum); retain 3.75 MHz margin. */
+  spi_init_struct.prescale = SPI_PSC_16;
 
   spi_init(SPI1, &spi_init_struct);
 

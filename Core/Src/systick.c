@@ -37,6 +37,7 @@ OF SUCH DAMAGE.
 
 #include "gd32f30x.h"
 #include "systick.h"
+#include "gpio.h"
 
 volatile static uint32_t delay;
 volatile static uint32_t uptime_ms;
@@ -82,6 +83,17 @@ void delay_1ms(uint32_t count)
 void delay_decrement(void)
 {
     uptime_ms++;
+    /* The SAFE/INJECT profiles intentionally run a reduced TIMER0 workload,
+     * so their heartbeat can use SysTick. The normal application drives its
+     * heartbeat from the higher-priority TIMER0 ISR; this avoids losing the
+     * visible indication if that control-rate ISR delays SysTick service. */
+#if defined(SAFE_BRINGUP) || defined(BRINGUP_INJECT)
+    if ((uptime_ms % 500U) == 0U) {
+        static bit_status led_state = RESET;
+        led_state = (led_state == RESET) ? SET : RESET;
+        gpio_bit_write(GPIOC, GPIO_PIN_13, led_state);
+    }
+#endif
     if (0U != delay){
         delay--;
     }

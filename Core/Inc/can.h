@@ -79,10 +79,14 @@ void pack_reply(can_trasnmit_message_struct *msg, uint8_t id, float p, float v, 
 void unpack_cmd(can_receive_message_struct msg, float *commands);
 
 void MX_CAN0_Init(void);
+#ifdef CAN_PROBE
+/* Transmit-only physical-link probe. It is compiled only into the safe CAN
+ * probe image and emits a fixed diagnostic beacon; it never controls power. */
+void can_probe_beacon(void);
+#endif
 #endif
 #ifdef __cplusplus
 }
 #endif
 
 #endif /* __CAN_H__ */
-

@@ -248,11 +248,9 @@ void MX_TIM0_Init(void)
     
     timer_break_config(TIMER0, &timer_breakpara);
 
-#ifdef SAFE_BRINGUP
+    /* The power stage is enabled only by fsm_enter_state() after the motor
+     * gate preflight. This prevents reset/startup from exposing PWM edges. */
     timer_primary_output_config(TIMER0, DISABLE);
-#else
-    timer_primary_output_config(TIMER0, ENABLE);
-#endif
     
     timer_interrupt_enable(TIMER0, TIMER_INT_UP);
     timer_enable(TIMER0);

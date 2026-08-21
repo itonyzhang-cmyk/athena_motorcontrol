@@ -107,6 +107,35 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
         case 24U:
         case 25U:
         case 26U:
+        case 27U:
+        case 28U:
+        case 29U:
+        case 30U:
+        case 31U:
+        case 32U:
+        case 33U:
+        case 34U:
+        case 35U:
+        case 36U:
+        case 37U:
+        case 38U:
+        case 39U:
+        case 40U:
+        case 41U:
+        case 42U:
+        case 43U:
+        case 44U:
+        case 45U:
+        case 46U:
+        case 47U:
+        case 48U:
+        case 49U:
+        case 50U:
+        case 51U:
+        case 52U:
+        case 53U:
+        case 54U:
+        case 55U:
             return inject_snapshot(request->page, status);
 #endif
         default: break;

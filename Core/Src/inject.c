@@ -59,12 +59,39 @@ static const uint8_t inject_vector_high[DIAG_INJECT_VECTOR_COUNT][3] = {
  * is roughly 2 A, far above the 0.2 A bench limit but still a fast way to
  * catch gross phase/short faults before the supply reacts. */
 #define INJECT_ADC_DEVIATION_LIMIT 100
+/* The original DRV initialization path waits 10 ms after EN_GATE rises before
+ * the first SPI command. Keep the same hardware-ready interval here; PWM
+ * primary output remains disabled and all three compare values stay all-low
+ * throughout this diagnostic-only window. */
+#define DRV_WAKE_SETTLE_MS 10U
+/* Values below are the register payloads, not the 16-bit SPI commands. Keep
+ * them beside the matching drv_write_* arguments so a readiness check cannot
+ * silently drift from the configuration it is meant to verify. */
+#define DRV_DCR_CONFIG_VALUE \
+    ((uint16_t)((OTW_REP_EN << 7) | (PWM_MODE_3X << 5) | CLR_FLT_RST))
+#define DRV_DCR_VERIFY_MASK ((uint16_t)(0x07FFU & ~CLR_FLT_RST))
+#define DRV_CSACR_CONFIG_VALUE \
+    ((uint16_t)((VREF_DIV_2 << 9) | (CSA_GAIN_40 << 6) | \
+                (1U << 4) | (1U << 3) | (1U << 2)))
+#define DRV_OCPCR_CONFIG_VALUE \
+    ((uint16_t)((TRETRY_50US << 10) | (OCP_DEG_4US << 4) | \
+                VDS_LVL_0_45))
+#define DRV_WAKE_TRANSFER_COUNT 8U
+
+enum {
+    DRV_READY_CLEAR_BOOT = 1U,
+    DRV_READY_CLEAR_WAKE = 2U,
+    DRV_READY_CLEAR_STOP = 3U,
+    DRV_READY_CLEAR_UNKNOWN_FRAME = 4U
+};
 
 typedef enum {
     INJECT_STATE_IDLE = 0U,
-    INJECT_STATE_ACTIVE = 1U,
-    INJECT_STATE_COMPLETE = 2U,
-    INJECT_STATE_FAULT = 3U
+    INJECT_STATE_PRECHARGE = 1U,
+    INJECT_STATE_POEN_TEST = 2U,
+    INJECT_STATE_ACTIVE = 3U,
+    INJECT_STATE_COMPLETE = 4U,
+    INJECT_STATE_FAULT = 5U
 } InjectState;
 
 typedef enum {
@@ -76,6 +103,11 @@ typedef enum {
     INJECT_RESULT_CURRENT_LIMIT = 5U
 } InjectResult;
 
+typedef enum {
+    DRV_WAKE_IDLE = 0U,
+    DRV_WAKE_WAIT_SETTLE = 1U
+} DrvWakeState;
+
 typedef struct {
     volatile uint32_t state;
     volatile uint32_t vector;
@@ -86,6 +118,8 @@ typedef struct {
     volatile uint32_t result;
     volatile uint32_t end_faults;
     volatile uint32_t last_end_ms;
+    volatile uint32_t precharge_started_ms;
+    volatile uint32_t poen_test_started_ms;
     volatile uint16_t start_raw14;
     volatile uint16_t end_raw14;
     volatile int32_t peak_adc_b;
@@ -95,10 +129,83 @@ typedef struct {
     volatile uint16_t adc_b_offset;
     volatile uint16_t adc_c_offset;
     volatile uint32_t sample_divider;
+    volatile uint32_t drv_ready;
+    volatile uint32_t drv_ready_clear_reason;
+    volatile uint16_t drv_fsr1;
+    volatile uint16_t drv_fsr2;
+    volatile uint16_t drv_pre_fsr1;
+    volatile uint16_t drv_pre_fsr2;
+    volatile uint16_t drv_fault_fsr1;
+    volatile uint16_t drv_fault_fsr2;
+    volatile uint16_t drv_poen_fsr1;
+    volatile uint16_t drv_poen_fsr2;
+    volatile uint8_t drv_fault_capture_pending;
+    volatile uint16_t drv_dcr;
+    volatile uint16_t drv_csacr;
+    volatile uint16_t drv_ocpcr;
+    volatile uint16_t drv_wake_tx[DRV_WAKE_TRANSFER_COUNT];
+    volatile uint16_t drv_wake_rx[DRV_WAKE_TRANSFER_COUNT];
+    volatile uint8_t drv_wake_spi_status[DRV_WAKE_TRANSFER_COUNT];
+    volatile uint32_t drv_wake_spi_ctl0;
+    volatile uint32_t drv_wake_spi_ctl1;
+    volatile uint32_t drv_wake_spi_stat;
+    volatile uint32_t drv_wake_gpiob_ctl1;
+    volatile uint32_t drv_wake_gpiob_octl;
+    volatile uint32_t drv_wake_gpiob_istat;
+    volatile uint32_t drv_wake_gpioa_ctl1;
+    volatile uint32_t drv_wake_gpioa_octl;
+    volatile uint32_t drv_wake_gpioa_istat;
+    volatile uint32_t drv_wake_state;
+    volatile uint32_t drv_wake_started_ms;
+    volatile uint8_t drv_wake_sequence;
 } InjectRuntime;
 
 static InjectRuntime inject;
 static uint32_t inject_last_response_ms;
+
+static uint8_t inject_spi_status_code(int status)
+{
+    switch (status) {
+    case SPI_TRANSFER_OK: return 0U;
+    case SPI_TRANSFER_TBE_TIMEOUT: return 1U;
+    case SPI_TRANSFER_RBNE_TIMEOUT: return 2U;
+    default: return 3U;
+    }
+}
+
+static uint16_t inject_drv_transfer(uint8_t index, uint16_t tx_word)
+{
+    uint16_t rx_word = 0xFFFFU;
+    int status = drv_spi_transfer(&drv, tx_word, &rx_word);
+
+    inject.drv_wake_tx[index] = tx_word;
+    inject.drv_wake_rx[index] = rx_word;
+    inject.drv_wake_spi_status[index] = inject_spi_status_code(status);
+    return rx_word;
+}
+
+static uint8_t inject_all_drv_transfers_ok(void)
+{
+    for (uint8_t i = 0U; i < DRV_WAKE_TRANSFER_COUNT; ++i) {
+        if (inject.drv_wake_spi_status[i] != 0U) {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+static void inject_capture_drv_bus_state(void)
+{
+    inject.drv_wake_spi_ctl0 = SPI_CTL0(SPI1);
+    inject.drv_wake_spi_ctl1 = SPI_CTL1(SPI1);
+    inject.drv_wake_spi_stat = SPI_STAT(SPI1);
+    inject.drv_wake_gpiob_ctl1 = GPIO_CTL1(GPIOB);
+    inject.drv_wake_gpiob_octl = GPIO_OCTL(GPIOB);
+    inject.drv_wake_gpiob_istat = GPIO_ISTAT(GPIOB);
+    inject.drv_wake_gpioa_ctl1 = GPIO_CTL1(GPIOA);
+    inject.drv_wake_gpioa_octl = GPIO_OCTL(GPIOA);
+    inject.drv_wake_gpioa_istat = GPIO_ISTAT(GPIOA);
+}
 
 static uint32_t inject_status_word(void)
 {
@@ -109,12 +216,38 @@ static uint32_t inject_status_word(void)
            (inject.duration_idx << 24);
 }
 
+static void inject_clear_drv_ready(uint32_t reason)
+{
+    inject.drv_ready = 0U;
+    inject.drv_ready_clear_reason = reason;
+}
+
+int inject_drv_wake_window_active(void)
+{
+    return inject.drv_wake_state == DRV_WAKE_WAIT_SETTLE;
+}
+
 void inject_force_safe(void)
 {
     gpio_bit_reset(ENABLE_PIN);
+    timer_primary_output_config(TIM_PWM, DISABLE);
     timer_channel_output_pulse_value_config(TIM_PWM, TIM_CH_U, SVPWM_PERIOD);
     timer_channel_output_pulse_value_config(TIM_PWM, TIM_CH_V, SVPWM_PERIOD);
     timer_channel_output_pulse_value_config(TIM_PWM, TIM_CH_W, SVPWM_PERIOD);
+}
+
+static void inject_disable_pwm_outputs(void)
+{
+    inject_force_safe();
+    timer_primary_output_config(TIM_PWM, DISABLE);
+}
+
+static void inject_hold_pwm_outputs_off(void)
+{
+    timer_channel_output_pulse_value_config(TIM_PWM, TIM_CH_U, SVPWM_PERIOD);
+    timer_channel_output_pulse_value_config(TIM_PWM, TIM_CH_V, SVPWM_PERIOD);
+    timer_channel_output_pulse_value_config(TIM_PWM, TIM_CH_W, SVPWM_PERIOD);
+    timer_primary_output_config(TIM_PWM, DISABLE);
 }
 
 static void inject_apply_pattern(void)
@@ -163,6 +296,19 @@ static void inject_finish(uint32_t result)
     inject.last_end_ms = systick_uptime_ms();
 }
 
+static void inject_capture_fault_registers(void)
+{
+    if (inject.drv_fault_capture_pending == 0U) {
+        return;
+    }
+    inject.drv_fault_capture_pending = 0U;
+    /* PWM remains disabled; this bounded read is only for post-abort evidence. */
+    gpio_bit_set(ENABLE_PIN);
+    inject.drv_fault_fsr1 = drv_read_FSR1(drv);
+    inject.drv_fault_fsr2 = drv_read_FSR2(drv);
+    gpio_bit_reset(ENABLE_PIN);
+}
+
 static void inject_sample_current_watchdog(void)
 {
     int32_t dev_b;
@@ -200,6 +346,9 @@ void inject_timer_tick(void)
              * the CAN arm and the first timer tick. */
             if (safety_get_faults() != 0U ||
                 gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+                if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+                    inject.drv_fault_capture_pending = 1U;
+                }
                 inject_finish(INJECT_RESULT_FAULT);
                 return;
             }
@@ -221,9 +370,25 @@ void inject_timer_tick(void)
             if (safety_get_faults() != 0U ||
                 gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET ||
                 gpio_output_bit_get(GPIOA, GPIO_PIN_11) == RESET) {
+                if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+                    inject.drv_fault_capture_pending = 1U;
+                }
                 inject_finish(INJECT_RESULT_FAULT);
             }
         }
+        return;
+    }
+
+    if (inject.drv_wake_state == DRV_WAKE_WAIT_SETTLE) {
+        /* The main-loop wake service owns PA11 for this bounded interval. */
+        inject_hold_pwm_outputs_off();
+        return;
+    }
+
+    if (inject.state == INJECT_STATE_PRECHARGE ||
+        inject.state == INJECT_STATE_POEN_TEST) {
+        /* EN_GATE is high, but PWM/POEN and all switching inputs stay off. */
+        inject_hold_pwm_outputs_off();
         return;
     }
 
@@ -262,13 +427,15 @@ static void inject_request_fire(const InjectRequest *request)
     uint8_t status = DIAG_STATUS_OK;
     uint32_t payload = 0U;
 
-    if (inject.state == INJECT_STATE_ACTIVE) {
+    if (inject.state == INJECT_STATE_PRECHARGE ||
+        inject.state == INJECT_STATE_ACTIVE) {
         status = DIAG_STATUS_BUSY;
         payload = inject_status_word();
     } else if ((uint32_t)(now - inject.last_end_ms) < INJECT_COOLDOWN_MS) {
         status = DIAG_STATUS_BUSY;
         payload = inject_status_word();
     } else if (safety_get_faults() != 0U ||
+               inject.drv_ready == 0U ||
                gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET ||
                gpio_output_bit_get(GPIOA, GPIO_PIN_11) != RESET) {
         status = DIAG_STATUS_UNAVAILABLE;
@@ -293,7 +460,11 @@ static void inject_request_fire(const InjectRequest *request)
         inject.peak_adc_c = 0;
         inject.sample_divider = 0U;
         inject.start_raw14 = comm_encoder.raw14;
-        inject.state = INJECT_STATE_ACTIVE;
+        /* Let the DRV8323 charge pump settle before any PWM edge. */
+        inject.precharge_started_ms = now;
+        inject.state = INJECT_STATE_PRECHARGE;
+        inject_disable_pwm_outputs();
+        gpio_bit_set(ENABLE_PIN);
         payload = inject_status_word();
     }
 
@@ -301,9 +472,128 @@ static void inject_request_fire(const InjectRequest *request)
                          request->vector, status, payload);
 }
 
+static void inject_start_drv_wake(uint8_t sequence)
+{
+    inject_clear_drv_ready(DRV_READY_CLEAR_WAKE);
+    if (inject.state == INJECT_STATE_PRECHARGE ||
+        inject.state == INJECT_STATE_ACTIVE ||
+        inject.drv_wake_state != DRV_WAKE_IDLE) {
+        inject_send_response(DIAG_OPCODE_DRV_WAKE, sequence, 0U,
+                             DIAG_STATUS_BUSY, 0U);
+        return;
+    }
+    if ((safety_get_faults() & ~SAFETY_FAULT_GATE_DRIVER) != 0U ||
+        (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET &&
+         (safety_get_faults() & SAFETY_FAULT_GATE_DRIVER) == 0U)) {
+        inject_send_response(DIAG_OPCODE_DRV_WAKE, sequence, 0U,
+                             DIAG_STATUS_UNAVAILABLE, 0U);
+        return;
+    }
+
+    /* The ISR only begins a timer-bounded wake window. SPI access and the
+     * response occur in inject_service() so SysTick/CAN cannot deadlock. */
+    inject.drv_wake_sequence = sequence;
+    inject.drv_wake_started_ms = systick_uptime_ms();
+    inject.drv_wake_state = DRV_WAKE_WAIT_SETTLE;
+    for (uint8_t i = 0U; i < DRV_WAKE_TRANSFER_COUNT; ++i) {
+        inject.drv_wake_tx[i] = 0U;
+        inject.drv_wake_rx[i] = 0U;
+        inject.drv_wake_spi_status[i] = 3U;
+    }
+    inject_disable_pwm_outputs();
+    gpio_bit_set(ENABLE_PIN);
+}
+
+void inject_service(void)
+{
+    uint8_t status = DIAG_STATUS_UNAVAILABLE;
+    const int nFAULT_ok = gpio_input_bit_get(GPIOA, GPIO_PIN_12) != RESET;
+
+    if (inject.drv_wake_state == DRV_WAKE_IDLE &&
+        inject.state != INJECT_STATE_ACTIVE) {
+        inject_capture_fault_registers();
+    }
+
+    if (inject.state == INJECT_STATE_PRECHARGE) {
+        if ((uint32_t)(systick_uptime_ms() - inject.precharge_started_ms) <
+            DRV_WAKE_SETTLE_MS) {
+            return;
+        }
+        if (safety_get_faults() != 0U ||
+            gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET ||
+            gpio_output_bit_get(GPIOA, GPIO_PIN_11) == RESET) {
+            inject_finish(INJECT_RESULT_FAULT);
+            return;
+        }
+        /* Isolate POEN with all three compare registers still all-low. */
+        timer_primary_output_config(TIM_PWM, ENABLE);
+        inject.poen_test_started_ms = systick_uptime_ms();
+        inject.state = INJECT_STATE_POEN_TEST;
+        return;
+    }
+
+    if (inject.state == INJECT_STATE_POEN_TEST) {
+        if ((uint32_t)(systick_uptime_ms() - inject.poen_test_started_ms) <
+            DRV_WAKE_SETTLE_MS) {
+            return;
+        }
+        gpio_bit_set(ENABLE_PIN);
+        inject.drv_poen_fsr1 = drv_read_FSR1(drv);
+        inject.drv_poen_fsr2 = drv_read_FSR2(drv);
+        gpio_bit_reset(ENABLE_PIN);
+        if (inject.drv_poen_fsr1 != 0U || inject.drv_poen_fsr2 != 0U ||
+            safety_get_faults() != 0U ||
+            gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+            inject_finish(INJECT_RESULT_FAULT);
+            return;
+        }
+        inject.state = INJECT_STATE_ACTIVE;
+        return;
+    }
+
+    if (inject.drv_wake_state != DRV_WAKE_WAIT_SETTLE ||
+        (uint32_t)(systick_uptime_ms() - inject.drv_wake_started_ms) <
+            DRV_WAKE_SETTLE_MS) {
+        return;
+    }
+
+    /* Read once even when nFAULT is already low. PWM/POEN remain disabled;
+     * this is the only way to distinguish a real DRV fault from an absent SDO
+     * response. The EXTI handler leaves PA11 high during this bounded window. */
+    inject.drv_pre_fsr1 = drv_read_FSR1(drv);
+    inject.drv_pre_fsr2 = drv_read_FSR2(drv);
+    inject_drv_transfer(0U, (uint16_t)((DCR << 11) | DRV_DCR_CONFIG_VALUE));
+    inject_drv_transfer(1U, (uint16_t)((CSACR << 11) | DRV_CSACR_CONFIG_VALUE));
+    inject_drv_transfer(2U, (uint16_t)((OCPCR << 11) | DRV_OCPCR_CONFIG_VALUE));
+    inject.drv_fsr1 = inject_drv_transfer(3U, (uint16_t)(0x8000U | (FSR1 << 11)));
+    inject.drv_fsr2 = inject_drv_transfer(4U, (uint16_t)(0x8000U | (FSR2 << 11)));
+    inject.drv_dcr = inject_drv_transfer(5U, (uint16_t)(0x8000U | (DCR << 11)));
+    inject.drv_csacr = inject_drv_transfer(6U, (uint16_t)(0x8000U | (CSACR << 11)));
+    inject.drv_ocpcr = inject_drv_transfer(7U, (uint16_t)(0x8000U | (OCPCR << 11)));
+    inject_capture_drv_bus_state();
+    /* CLR_FLT is self-clearing, so its readback is intentionally not part of
+     * the DCR comparison. A low nFAULT still makes the wake unavailable. */
+    if (nFAULT_ok && inject_all_drv_transfers_ok() != 0U &&
+        inject.drv_fsr1 == 0U && inject.drv_fsr2 == 0U &&
+        (inject.drv_dcr & DRV_DCR_VERIFY_MASK) ==
+            (DRV_DCR_CONFIG_VALUE & DRV_DCR_VERIFY_MASK) &&
+        inject.drv_csacr == DRV_CSACR_CONFIG_VALUE &&
+        inject.drv_ocpcr == DRV_OCPCR_CONFIG_VALUE) {
+        inject.drv_ready = 1U;
+        status = DIAG_STATUS_OK;
+    }
+    inject_force_safe();
+    inject.drv_wake_state = DRV_WAKE_IDLE;
+    inject_send_response(DIAG_OPCODE_DRV_WAKE, inject.drv_wake_sequence, 0U,
+                         status, inject.drv_ready);
+}
+
 static void inject_request_stop(uint8_t sequence)
 {
-    if (inject.state == INJECT_STATE_ACTIVE) {
+    inject.drv_wake_state = DRV_WAKE_IDLE;
+    inject_clear_drv_ready(DRV_READY_CLEAR_STOP);
+    if (inject.state == INJECT_STATE_PRECHARGE ||
+        inject.state == INJECT_STATE_ACTIVE) {
         inject_finish(INJECT_RESULT_ABORTED);
     } else {
         inject_force_safe();
@@ -318,6 +608,17 @@ void inject_handle_can(const can_receive_message_struct *message)
         message->rx_ff != CAN_FF_STANDARD ||
         message->rx_ft != CAN_FT_DATA || message->rx_dlen != 8U) {
         diagnostic_counters.rx_bad_format++;
+        return;
+    }
+
+    if (message->rx_data[3] == DIAG_OPCODE_DRV_WAKE) {
+        DiagRequest request;
+        if (diag_protocol_parse(message->rx_data, &request) != 0 ||
+            request.page != 0U) {
+            diagnostic_counters.rx_bad_protocol++;
+            return;
+        }
+        inject_start_drv_wake(request.sequence);
         return;
     }
 
@@ -345,11 +646,22 @@ void inject_handle_can(const can_receive_message_struct *message)
         return;
     }
 
+    /* Read-only diagnostics must not clear a successful DRV wake result; the
+     * host queries pages 27..48 immediately after opcode 0x06. Only a control
+     * or unknown frame invalidates the readiness latch. */
+    if (message->rx_data[3] <= DIAG_OPCODE_GET_COUNTER) {
+        diagnostics_handle_can(message);
+        return;
+    }
+
     /* Any other frame received while a pulse is active aborts it; the timer
      * tick confirms the PA11 drop on its next pass. */
-    if (inject.state == INJECT_STATE_ACTIVE) {
+    if (inject.state == INJECT_STATE_PRECHARGE ||
+        inject.state == INJECT_STATE_ACTIVE) {
         inject_finish(INJECT_RESULT_ABORTED);
     } else {
+        inject.drv_wake_state = DRV_WAKE_IDLE;
+        inject_clear_drv_ready(DRV_READY_CLEAR_UNKNOWN_FRAME);
         inject_force_safe();
     }
     diagnostics_handle_can(message);
@@ -369,6 +681,45 @@ uint32_t inject_snapshot(uint8_t page, uint8_t *status)
                ((uint32_t)inject.end_raw14 << 16);
     case 23U:
         return inject.active_ticks | (inject.end_faults << 16);
+    case 27U: return inject.drv_ready;
+    case 28U:
+        return (uint32_t)inject.drv_dcr | ((uint32_t)inject.drv_csacr << 16);
+    case 29U:
+        return (uint32_t)inject.drv_fsr1 | ((uint32_t)inject.drv_fsr2 << 16);
+    case 30U: return inject.drv_ocpcr;
+    case 31U:
+        return (uint32_t)inject.drv_wake_spi_status[0] |
+               ((uint32_t)inject.drv_wake_spi_status[1] << 2) |
+               ((uint32_t)inject.drv_wake_spi_status[2] << 4) |
+               ((uint32_t)inject.drv_wake_spi_status[3] << 6) |
+               ((uint32_t)inject.drv_wake_spi_status[4] << 8) |
+               ((uint32_t)inject.drv_wake_spi_status[5] << 10) |
+               ((uint32_t)inject.drv_wake_spi_status[6] << 12) |
+               ((uint32_t)inject.drv_wake_spi_status[7] << 14);
+    case 32U: return (uint32_t)inject.drv_wake_tx[0] | ((uint32_t)inject.drv_wake_rx[0] << 16);
+    case 33U: return (uint32_t)inject.drv_wake_tx[1] | ((uint32_t)inject.drv_wake_rx[1] << 16);
+    case 34U: return (uint32_t)inject.drv_wake_tx[2] | ((uint32_t)inject.drv_wake_rx[2] << 16);
+    case 35U: return (uint32_t)inject.drv_wake_tx[3] | ((uint32_t)inject.drv_wake_rx[3] << 16);
+    case 36U: return (uint32_t)inject.drv_wake_tx[4] | ((uint32_t)inject.drv_wake_rx[4] << 16);
+    case 37U: return (uint32_t)inject.drv_wake_tx[5] | ((uint32_t)inject.drv_wake_rx[5] << 16);
+    case 38U: return (uint32_t)inject.drv_wake_tx[6] | ((uint32_t)inject.drv_wake_rx[6] << 16);
+    case 39U: return (uint32_t)inject.drv_wake_tx[7] | ((uint32_t)inject.drv_wake_rx[7] << 16);
+    case 40U: return inject.drv_wake_spi_ctl0;
+    case 41U: return inject.drv_wake_spi_ctl1;
+    case 42U: return inject.drv_wake_spi_stat;
+    case 43U: return inject.drv_wake_gpiob_ctl1;
+    case 44U: return inject.drv_wake_gpiob_octl;
+    case 45U: return inject.drv_wake_gpiob_istat;
+    case 46U: return inject.drv_wake_gpioa_ctl1;
+    case 47U: return inject.drv_wake_gpioa_octl;
+    case 48U: return inject.drv_wake_gpioa_istat;
+    case 49U: return inject.drv_ready_clear_reason;
+    case 50U: return inject.drv_pre_fsr1;
+    case 51U: return inject.drv_pre_fsr2;
+    case 52U: return inject.drv_fault_fsr1;
+    case 53U: return inject.drv_fault_fsr2;
+    case 54U: return inject.drv_poen_fsr1;
+    case 55U: return inject.drv_poen_fsr2;
     case 24U:
         drv.fsr1 = drv_read_FSR1(drv);
         drv.fsr2 = drv_read_FSR2(drv);
@@ -400,19 +751,11 @@ void inject_init(void)
     inject.end_faults = 0U;
     inject.last_end_ms = 0U;
     inject.sample_divider = 0U;
+    inject_clear_drv_ready(DRV_READY_CLEAR_BOOT);
+    inject.drv_wake_state = DRV_WAKE_IDLE;
     inject_force_safe();
 
-    /* Configure the gate driver with PA11 low. COAST stays clear so PA11 is
-     * the only power gate; sense and VDS over-current are enabled and latch. */
-    drv_write_DCR(drv, DIS_CPUV_EN, DIS_GDF_EN, OTW_REP_EN, PWM_MODE_3X,
-                  0, 0, 0, 0, CLR_FLT_RST);
-    drv_write_CSACR(drv, CSA_FET_SP, VREF_DIV_2, 0, CSA_GAIN_40,
-                    DIS_SEN_EN, 1, 1, 1, SEN_LVL_0_25);
-    drv_write_OCPCR(drv, TRETRY_50US, DEADTIME_50NS, OCP_LATCH,
-                    OCP_DEG_4US, VDS_LVL_0_45);
-    drv.fsr1 = drv_read_FSR1(drv);
-    drv.fsr2 = drv_read_FSR2(drv);
-
+    /* DRV SPI writes are deferred until the explicit drv-wake command. */
     inject_measure_offsets();
     inject_force_safe();
 }

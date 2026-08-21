@@ -213,19 +213,17 @@ void MX_CAN0_Init(void)
     /* baudrate 1Mbps */
     can_parameter.working_mode = CAN_NORMAL_MODE;
     can_parameter.resync_jump_width = CAN_BT_SJW_1TQ;
-    can_parameter.time_segment_1 = CAN_BT_BS1_5TQ;
+    /* Factory CAN_BT=0x00390003 at 1 Mbps on 60 MHz APB1: prescaler 4,
+     * BS1 10 TQ, BS2 4 TQ. */
+    can_parameter.time_segment_1 = CAN_BT_BS1_10TQ;
     can_parameter.time_segment_2 = CAN_BT_BS2_4TQ;
     can_parameter.time_triggered = DISABLE;
-    can_parameter.auto_bus_off_recovery = DISABLE;
+    can_parameter.auto_bus_off_recovery = ENABLE;
     can_parameter.auto_wake_up = DISABLE;
-#ifdef SAFE_BRINGUP
-    can_parameter.no_auto_retrans = ENABLE;
-#else
     can_parameter.no_auto_retrans = DISABLE;
-#endif
     can_parameter.rec_fifo_overwrite = DISABLE;
     can_parameter.trans_fifo_order = DISABLE;
-    can_parameter.prescaler = 6;
+    can_parameter.prescaler = 4;
     can_init(CAN0, &can_parameter);
 
     can_interrupt_enable(CAN0, CAN_INT_RFNE0);
@@ -239,19 +237,14 @@ void can_rx_init(can_receive_message_struct *msg)
     can_struct_para_init(CAN_FILTER_STRUCT, &can_filter);
 
     /* initialize filter */    
-#ifdef SAFE_BRINGUP
-    /* Fixed read-only diagnostic ID. Include IDE and RTR in the hardware mask
-     * so extended or remote frames do not reach the parser. */
-    can_filter.filter_list_high = DIAG_CAN_REQUEST_ID << 5;
+    /* Accept all frames at the hardware boundary. The GD32 32-bit filter
+     * register encoding differs from the STM32 layout; encoding the legacy
+     * STM32-style ID mask here can silently reject every normal MIT frame.
+     * Each profile performs its exact ID/format check in software. */
+    can_filter.filter_list_high = 0x0000U;
     can_filter.filter_list_low = 0x0000;
-    can_filter.filter_mask_high = 0xFFE0;
-    can_filter.filter_mask_low = 0x0006;
-#else
-    can_filter.filter_list_high = CAN_ID << 5;
-    can_filter.filter_list_low = 0x0000;
-    can_filter.filter_mask_high = 0xFFE0;
-    can_filter.filter_mask_low = 0x0000;  
-#endif
+    can_filter.filter_mask_high = 0x0000U;
+    can_filter.filter_mask_low = 0x0000U;
     can_filter.filter_fifo_number = CAN_FIFO0;
     can_filter.filter_number = 0;
     can_filter.filter_mode = CAN_FILTERMODE_MASK;
@@ -264,17 +257,43 @@ void can_tx_init(can_trasnmit_message_struct *msg)
 {
   can_struct_para_init(CAN_TX_MESSAGE_STRUCT, msg);
 
-#ifdef SAFE_BRINGUP
+#if defined(SAFE_BRINGUP) || defined(BRINGUP_INJECT)
   msg->tx_sfid = DIAG_CAN_RESPONSE_ID;
   msg->tx_dlen = 8U;
 #else
   msg->tx_sfid = CAN_MASTER;
+  /* The upstream MIT feedback packet is five payload bytes carried in a
+   * six-byte classic CAN frame (the sixth byte is retained for compatibility
+   * with the original controller implementation). */
   msg->tx_dlen = 6U;
 #endif
   msg->tx_efid = 0U;
   msg->tx_ft = CAN_FT_DATA;
   msg->tx_ff = CAN_FF_STANDARD;
 }
+
+#ifdef CAN_PROBE
+void can_probe_beacon(void)
+{
+    can_trasnmit_message_struct beacon;
+
+    can_struct_para_init(CAN_TX_MESSAGE_STRUCT, &beacon);
+    beacon.tx_sfid = DIAG_CAN_RESPONSE_ID;
+    beacon.tx_efid = 0U;
+    beacon.tx_ft = CAN_FT_DATA;
+    beacon.tx_ff = CAN_FF_STANDARD;
+    beacon.tx_dlen = 8U;
+    beacon.tx_data[0] = 0xD1U;
+    beacon.tx_data[1] = 0xA6U;
+    beacon.tx_data[2] = 0x01U;
+    beacon.tx_data[3] = 0x00U;
+    beacon.tx_data[4] = 0x00U;
+    beacon.tx_data[5] = 0x00U;
+    beacon.tx_data[6] = 0x00U;
+    beacon.tx_data[7] = 0x00U;
+    (void)can_message_transmit(CAN0, &beacon);
+}
+#endif
 
 /// CAN Reply Packet Structure ///
 /// 16 bit position, between -4*pi and 4*pi

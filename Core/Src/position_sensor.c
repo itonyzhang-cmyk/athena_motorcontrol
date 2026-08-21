@@ -12,6 +12,7 @@
 #include "user_config.h"
 #include "safety.h"
 #include "as5047_protocol.h"
+#include "systick.h"
 
 #define AS5047_REG_ERRFL	0x0001
 #define AS5047_REG_DIAAGC	0x3FFC
@@ -98,37 +99,50 @@ void ps_warmup(EncoderStruct * encoder, int n){
 	}
 #else
 	const uint16_t angle_command = as5047_make_read_command(AS5047_REG_ANGLECOM);
-
-	encoder->valid = 0U;
-	encoder->diagnostics_valid = 0U;
-	encoder->consecutive_errors = 0U;
 	uint32_t consecutive_good = 0U;
+	int warmup_ok = 0;
+	int saw_spi_timeout = 0;
 
-	for (int i = 0; i < n; i++) {
-		uint16_t response;
-		if (as5047_exchange(angle_command, &response) != SPI_TRANSFER_OK) {
-			encoder->spi_timeout_count++;
-			encoder->consecutive_errors++;
-			encoder->valid = 0U;
-			consecutive_good = 0U;
-			safety_force_outputs_off(SAFETY_FAULT_SPI_TIMEOUT);
-			continue;
+	/* A debugger attach changes reset timing.  Absorb that startup race with a
+	 * bounded retry, while keeping all gate outputs disabled. */
+	for (unsigned attempt = 0U; attempt < 3U && !warmup_ok; ++attempt) {
+		encoder->valid = 0U;
+		encoder->diagnostics_valid = 0U;
+		encoder->consecutive_errors = 0U;
+		consecutive_good = 0U;
+
+		for (int i = 0; i < n; i++) {
+			uint16_t response;
+			if (as5047_exchange(angle_command, &response) != SPI_TRANSFER_OK) {
+				encoder->spi_timeout_count++;
+				encoder->consecutive_errors++;
+				encoder->valid = 0U;
+				consecutive_good = 0U;
+				saw_spi_timeout = 1;
+				continue;
+			}
+
+			/* The first response is for the command that preceded warm-up. */
+			if (i > 0 && as5047_frame_valid(encoder, response)) {
+				encoder->raw14 = response & AS5047_DATA_MASK;
+				encoder->valid = 1U;
+				encoder->consecutive_errors = 0U;
+				consecutive_good++;
+			} else if (i > 0) {
+				encoder->valid = 0U;
+				consecutive_good = 0U;
+			}
 		}
-
-		/* The first response is for the command that preceded warm-up. */
-		if (i > 0 && as5047_frame_valid(encoder, response)) {
-			encoder->raw14 = response & AS5047_DATA_MASK;
-			encoder->valid = 1U;
-			encoder->consecutive_errors = 0U;
-			consecutive_good++;
-		} else if (i > 0) {
-			encoder->valid = 0U;
-			consecutive_good = 0U;
+		warmup_ok = consecutive_good >= 32U;
+		if (!warmup_ok && attempt < 2U) {
+			delay_1ms(20U);
 		}
 	}
-	if (consecutive_good < 32U) {
+
+	if (!warmup_ok) {
 		encoder->valid = 0U;
-		safety_force_outputs_off(SAFETY_FAULT_ENCODER);
+		safety_force_outputs_off(saw_spi_timeout ? SAFETY_FAULT_SPI_TIMEOUT
+		                                          : SAFETY_FAULT_ENCODER);
 	}
 
 	encoder->diagnostics_valid = (ps_read_diagnostics(encoder) == 0) ? 1U : 0U;

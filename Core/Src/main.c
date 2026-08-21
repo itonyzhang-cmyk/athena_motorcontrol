@@ -50,6 +50,7 @@
 #include "flash_writer.h"
 #include "position_sensor.h"
 #include "preference_writer.h"
+#include "config_store.h"
 #include "hw_config.h"
 #include "user_config.h"
 #include "fsm.h"
@@ -220,7 +221,10 @@ int main(void)
   KT = 1.0f;
 #else
   preference_writer_init(&prefs, 6);
-  preference_writer_load(prefs);
+  if (!preference_writer_load(&prefs)) {
+    config_apply_defaults(__int_reg, __float_reg);
+    info(">> Invalid/uninitialized configuration; using RAM defaults (CAN RX=1 TX=0) <<\r\n");
+  }
 #endif
 
   /* Sanitize configs in case flash is empty*/
@@ -268,8 +272,10 @@ int main(void)
   comm_encoder.e_zero = E_ZERO;
   comm_encoder.ppairs = PPAIRS;
 #ifndef STM32F446
-  /* AS5047P requires up to 10 ms from power-on before the first valid angle. */
-  delay_1ms(10U);
+  /* Allow the encoder rail and magnetic front-end to settle independently of
+   * debugger-induced reset/power timing.  The first-flash image remains
+   * passive; this only delays read-only startup sampling. */
+  delay_1ms(100U);
 #endif
   ps_warmup(&comm_encoder, 100);			// clear the noisy data when the encoder first turns on
 
@@ -374,7 +380,9 @@ int main(void)
 #elif defined(SAFE_BRINGUP)
   safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
 #else
-  drv_init_config(drv);
+  if (drv_init_config(drv) != 0) {
+    info(">> DRV8323 configuration/readback failed; motor mode remains locked <<\r\n");
+  }
 #endif
 
 #ifdef DEBUG_ADC
@@ -386,10 +394,14 @@ int main(void)
   can_rx_init(&can_rx);
   can_tx_init(&can_tx);
 
-  /* Turn on Interrupts */
-  nvic_irq_enable(TIMER0_UP_IRQn, 0U, 0);
-  nvic_irq_enable(EXTI10_15_IRQn, 0U, 1);
-  nvic_irq_enable(USBD_LP_CAN0_RX0_IRQn, 0U, 2);
+  /* With the GD32 default PRE2_SUB2 grouping, only the pre-emption field can
+   * interrupt a currently executing ISR. TIMER0 runs at 30 kHz and performs
+   * the complete normal control/sample step, so CAN RX must be able to
+   * pre-empt it rather than merely having a different subpriority. Keep the
+   * active-low gate-driver fault at the highest level. */
+  nvic_irq_enable(EXTI10_15_IRQn, 0U, 0U);
+  nvic_irq_enable(USBD_LP_CAN0_RX0_IRQn, 0U, 1U);
+  nvic_irq_enable(TIMER0_UP_IRQn, 1U, 0U);
 #if !defined(SAFE_BRINGUP) && !defined(BRINGUP_INJECT)
   nvic_irq_enable(USART1_IRQn, 2U, 0);
 #endif
@@ -402,19 +414,26 @@ int main(void)
 #if !defined(SAFE_BRINGUP) && !defined(BRINGUP_INJECT)
   uint32_t loop_count = 0;
 #endif
-  FlagStatus status = RESET;
-
   while (1)
   {
-    delay_1ms(1000);
 #if defined(BRINGUP_INJECT)
+    static uint32_t inject_last_report_ms;
+    inject_service();
+    if ((uint32_t)(systick_uptime_ms() - inject_last_report_ms) < 1000U) {
+      continue;
+    }
+    inject_last_report_ms = systick_uptime_ms();
     adc_software_trigger_enable(ADC0, ADC_REGULAR_CHANNEL);
     adc_software_trigger_enable(ADC2, ADC_REGULAR_CHANNEL);
     delay_1ms(1U);
     diagnostics_uart_report();
     inject_uart_report();
 #elif defined(SAFE_BRINGUP)
+    delay_1ms(1000);
     safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
+#ifdef CAN_PROBE
+    can_probe_beacon();
+#endif
     /* Refresh the low-rate DMA diagnostic channels. These conversions are
      * read-only and do not participate in motor control. */
     adc_software_trigger_enable(ADC0, ADC_REGULAR_CHANNEL);
@@ -422,17 +441,12 @@ int main(void)
     delay_1ms(1U);
     diagnostics_uart_report();
 #else
+    delay_1ms(1000);
     loop_count += 1;
 
     if (drv.fault != 0)
       drv_print_faults(drv, loop_count);
 #endif
-
-    if (status == RESET && state.state != MOTOR_MODE) {
-      gpio_bit_reset(GPIOC, GPIO_PIN_13);
-    } else {
-      gpio_bit_set(GPIOC, GPIO_PIN_13);
-    }
 
 #ifdef DEBUG_TIMER
     static uint32_t i = 0;
@@ -462,8 +476,6 @@ int main(void)
     adc_software_trigger_enable(ADC0, ADC_REGULAR_CHANNEL);
     adc_software_trigger_enable(ADC2, ADC_REGULAR_CHANNEL);
 #endif
-
-    status = ~status;
   }
 #endif
 }

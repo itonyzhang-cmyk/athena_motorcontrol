@@ -19,11 +19,17 @@ void inject_timer_tick(void);
  * diagnostic handler. */
 void inject_handle_can(const can_receive_message_struct *message);
 
+/* Runs the bounded DRV wake/configuration transaction outside all ISRs. */
+void inject_service(void);
+
+/* True only during the bounded, PWM-disabled DRV fault-read window. */
+int inject_drv_wake_window_active(void);
+
 /* One-line per-second UART status appended after the standard diagnostic
  * lines. */
 void inject_uart_report(void);
 
-/* Read-only snapshot pages 20..26 for the inject profile. */
+/* Read-only snapshot pages 20..48 for the inject profile. */
 uint32_t inject_snapshot(uint8_t page, uint8_t *status);
 
 #endif /* BRINGUP_INJECT */

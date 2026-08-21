@@ -38,6 +38,7 @@ int main(void)
 {
     uint8_t data[8];
     InjectRequest request;
+    DiagRequest diagnostic_request;
 
     build_request(DIAG_OPCODE_INJECT, 0x11U, 0U, 0x00U, data);
     if (expect_ok(data, DIAG_OPCODE_INJECT, 0U, 0U, 0U) != 0) return 1;
@@ -47,6 +48,11 @@ int main(void)
 
     build_request(DIAG_OPCODE_INJECT_STOP, 0x33U, 0U, 0x00U, data);
     if (expect_ok(data, DIAG_OPCODE_INJECT_STOP, 0U, 0U, 0U) != 0) return 1;
+
+    build_request(DIAG_OPCODE_DRV_WAKE, 0x34U, 0U, 0x00U, data);
+    if (diag_protocol_parse(data, &diagnostic_request) != 0 ||
+        diagnostic_request.opcode != DIAG_OPCODE_DRV_WAKE ||
+        diagnostic_request.page != 0U) return 1;
 
     build_request(DIAG_OPCODE_INJECT, 0x44U, 6U, 0x00U, data);
     if (expect_reject(data) != 0) return 1;

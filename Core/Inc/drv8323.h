@@ -178,6 +178,9 @@ typedef struct{
 
 
 uint16_t drv_spi_write(DRVStruct * drv, uint16_t val);
+/* Returns SPI_TRANSFER_* on GD32.  Callers that need diagnostic evidence must
+ * retain the status instead of treating an all-one receive word as a reply. */
+int drv_spi_transfer(DRVStruct * drv, uint16_t val, uint16_t *rx_word);
 uint16_t drv_read_FSR1(DRVStruct drv);
 uint16_t drv_read_FSR2(DRVStruct drv);
 uint16_t drv_read_register(DRVStruct drv, int reg);
@@ -188,10 +191,15 @@ void drv_write_LSR(DRVStruct drv, int CBC, int TDRIVE, int IDRIVEP_LS, int IDRIV
 void drv_write_OCPCR(DRVStruct drv, int TRETRY, int DEAD_TIME, int OCP_MODE, int OCP_DEG, int VDS_LVL);
 void drv_write_CSACR(DRVStruct drv, int CSA_FET, int VREF_DIV, int LS_REF, int CSA_GAIN, int DIS_SEN, int CSA_CAL_A, int CSA_CAL_B, int CSA_CAL_C, int SEN_LVL);
 void drv_enable_gd(DRVStruct drv);
+void drv_service_enable(DRVStruct drv);
+int drv_enable_ready(void);
 void drv_disable_gd(DRVStruct drv);
 void drv_calibrate(DRVStruct drv);
 void drv_print_faults(DRVStruct drv, uint32_t loop_count);
-void drv_init_config(DRVStruct drv);
+/* Configure the DRV8323 and verify the readback while nSLEEP/ENABLE is high.
+ * Returns 0 only when every SPI transfer completed, both fault registers are
+ * clear, and the three application configuration registers match. */
+int drv_init_config(DRVStruct drv);
 void drv_clear_fault(DRVStruct drv);
 
 void MX_EXTI_Init();

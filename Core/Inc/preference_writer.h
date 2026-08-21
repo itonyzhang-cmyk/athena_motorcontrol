@@ -42,6 +42,10 @@ PreferenceWriter::PreferenceWriter(uint32_t sector) {
 */
 typedef struct{
 	FlashWriter fw;
+	uint32_t slot_base;
+	uint32_t active_sequence;
+	uint8_t active_slot;
+	uint8_t target_slot;
 #ifdef STM32F446
 	uint32_t sector;
 #endif
@@ -49,12 +53,12 @@ typedef struct{
 }PreferenceWriter;
 
 void preference_writer_init(PreferenceWriter * pr, uint32_t sector);
-void preference_writer_open(PreferenceWriter * pr);
+bool preference_writer_open(PreferenceWriter * pr);
 bool preference_writer_ready(PreferenceWriter pr);
 void preference_writer_write_int(int x, int index);
 void preference_writer_write_float(float x, int index);
-void preference_writer_flush(PreferenceWriter * pr);
-void preference_writer_load(PreferenceWriter pr);
+bool preference_writer_flush(PreferenceWriter * pr);
+bool preference_writer_load(PreferenceWriter *pr);
 void preference_writer_close(PreferenceWriter *pr);
 
 extern PreferenceWriter prefs;

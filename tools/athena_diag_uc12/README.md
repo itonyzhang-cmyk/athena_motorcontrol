@@ -55,6 +55,12 @@ peak current ADC deviations, encoder raw start/end, active ticks, and latched
 faults). `stop` immediately aborts any active pulse and returns the driver to
 the passive state; `drv` prints the DRV8323 fault and configuration registers.
 
+`drv-wake` also prints a latched transaction trace: all eight SPI TX/RX words,
+their TBE/RBNE/BUSY completion state, SPI1 control/status, and GPIO A/B
+configuration, output-latch, and input snapshots. This trace is read-only
+after the bounded PA11 window and is intended to distinguish a peripheral
+timeout from a no-response MISO line.
+
 These commands are bench bring-up tools, not a motor API. They are only valid
 against the `BRINGUP_INJECT` firmware and must never be used without the
 current-limited supply, an unloaded/fixed motor, and a reachable emergency

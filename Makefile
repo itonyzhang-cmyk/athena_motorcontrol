@@ -22,6 +22,9 @@ SAFE_BRINGUP ?= 1
 # Low-current single-phase injection bring-up. Implies SAFE_BRINGUP=0 but adds
 # its own gated profile, banner, symbol audit and fixed limits.
 BRINGUP_INJECT ?= 0
+# CAN-only path probe: leaves SAFE_BRINGUP protections enabled and bypasses
+# diagnostic CRC parsing to prove the RX interrupt and TX path independently.
+CAN_PROBE ?= 0
 
 ifeq ($(BRINGUP_INJECT), 1)
 override SAFE_BRINGUP := 0
@@ -61,6 +64,8 @@ Core/Src/safety.c \
 Core/Src/gpio.c \
 Core/Src/adc.c \
 Core/Src/can.c \
+Core/Src/config_store.c \
+Core/Src/normal_can_protocol.c \
 Core/Src/as5047_protocol.c \
 Core/Src/diag_protocol.c \
 Core/Src/diagnostics.c \
@@ -75,6 +80,7 @@ Core/Src/fsm.c \
 Core/Src/math_ops.c \
 Core/Src/position_sensor.c \
 Core/Src/preference_writer.c \
+Core/Src/motor_gate.c \
 Core/Src/syscalls.c \
 Core/Src/sysmem.c \
 Core/Src/systick.c \
@@ -164,6 +170,9 @@ endif
 ifeq ($(BRINGUP_INJECT), 1)
 C_DEFS += -DBRINGUP_INJECT=1
 endif
+ifeq ($(CAN_PROBE), 1)
+C_DEFS += -DCAN_PROBE=1
+endif
 
 
 # AS includes
@@ -232,13 +241,24 @@ host-tools-test:
 	$(MAKE) -C tools/athena_diag_uc12 test
 	bash tools/athena_safe_flash.sh self-test
 
+host-app-test:
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -ICore/Inc \
+		Core/Src/motor_gate.c Core/Src/config_store.c Core/Src/normal_can_protocol.c \
+		Core/Src/diag_protocol.c \
+		tests/motor_gate_test.c tests/config_store_test.c tests/normal_can_protocol_test.c \
+		-o /tmp/athena_motor_gate_test
+	/tmp/athena_motor_gate_test
+
+verify-normal: $(OUTPUT_DIR)/$(TARGET).elf
+	sh tools/verify_normal_image.sh $(NM) $<
+
 verify-safe: $(OUTPUT_DIR)/$(TARGET).elf
 	sh tools/verify_safe_image.sh $(NM) $<
 
 verify-inject: $(OUTPUT_DIR)/$(TARGET).elf
 	sh tools/verify_inject_image.sh $(NM) $<
 
-.PHONY: all host-test host-inject-test host-tools-test verify-safe verify-inject clean
+.PHONY: all host-test host-inject-test host-tools-test host-app-test verify-safe verify-inject verify-normal clean
 
 
 #######################################

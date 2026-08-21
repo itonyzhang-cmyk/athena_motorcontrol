@@ -52,6 +52,8 @@ OF SUCH DAMAGE.
 #include "user_config.h"
 #include "safety.h"
 #include "diagnostics.h"
+#include "diag_protocol.h"
+#include "normal_can_protocol.h"
 #ifdef BRINGUP_INJECT
 #include "inject.h"
 #endif
@@ -175,10 +177,76 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
 #endif
 
 #ifdef SAFE_BRINGUP
+#ifdef CAN_PROBE
+    /* Keep the normal diagnostic handler linked for the safety audit; the
+     * probe intentionally bypasses it at runtime. */
+    static void (*volatile keep_diagnostic_handler)(const can_receive_message_struct *) =
+        diagnostics_handle_can;
+    (void)keep_diagnostic_handler;
+    /* CAN path probe only: reply to any received standard data frame without
+     * applying the diagnostic parser. Gate drive remains disabled by the safe
+     * profile; this isolates CAN RX interrupt and TX arbitration. */
+    if (can_rx.rx_ff == CAN_FF_STANDARD && can_rx.rx_ft == CAN_FT_DATA &&
+        can_rx.rx_dlen == 8U) {
+        can_trasnmit_message_struct probe;
+        can_struct_para_init(CAN_TX_MESSAGE_STRUCT, &probe);
+        probe.tx_sfid = DIAG_CAN_RESPONSE_ID;
+        probe.tx_efid = 0U;
+        probe.tx_ft = CAN_FT_DATA;
+        probe.tx_ff = CAN_FF_STANDARD;
+        probe.tx_dlen = 8U;
+        probe.tx_data[0] = can_rx.rx_data[3] | 0x80U;
+        probe.tx_data[1] = can_rx.rx_data[4];
+        probe.tx_data[2] = can_rx.rx_data[5];
+        probe.tx_data[3] = DIAG_STATUS_OK;
+        probe.tx_data[4] = 0U;
+        probe.tx_data[5] = 0U;
+        probe.tx_data[6] = 0U;
+        probe.tx_data[7] = 0U;
+        can_message_transmit(CAN0, &probe);
+    }
+#else
     safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
     diagnostics_handle_can(&can_rx);
+#endif
     return;
 #endif
+
+    /* Preserve the CAN0 diagnostic ping used to validate the bring-up image.
+     * This is deliberately narrower than ATHENA-DIAG: only a CRC-valid
+     * read-only ping is answered; all driver, injection and motion opcodes
+     * remain unavailable in the normal application. */
+    {
+        DiagRequest diagnostic_request;
+
+        if (normal_can_diag_ping_matches(can_rx.rx_sfid,
+                                         can_rx.rx_ff == CAN_FF_STANDARD,
+                                         can_rx.rx_ft == CAN_FT_DATA,
+                                         can_rx.rx_dlen, can_rx.rx_data,
+                                         &diagnostic_request)) {
+            can_trasnmit_message_struct diagnostic_response;
+
+            can_struct_para_init(CAN_TX_MESSAGE_STRUCT, &diagnostic_response);
+            diagnostic_response.tx_sfid = DIAG_CAN_RESPONSE_ID;
+            diagnostic_response.tx_efid = 0U;
+            diagnostic_response.tx_ft = CAN_FT_DATA;
+            diagnostic_response.tx_ff = CAN_FF_STANDARD;
+            diagnostic_response.tx_dlen = 8U;
+            diag_protocol_response(&diagnostic_request, DIAG_STATUS_OK,
+                                   0x4E485441U, diagnostic_response.tx_data);
+            (void)can_message_transmit(CAN0, &diagnostic_response);
+            return;
+        }
+    }
+
+    /* Normal MIT application path: hardware filter is intentionally permissive
+     * for GD32 compatibility; reject all non-matching frames here. */
+    if (!normal_can_frame_matches(can_rx.rx_sfid,
+                                  can_rx.rx_ff == CAN_FF_STANDARD,
+                                  can_rx.rx_ft == CAN_FT_DATA,
+                                  can_rx.rx_dlen, CAN_ID)) {
+        return;
+    }
 
 #ifdef DEBUG_CAN
     debug("sid: 0x%04lx eid: 0x%08lx format: %u type: %u length: %u\r\n",
@@ -198,8 +266,9 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
 #endif
 
     /* Check for special Commands */
-    if (*((uint32_t *)&can_rx.rx_data[0]) == 0xFFFFFFFF && (*((uint32_t *)&can_rx.rx_data[4]) & 0x00FFFFFF) == 0x00FFFFFF) {
-        switch (can_rx.rx_data[7])
+    uint8_t special_command;
+    if (normal_can_special_command(can_rx.rx_data, &special_command)) {
+        switch (special_command)
         {
         case 0xFC:
             update_fsm(&state, MOTOR_CMD);
@@ -231,6 +300,21 @@ void TIMER0_UP_IRQHandler(void)
 {
     timer_interrupt_flag_clear(TIMER0, TIMER_INT_FLAG_UP);
 
+#if !defined(SAFE_BRINGUP) && !defined(BRINGUP_INJECT)
+    /* TIMER0 updates at 30 kHz (SVPWM_PERIOD=2000 on the 120 MHz clock).
+     * Use this already-running highest-priority path for the normal-image
+     * heartbeat, so a heavily loaded control ISR cannot starve LED timing.
+     * This only writes PC13 once per 15,000 updates and is unrelated to PWM. */
+    static uint16_t heartbeat_ticks;
+    static bit_status heartbeat_state = RESET;
+    heartbeat_ticks++;
+    if (heartbeat_ticks >= 15000U) {
+        heartbeat_ticks = 0U;
+        heartbeat_state = (heartbeat_state == RESET) ? SET : RESET;
+        gpio_bit_write(GPIOC, GPIO_PIN_13, heartbeat_state);
+    }
+#endif
+
 #ifdef BRINGUP_INJECT
     inject_timer_tick();
     static uint8_t inject_diagnostic_divider;
@@ -255,10 +339,6 @@ void TIMER0_UP_IRQHandler(void)
 	safe_diagnostic_divider = 0U;
 #endif
     
-    if (state.state == MOTOR_MODE) {
-        gpio_bit_set(GPIOC, GPIO_PIN_13);
-    }
-
 	/* Sample ADCs */
 	analog_sample(&controller);
 
@@ -285,21 +365,29 @@ void TIMER0_UP_IRQHandler(void)
 	/* increment loop count */
 	controller.loop_count++;
     
-    if (state.state == MOTOR_MODE) {
-        gpio_bit_reset(GPIOC, GPIO_PIN_13);
-    }
 }
 
 void EXTI10_15_IRQHandler(void)
 {
     exti_interrupt_flag_clear(EXTI_12);
 
-    /* nFAULT is active-low. Shut down before attempting SPI or logging, and
-     * latch the fault. Recovery will require an explicit, validated command in
-     * a later phase. */
+    /* nFAULT is active-low. It also goes low normally when PA11 has disabled
+     * the DRV, so only latch it when PA11 was actually enabling the driver.
+     * The dedicated wake window below keeps PA11 high solely to capture the
+     * DRV status registers with PWM/POEN disabled. */
     if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
-        safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
-        drv.fault = 1U;
+#ifdef BRINGUP_INJECT
+        if (inject_drv_wake_window_active()) {
+            /* PWM/POEN are disabled; preserve ENABLE for one bounded SPI
+             * fault read so the diagnostic can identify the DRV failure. */
+            drv.fault = 1U;
+            return;
+        }
+#endif
+        if (gpio_output_bit_get(GPIOA, GPIO_PIN_11) != RESET) {
+            safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
+            drv.fault = 1U;
+        }
         return;
     }
 

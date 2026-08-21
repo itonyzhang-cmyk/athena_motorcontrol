@@ -52,7 +52,10 @@
 //#define __SYSTEM_CLOCK_48M_PLL_HXTAL            (uint32_t)(48000000)
 //#define __SYSTEM_CLOCK_72M_PLL_HXTAL            (uint32_t)(72000000)
 //#define __SYSTEM_CLOCK_108M_PLL_HXTAL           (uint32_t)(108000000)
-#define __SYSTEM_CLOCK_120M_PLL_HXTAL           (uint32_t)(120000000)
+/* Use the internal RC PLL for standalone startup. The board's external
+ * oscillator path can be affected by debugger power/reset timing; IRC8M at
+ * the same 120 MHz target preserves all peripheral divider assumptions. */
+#define __SYSTEM_CLOCK_120M_PLL_IRC8M           (uint32_t)(120000000)
 
 #define SEL_IRC8M       0x00U
 #define SEL_HXTAL       0x01U
@@ -90,9 +93,11 @@ static void system_clock_72m_hxtal(void);
 #elif defined (__SYSTEM_CLOCK_108M_PLL_HXTAL)
 uint32_t SystemCoreClock = __SYSTEM_CLOCK_108M_PLL_HXTAL;
 static void system_clock_108m_hxtal(void);
-#elif defined (__SYSTEM_CLOCK_120M_PLL_HXTAL)
+#endif /* clock-source helper chain before the 120M HXTAL fallback */
+#if defined (__SYSTEM_CLOCK_120M_PLL_HXTAL)
 uint32_t SystemCoreClock = __SYSTEM_CLOCK_120M_PLL_HXTAL;
 static void system_clock_120m_hxtal(void);
+static void system_clock_120m_irc8m(void);
 #endif /* __SYSTEM_CLOCK_IRC8M */
 
 /* configure the system clock */
@@ -424,7 +429,7 @@ static void system_clock_108m_irc8m(void)
     }
 }
 
-#elif defined (__SYSTEM_CLOCK_120M_PLL_IRC8M)
+#elif defined (__SYSTEM_CLOCK_120M_PLL_IRC8M) || defined (__SYSTEM_CLOCK_120M_PLL_HXTAL)
 /*!
     \brief      configure the system clock to 120M by PLL which selects IRC8M as its clock source
     \param[in]  none
@@ -802,7 +807,8 @@ static void system_clock_108m_hxtal(void)
     }
 }
 
-#elif defined (__SYSTEM_CLOCK_120M_PLL_HXTAL)
+#endif /* clock-source helper chain before the 120M HXTAL fallback */
+#if defined (__SYSTEM_CLOCK_120M_PLL_HXTAL)
 /*!
     \brief      configure the system clock to 120M by PLL which selects HXTAL(8M) as its clock source
     \param[in]  none
@@ -823,10 +829,14 @@ static void system_clock_120m_hxtal(void)
         stab_flag = (RCU_CTL & RCU_CTL_HXTALSTB);
     }while((0U == stab_flag) && (HXTAL_STARTUP_TIMEOUT != timeout));
 
-    /* if fail */
+    /* If the external crystal is absent or too slow, keep the same 120 MHz
+     * target using the internal 8 MHz RC. This avoids stranding the MCU before
+     * main() and preserves the existing APB/SPI/CAN divider assumptions. */
     if(0U == (RCU_CTL & RCU_CTL_HXTALSTB)){
-        while(1){
-        }
+        RCU_CTL &= ~RCU_CTL_HXTALEN;
+        RCU_CFG0 &= ~(RCU_CFG0_PLLSEL | RCU_CFG0_PREDV0);
+        system_clock_120m_irc8m();
+        return;
     }
 
     RCU_APB1EN |= RCU_APB1EN_PMUEN;

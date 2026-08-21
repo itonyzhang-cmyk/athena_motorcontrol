@@ -44,9 +44,8 @@ require_symbol()
 
 for required in \
     safety_force_outputs_off diagnostics_handle_can inject_init \
-    inject_timer_tick inject_handle_can inject_snapshot inject_uart_report \
-    analog_sample drv_spi_write drv_write_DCR drv_write_CSACR \
-    drv_write_OCPCR drv_read_register drv_read_FSR1 drv_read_FSR2 \
+    inject_timer_tick inject_handle_can inject_service inject_snapshot \
+    inject_uart_report analog_sample drv_spi_transfer \
     __flash_image_end__ __config_start__ __config_end__
 do
     require_symbol "$required"

@@ -30,6 +30,7 @@
 #define OPCODE_COUNTER 0x03U
 #define OPCODE_INJECT 0x04U
 #define OPCODE_STOP 0x05U
+#define OPCODE_DRV_WAKE 0x06U
 
 /* Must match the BRINGUP_INJECT firmware tables exactly. */
 static const double inject_duty_percent[] = {
@@ -51,6 +52,7 @@ struct options {
     unsigned interval_ms;
     unsigned seconds;
     int confirm_inject;
+    int confirm_drv_wake;
     const char *csv_path;
     double supply_volts;
     double current_limit_amps;
@@ -92,6 +94,10 @@ static const uint8_t counter_pages[] = {9, 10, 11, 12, 13};
 
 static const uint8_t inject_result_pages[] = {20, 21, 22, 23};
 static const uint8_t drv_pages[] = {24, 25, 26};
+static const uint8_t drv_wake_pages[] = {
+    27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+    40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55
+};
 
 static void print_response(const struct response *response);
 
@@ -318,9 +324,15 @@ static int transmit_request(struct client *client, const uint8_t data[8])
     rc = libusb_bulk_transfer(client->usb, UC12_EP_COMMAND_IN, confirmation,
                               (int)sizeof(confirmation), &transferred,
                               UC12_USB_TIMEOUT_MS);
-    if (rc != LIBUSB_SUCCESS || transferred < 3 ||
-        !(confirmation[2] & 0x80U) || (confirmation[2] & 0x7FU) < 1U) {
-        fprintf(stderr, "UC12 did not confirm the diagnostic request.\n");
+    if (rc != LIBUSB_SUCCESS || transferred < 3 || confirmation[2] < 1U) {
+        fprintf(stderr,
+                "UC12 did not confirm the diagnostic request (rc=%s "
+                "transferred=%d bytes=%02x %02x %02x %02x)\n",
+                libusb_error_name(rc), transferred,
+                transferred > 0 ? confirmation[0] : 0,
+                transferred > 1 ? confirmation[1] : 0,
+                transferred > 2 ? confirmation[2] : 0,
+                transferred > 3 ? confirmation[3] : 0);
         return -1;
     }
     return 0;
@@ -367,18 +379,29 @@ static int query_raw(struct client *client, const uint8_t request[8],
 {
     uint8_t record[UC12_RECORD_SIZE];
     uint8_t sequence = request[4];
-    uint64_t deadline = monotonic_ms() + client->options.timeout_ms;
+    unsigned attempt;
 
-    if (transmit_request(client, request) != 0) return -1;
-    while (keep_running && monotonic_ms() < deadline) {
-        unsigned remaining = (unsigned)(deadline - monotonic_ms());
-        int rc = read_record(client, record, remaining);
-        if (rc < 0) return -1;
-        if (rc == 0) break;
-        if (parse_response_record(record, client->options.channel, opcode,
-                                  sequence, page, response)) {
-            return 0;
+    for (attempt = 0; attempt < 2U && keep_running; ++attempt) {
+        uint64_t deadline = monotonic_ms() + client->options.timeout_ms;
+
+        if (transmit_request(client, request) != 0) return -1;
+        while (keep_running && monotonic_ms() < deadline) {
+            unsigned remaining = (unsigned)(deadline - monotonic_ms());
+            int rc = read_record(client, record, remaining);
+            if (rc < 0) return -1;
+            if (rc == 0) break;
+            if (parse_response_record(record, client->options.channel, opcode,
+                                      sequence, page, response)) {
+                return 0;
+            }
         }
+        if (attempt == 0U && opcode <= 3U) {
+            fprintf(stderr,
+                    "ATHENA-DIAG opcode=%u page=%u missed; retrying once.\n",
+                    opcode, page);
+            continue;
+        }
+        break;
     }
     fprintf(stderr, "Timeout waiting for ATHENA-DIAG opcode=%u page=%u.\n",
             opcode, page);
@@ -430,6 +453,35 @@ static const char *snapshot_name(uint8_t page)
     case 24: return "drv_fsr1_fsr2";
     case 25: return "drv_dcr_csacr";
     case 26: return "drv_ocpcr";
+    case 27: return "drv_ready";
+    case 28: return "drv_wake_dcr_csacr";
+    case 29: return "drv_wake_fsr1_fsr2";
+    case 30: return "drv_wake_ocpcr";
+    case 31: return "drv_wake_spi_status";
+    case 32: return "drv_xfer0_dcr_tx_rx";
+    case 33: return "drv_xfer1_csacr_tx_rx";
+    case 34: return "drv_xfer2_ocpcr_tx_rx";
+    case 35: return "drv_xfer3_fsr1_tx_rx";
+    case 36: return "drv_xfer4_fsr2_tx_rx";
+    case 37: return "drv_xfer5_dcr_tx_rx";
+    case 38: return "drv_xfer6_csacr_tx_rx";
+    case 39: return "drv_xfer7_ocpcr_tx_rx";
+    case 40: return "drv_spi1_ctl0";
+    case 41: return "drv_spi1_ctl1";
+    case 42: return "drv_spi1_stat";
+    case 43: return "drv_gpiob_ctl1";
+    case 44: return "drv_gpiob_octl";
+    case 45: return "drv_gpiob_istat";
+    case 46: return "drv_gpioa_ctl1";
+    case 47: return "drv_gpioa_octl";
+    case 48: return "drv_gpioa_istat";
+    case 49: return "drv_ready_clear_reason";
+    case 50: return "drv_pre_fsr1";
+    case 51: return "drv_pre_fsr2";
+    case 52: return "drv_fault_fsr1";
+    case 53: return "drv_fault_fsr2";
+    case 54: return "drv_poen_fsr1";
+    case 55: return "drv_poen_fsr2";
     default: return "unknown_snapshot";
     }
 }
@@ -460,7 +512,9 @@ static void print_safety_flags(uint32_t flags)
            (unsigned)((flags >> 10) & 1U), (unsigned)((flags >> 3) & 1U),
            (unsigned)((flags >> 4) & 1U), (unsigned)((flags >> 5) & 1U),
            (unsigned)((flags >> 6) & 1U), (unsigned)((flags >> 7) & 1U),
-           ((flags >> 31) == 1U && !unsafe) ? "PASS" : "FAIL");
+           ((flags >> 31) == 1U && (!unsafe ||
+             ((flags & (1U << 1)) == 0U &&
+              (flags & (0x7U << 8)) == (0x7U << 8)))) ? "PASS" : "FAIL");
 }
 
 static int passive_flags_ok(uint32_t flags)
@@ -470,12 +524,30 @@ static int passive_flags_ok(uint32_t flags)
     return (flags & (1U << 31)) != 0U && (flags & forbidden) == 0U;
 }
 
+static int inject_passive_flags_ok(uint32_t flags)
+{
+    const uint32_t required = (0x7U << 8);
+    return (flags & (1U << 31)) != 0U &&
+           (flags & 1U) == 0U &&
+           (flags & (1U << 1)) == 0U &&
+           (flags & required) == required &&
+           (flags & (1U << 3)) != 0U &&
+           (flags & (1U << 4)) != 0U;
+}
+
 static int run_passive_safety_gate(struct client *client)
 {
-    struct response response;
+    struct response response, info;
+    int is_inject = 0;
     if (query(client, OPCODE_SNAPSHOT, 3, &response) != 0) return -1;
     print_response(&response);
-    if (response.status != 0U || !passive_flags_ok(response.payload)) {
+    if (query(client, OPCODE_INFO, 2, &info) == 0 && info.status == 0U &&
+        (info.payload & (1U << 16)) != 0U) {
+        is_inject = 1;
+    }
+    if (response.status != 0U ||
+        (is_inject ? !inject_passive_flags_ok(response.payload)
+                   : !passive_flags_ok(response.payload))) {
         fprintf(stderr,
                 "Refusing continued diagnostics: PA11/TIMER0/PWM safe-state check failed.\n");
         return -1;
@@ -528,6 +600,33 @@ static void print_response(const struct response *response)
     if (response->opcode == OPCODE_SNAPSHOT && response->page == 3U &&
         response->status == 0U) {
         print_safety_flags(response->payload);
+    }
+    if (response->opcode == OPCODE_SNAPSHOT && response->page == 49U &&
+        response->status == 0U) {
+        const char *reason = "unknown";
+        switch (response->payload) {
+        case 1U: reason = "boot/reset"; break;
+        case 2U: reason = "new drv-wake"; break;
+        case 3U: reason = "explicit stop"; break;
+        case 4U: reason = "unknown control frame"; break;
+        default: break;
+        }
+        printf("  drv_ready clear reason: %s\n", reason);
+    }
+    if (response->opcode == OPCODE_SNAPSHOT && response->page == 31U &&
+        response->status == 0U) {
+        static const char *const labels[] = {"OK", "TBE_TIMEOUT", "RBNE_TIMEOUT", "BUSY_TIMEOUT"};
+        unsigned i;
+        printf("  SPI transfer status:");
+        for (i = 0U; i < 8U; ++i) {
+            printf(" %u=%s", i, labels[(response->payload >> (i * 2U)) & 3U]);
+        }
+        putchar('\n');
+    }
+    if (response->opcode == OPCODE_SNAPSHOT && response->page >= 32U &&
+        response->page <= 39U && response->status == 0U) {
+        printf("  SPI tx=0x%04X rx=0x%04X\n", (unsigned)(response->payload & 0xFFFFU),
+               (unsigned)(response->payload >> 16));
     }
 }
 
@@ -604,6 +703,7 @@ static int run_inject(struct client *client, unsigned vector, double duty,
     size_t duration_idx;
     uint8_t request[8];
     uint8_t sequence;
+    uint32_t status_word;
     uint32_t result;
     uint64_t deadline;
 
@@ -655,6 +755,7 @@ static int run_inject(struct client *client, unsigned vector, double duty,
         if ((response.payload & 0xFU) != 1U) break; /* not ACTIVE */
         sleep_ms(50U);
     } while (monotonic_ms() < deadline);
+    status_word = response.payload;
 
     if (query(client, OPCODE_SNAPSHOT, 21, &response) != 0) return -1;
     print_response(&response);
@@ -669,7 +770,7 @@ static int run_inject(struct client *client, unsigned vector, double duty,
                   sizeof(inject_result_pages) - 2U) != 0) {
         return -1;
     }
-    result = (response.payload >> 4) & 0xFU;
+    result = (status_word >> 4) & 0xFU;
     printf("Inject result: %s\n", inject_result_name(result));
     return result == INJECT_RESULT_OK ? 0 : -1;
 }
@@ -692,6 +793,40 @@ static int run_stop(struct client *client)
 static int run_drv(struct client *client)
 {
     return run_pages(client, OPCODE_SNAPSHOT, drv_pages, sizeof(drv_pages));
+}
+
+static int run_drv_wake(struct client *client)
+{
+    struct response response;
+    int verification_failed;
+
+    if (!client->options.confirm_drv_wake) {
+        fprintf(stderr,
+                "Refusing: pass --confirm-drv-wake for the bounded PA11 DRV SPI probe.\n");
+        return -1;
+    }
+    if (run_inject_safety_gate(client) != 0) return -1;
+    if (query(client, OPCODE_DRV_WAKE, 0U, &response) != 0) return -1;
+    print_response(&response);
+    verification_failed = response.status != 0U || response.payload != 1U;
+    /* The wake request may fail legitimately. Its latched pages are read-only
+     * evidence and must be shown before the command reports that failure. */
+    if (run_pages(client, OPCODE_SNAPSHOT, drv_wake_pages,
+                  sizeof(drv_wake_pages)) != 0) {
+        return -1;
+    }
+    if (verification_failed) {
+        fprintf(stderr, "DRV wake/configuration verification failed.\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int run_drv_wake_status(struct client *client)
+{
+    if (run_inject_safety_gate(client) != 0) return -1;
+    return run_pages(client, OPCODE_SNAPSHOT, drv_wake_pages,
+                     sizeof(drv_wake_pages));
 }
 
 static FILE *open_csv(const char *path)
@@ -844,7 +979,8 @@ static void usage(const char *program)
     fprintf(stderr,
             "Usage: %s [OPTIONS] COMMAND\n"
             "Commands: ping, info, snapshot, watch, export\n"
-            "          inject VECTOR DUTY_PCT DURATION_MS, stop, drv\n"
+            "          inject VECTOR DUTY_PCT DURATION_MS, stop, drv, drv-wake,\n"
+            "          drv-wake-status\n"
             "Options:\n"
             "  --channel 0|1              UC12 CAN channel (default 0)\n"
             "  --timeout-ms N             response timeout (default 1000)\n"
@@ -854,6 +990,7 @@ static void usage(const char *program)
             "  --supply-volts V           operator-entered value recorded in CSV\n"
             "  --current-limit-amps A     operator-entered value recorded in CSV\n"
             "  --confirm-inject           required to arm the gated injection pulse\n"
+            "  --confirm-drv-wake         required for the bounded PA11 DRV SPI probe\n"
             "  --self-test                offline tests; does not open USB\n",
             program);
 }
@@ -889,6 +1026,7 @@ int main(int argc, char **argv)
         {"supply-volts", required_argument, NULL, 'v'},
         {"current-limit-amps", required_argument, NULL, 'a'},
         {"confirm-inject", no_argument, NULL, 'j'},
+        {"confirm-drv-wake", no_argument, NULL, 'w'},
         {"self-test", no_argument, NULL, 'T'},
         {"help", no_argument, NULL, 'h'},
         {NULL, 0, NULL, 0}
@@ -907,7 +1045,7 @@ int main(int argc, char **argv)
     client.options.timeout_ms = 1000;
     client.options.interval_ms = 25;
     client.options.seconds = 600;
-    while ((option = getopt_long(argc, argv, "c:t:i:s:o:v:a:jTh",
+    while ((option = getopt_long(argc, argv, "c:t:i:s:o:v:a:jwTh",
                                  long_options, NULL)) != -1) {
         switch (option) {
         case 'c':
@@ -946,6 +1084,7 @@ int main(int argc, char **argv)
             client.options.have_current_limit = 1;
             break;
         case 'j': client.options.confirm_inject = 1; break;
+        case 'w': client.options.confirm_drv_wake = 1; break;
         case 'T': do_self_test = 1; break;
         case 'h': usage(argv[0]); return 0;
         default: usage(argv[0]); return 2;
@@ -961,7 +1100,8 @@ int main(int argc, char **argv)
     if (strcmp(command, "ping") && strcmp(command, "info") &&
         strcmp(command, "snapshot") && strcmp(command, "watch") &&
         strcmp(command, "export") && strcmp(command, "inject") &&
-        strcmp(command, "stop") && strcmp(command, "drv")) {
+        strcmp(command, "stop") && strcmp(command, "drv") &&
+        strcmp(command, "drv-wake") && strcmp(command, "drv-wake-status")) {
         usage(argv[0]);
         return 2;
     }
@@ -1002,6 +1142,9 @@ int main(int argc, char **argv)
         result = run_inject(&client, inject_vector, inject_duty, inject_duration);
     else if (result == 0 && !strcmp(command, "stop")) result = run_stop(&client);
     else if (result == 0 && !strcmp(command, "drv")) result = run_drv(&client);
+    else if (result == 0 && !strcmp(command, "drv-wake")) result = run_drv_wake(&client);
+    else if (result == 0 && !strcmp(command, "drv-wake-status"))
+        result = run_drv_wake_status(&client);
     close_client(&client);
     return result == 0 ? 0 : 1;
 }

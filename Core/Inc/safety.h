@@ -20,6 +20,7 @@ typedef enum {
 extern volatile uint32_t safety_fault_latched;
 
 void safety_force_outputs_off(uint32_t reason);
+void safety_outputs_off(void);
 uint32_t safety_get_faults(void);
 
 #endif /* INC_SAFETY_H_ */

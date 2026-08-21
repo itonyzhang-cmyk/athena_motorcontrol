@@ -18,6 +18,7 @@
 #include "position_sensor.h"
 #include "drv8323.h"
 #include "safety.h"
+#include "motor_gate.h"
 
 #ifdef SAFE_BRINGUP
 
@@ -100,6 +101,30 @@ void enter_motor_mode(void)
 
 #else
 
+static int save_preferences(void)
+{
+	if (!preference_writer_open(&prefs)) {
+		return -1;
+	}
+	if (!preference_writer_flush(&prefs)) {
+		preference_writer_close(&prefs);
+		return -1;
+	}
+	preference_writer_close(&prefs);
+	return preference_writer_load(&prefs) ? 0 : -1;
+}
+
+static MotorGateResult motor_gate_preflight(void)
+{
+#ifdef STM32F446
+	const uint8_t nfault_high = (uint8_t)(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_12) != GPIO_PIN_RESET);
+#else
+	const uint8_t nfault_high = (uint8_t)(gpio_input_bit_get(GPIOA, GPIO_PIN_12) != RESET);
+#endif
+	return motor_gate_check(safety_get_faults(), drv.fault, nfault_high,
+	                        comm_encoder.valid, controller.adc_valid);
+}
+
  void run_fsm(FSMStruct * fsmstate){
 	 /* run_fsm is run every commutation interrupt cycle */
 
@@ -131,20 +156,34 @@ void enter_motor_mode(void)
 				 memcpy(&comm_encoder.offset_lut, comm_encoder_cal.lut_arr, sizeof(comm_encoder.offset_lut));
 				 memcpy(&ENCODER_LUT, comm_encoder_cal.lut_arr, sizeof(comm_encoder_cal.lut_arr));
 				 //for(int i = 0; i<128; i++){printf("%d\r\n", ENCODER_LUT[i]);}
-				 if (!preference_writer_ready(prefs)){ preference_writer_open(&prefs);}
-				 preference_writer_flush(&prefs);
-				 preference_writer_close(&prefs);
-				 preference_writer_load(prefs);
+				 if (save_preferences() != 0) {
+					 printf("Configuration save rejected; previous data preserved.\r\n");
+				 }
 				 update_fsm(fsmstate, ESC_CMD);
 			 }
 
 			 break;
 
-		 case MOTOR_MODE:
-			 /* If CAN has timed out, reset all commands */
-			 if((CAN_TIMEOUT > 0 ) && (controller.timeout > CAN_TIMEOUT)){
-				 zero_commands(&controller);
-			 }
+			 case MOTOR_MODE:
+				 drv_service_enable(drv);
+				 if (!drv_enable_ready()) {
+					 /* PA11 may be high during the bounded charge-pump interval,
+					  * but POEN remains disabled and no commutation is allowed. */
+					 break;
+				 }
+				 /* If CAN has timed out, reset all commands */
+				 if((CAN_TIMEOUT > 0 ) && (controller.timeout > CAN_TIMEOUT)){
+					/* A timeout is a power-stage stop, not merely a zero reference.
+					 * Requiring a fresh MOTOR command makes recovery explicit. */
+					zero_commands(&controller);
+					drv_disable_gd(drv);
+					fsmstate->next_state = MENU_MODE;
+					fsmstate->ready = 0U;
+				 } else if (motor_gate_preflight() != MOTOR_GATE_OK) {
+					drv_disable_gd(drv);
+					fsmstate->next_state = MENU_MODE;
+					fsmstate->ready = 0U;
+				 }
 			 /* Otherwise, commutate */
 			 else{
 				 torque_control(&controller);
@@ -189,11 +228,22 @@ void enter_motor_mode(void)
 #ifdef STM32F446
 				HAL_GPIO_WritePin(LED, GPIO_PIN_SET );
 #endif
-				reset_foc(&controller);
+				 if (motor_gate_preflight() != MOTOR_GATE_OK) {
+					zero_commands(&controller);
+					fsmstate->next_state = MENU_MODE;
+					fsmstate->ready = 1U;
+					return;
+				 }
+				 reset_foc(&controller);
 				drv_enable_gd(drv);
 				break;
 			case CALIBRATION_MODE:
 				//printf("Entering Calibration Mode\r\n");
+				if (motor_gate_preflight() != MOTOR_GATE_OK) {
+					fsmstate->next_state = MENU_MODE;
+					fsmstate->ready = 1U;
+					return;
+				}
 				/* zero out all calibrations before starting */
 
 				comm_encoder_cal.done_cal = 0;
@@ -282,10 +332,9 @@ void enter_motor_mode(void)
 					ps_sample(&comm_encoder, DT);
 					int zero_count = comm_encoder.count;
 					M_ZERO = zero_count;
-					if (!preference_writer_ready(prefs)){ preference_writer_open(&prefs);}
-					preference_writer_flush(&prefs);
-					preference_writer_close(&prefs);
-					preference_writer_load(prefs);
+					if (save_preferences() != 0) {
+						printf("Zero save rejected; previous data preserved.\r\n");
+					}
 					printf("\n\r  Saved new zero position:  %d\n\r\n\r", M_ZERO);
 					break;
 				}
@@ -429,10 +478,9 @@ void enter_motor_mode(void)
 
 	 /* Write new settings to flash */
 
-	 if (!preference_writer_ready(prefs)){ preference_writer_open(&prefs);}
-	 preference_writer_flush(&prefs);
-	 preference_writer_close(&prefs);
-	 preference_writer_load(prefs);
+	 if (save_preferences() != 0) {
+		 printf("Configuration save rejected; previous data preserved.\r\n");
+	 }
 
 	 enter_setup_state();
 
