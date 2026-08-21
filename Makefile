@@ -249,6 +249,9 @@ host-app-test:
 		-o /tmp/athena_motor_gate_test
 	/tmp/athena_motor_gate_test
 
+host-mit-test:
+	PYTHONPATH=. python3 -m unittest -v tests/mit_codec_test.py
+
 verify-normal: $(OUTPUT_DIR)/$(TARGET).elf
 	sh tools/verify_normal_image.sh $(NM) $<
 
