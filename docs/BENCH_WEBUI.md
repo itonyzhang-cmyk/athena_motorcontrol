@@ -36,8 +36,9 @@ does not use TLS, so it is intended for a trusted private LAN only.
 - `diag ping` sends only the normal image's compatibility PING. It does not
   run driver wake, injection, or motor-enable commands.
 - CAN trace starts UC12 channel 0. Its only send button writes the fixed MIT
-  test frame `t00187FFF7FF0000007FF`; it contains no `0xFC` enable command.
-  The pass condition is a bridge log line `TRACE CAN RX t000#...`.
+  test frame `t00187FFF7FF0000007FF` three times at 200 ms intervals; it
+  contains no `0xFC` enable command. The pass condition is three bridge log
+  lines `TRACE CAN RX t000#...` with no motor movement.
 
 The service permits only these named actions. It intentionally has no endpoint
 that accepts a shell command, arbitrary file path, or arbitrary CAN frame.

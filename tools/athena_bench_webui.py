@@ -44,6 +44,7 @@ class Runner:
         self.last_result: dict[str, Any] = {"state": "idle", "exit_code": None}
         self.bridge: subprocess.Popen[str] | None = None
         self.bridge_tty = ""
+        self.mit_check_active = False
 
     def log(self, text: str) -> None:
         stamp = time.strftime("%H:%M:%S")
@@ -121,19 +122,33 @@ class Runner:
             self.bridge.terminate()
         return True, "已请求停止 CAN0 trace 桥接"
 
-    def mit_check(self) -> tuple[bool, str]:
+    def mit_check_repeat(self) -> tuple[bool, str]:
         with self.lock:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
+            if self.mit_check_active:
+                return False, "MIT 三次验证已在运行"
+            self.mit_check_active = True
         if not live or not tty:
+            with self.lock:
+                self.mit_check_active = False
             return False, "请先启动 CAN0 trace 桥接，并等待 Serial Port 路径出现"
         try:
             with open(tty, "w", encoding="ascii", buffering=1) as serial_port:
-                serial_port.write(MIT_CHECK_FRAME)
+                for index in range(3):
+                    serial_port.write(MIT_CHECK_FRAME)
+                    self.log(f"MIT 非使能验证帧 {index + 1}/3 已发送: ID=0x001 DLC=8")
+                    if index != 2:
+                        time.sleep(0.2)
         except OSError as exc:
+            with self.lock:
+                self.mit_check_active = False
             return False, f"无法写入桥接伪串口 {tty}: {exc}"
-        self.log(f"$ printf %s {MIT_CHECK_FRAME!r} > {tty}")
-        return True, "已发送固定 MIT 非使能验证帧；查看日志中的 TRACE CAN RX t000#..."
+        finally:
+            with self.lock:
+                self.mit_check_active = False
+        self.log("MIT 三次验证发送完成；请确认日志出现 3 条 TRACE CAN RX t000#... 且电机无动作")
+        return True, "已发送 3 次固定 MIT 非使能验证帧（间隔 200 ms）"
 
     def status(self) -> dict[str, Any]:
         with self.lock:
@@ -260,7 +275,7 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/api/bridge/stop":
             ok, message = RUNNER.stop_bridge()
         elif parsed.path == "/api/bridge/mit-check":
-            ok, message = RUNNER.mit_check()
+            ok, message = RUNNER.mit_check_repeat()
         else:
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
@@ -277,7 +292,7 @@ PAGE = r'''<!doctype html>
 <article class="panel"><h2>离线验证</h2><p>构建前或代码修改后执行。不会访问控制板。</p><div class="command">make host-test host-app-test host-tools-test</div><p><button data-action="offline-tests">执行离线主机测试</button></p><div class="command">make SAFE_BRINGUP=0 BRINGUP_INJECT=0 BUILD_DIR=/tmp/athena-normal-webui GCC_PATH=/tmp/arm-gnu-toolchain-15.2-root-new/bin -j4</div><p><button data-action="build-normal">重新构建正常固件</button></p></article>
 <article class="panel"><h2>刷写与启动</h2><p>刷写使用逐页擦写、写入、读回校验，并保留 CPU halted。启动前不发送任何运动命令。</p><div class="command">tools/athena_safe_flash.sh flash-normal --confirm-normal-sha <span id="sha"></span> --i-understand-this-writes-main-flash</div><input id="shaInput" aria-label="SHA-256" placeholder="粘贴完整 SHA-256 以解锁刷写"><label class="check"><input id="physical" type="checkbox">我已确认控制板、ST-LINK、限流电源、机械固定和可断电路径均已就绪。</label><button class="danger" id="flash">刷入正常固件</button><hr><div class="command">tools/athena_safe_flash.sh boot-normal</div><label class="check"><input id="bootReady" type="checkbox">我已确认物理台架可安全启动。</label><button id="boot">启动正常固件</button></article>
 <article class="panel"><h2>正常固件通信验证</h2><p>先确认兼容 PING。它只请求 `ATHN` 标识，不会启用电机。</p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 ping</div><p><button data-action="diag-ping">执行 PING</button></p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 snapshot</div><p><button data-action="diag-snapshot">执行 Snapshot</button></p></article>
-<article class="panel"><h2>CAN0 收发证据</h2><p>桥接独占 UC12。固定验证帧为 `0x001`、DLC 8，不含 `0xFC` 使能字节；唯一通过条件是日志出现控制板的 `TRACE CAN RX t000#...`。</p><div class="command">./uc12_slcan_bridge --channel 0 --unsafe-tx --trace</div><p><button id="bridgeStart">启动 CAN0 Trace</button> <button class="secondary" id="bridgeStop">停止</button></p><div class="command">printf 't00187FFF7FF0000007FF\r' &gt; &lt;bridge-pty&gt;</div><p><button id="mitCheck">发送固定 MIT 非使能验证帧</button></p></article>
+<article class="panel"><h2>CAN0 收发证据</h2><p>桥接独占 UC12。按钮固定发送 3 次 `0x001`、DLC 8 的非使能帧，间隔 200 ms，不含 `0xFC`；通过条件是日志出现 3 条控制板的 `TRACE CAN RX t000#...`，且电机无动作。</p><div class="command">./uc12_slcan_bridge --channel 0 --unsafe-tx --trace</div><p><button id="bridgeStart">启动 CAN0 Trace</button> <button class="secondary" id="bridgeStop">停止</button></p><div class="command">printf 't00187FFF7FF0000007FF\r' &gt; &lt;bridge-pty&gt; (固定执行 3 次，间隔 200 ms)</div><p><button id="mitCheck">发送三次 MIT 非使能验证</button></p></article>
 </section><h2>实时日志</h2><pre id="log">等待认证…</pre></main><script>
 const params=new URLSearchParams(location.search), fromUrl=params.get('token'); let token=fromUrl||localStorage.getItem('athenaBenchToken')||'';if(fromUrl)localStorage.setItem('athenaBenchToken',fromUrl);if(!token){token=prompt('输入服务启动时显示的访问令牌：')||'';localStorage.setItem('athenaBenchToken',token)}
 const note=t=>document.querySelector('#notice').textContent=t;const api=async(path,body)=>{let r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Bench-Token':token},body:JSON.stringify(body||{})});let j=await r.json();if(!r.ok)throw Error(j.error||j.message||r.status);return j};
