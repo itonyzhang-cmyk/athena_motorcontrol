@@ -330,8 +330,11 @@ int drv_init_config(DRVStruct drv)
 	drv_write_register(drv, DCR, DRV_DCR_CONFIG_VALUE);
 
 	// CSA Control, VREF_DIV=2, CSA_GAIN, CSA_CAL_A/B/C, SEN_LVL=0.25v
-	drv_write_CSACR(drv, 0x0, VREF_DIV_2, 0x0, CSA_GAIN, 0x0, 0x1, 0x1, 0x1, SEN_LVL_0_25);
-
+	/* Do not issue the legacy CSA_CAL_A/B/C pulse during normal startup. The
+	 * validated DRV wake sequence configures CSACR directly; on this board the
+	 * separate calibration write can assert VGS_HA/OTW before the final readback
+	 * and permanently gate the application. Current offsets are established by
+	 * the ADC path below instead. */
 	zero_current(&controller);
 
 	// CSA Control, VREF_DIV=2, CSA_GAIN, DIS_SEN, SEN_LVL=0.25v
