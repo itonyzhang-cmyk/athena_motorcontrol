@@ -9,6 +9,16 @@ uint16_t as5047_make_read_command(uint16_t address)
     return command;
 }
 
+uint16_t as5047_make_write_command(uint16_t address, uint16_t value)
+{
+    uint16_t command = (uint16_t)((address & AS5047_DATA_MASK) |
+                                  (value & AS5047_DATA_MASK));
+    if (__builtin_parity((unsigned int)command) != 0) {
+        command |= 0x8000U;
+    }
+    return command;
+}
+
 int as5047_response_status(uint16_t frame)
 {
     if (__builtin_parity((unsigned int)frame) != 0) {

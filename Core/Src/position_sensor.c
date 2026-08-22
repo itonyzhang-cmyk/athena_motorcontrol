@@ -18,6 +18,7 @@
 #define AS5047_REG_DIAAGC	0x3FFC
 #define AS5047_REG_MAG		0x3FFD
 #define AS5047_REG_ANGLECOM	0x3FFF
+#define AS5047_REG_CLRERR	0x0001
 #define AS5047_MAX_SAMPLE_DELTA 512
 
 #ifndef STM32F446
@@ -87,6 +88,27 @@ static int as5047_read_register(EncoderStruct *encoder, uint16_t address,
 }
 #endif
 
+int ps_clear_errors(EncoderStruct *encoder)
+{
+#ifdef STM32F446
+	(void)encoder;
+	return -1;
+#else
+	uint16_t discard;
+	const uint16_t clear_command = as5047_make_write_command(AS5047_REG_CLRERR, 0U);
+	const uint16_t angle_command = as5047_make_read_command(AS5047_REG_ANGLECOM);
+	/* AS5047 commands are pipelined; consume the write response and prime the
+	 * normal angle-read pipeline before sampling starts. */
+	if (as5047_exchange(clear_command, &discard) != SPI_TRANSFER_OK ||
+	    as5047_exchange(angle_command, &discard) != SPI_TRANSFER_OK) {
+		encoder->spi_timeout_count++;
+		safety_force_outputs_off(SAFETY_FAULT_SPI_TIMEOUT);
+		return -1;
+	}
+	return 0;
+#endif
+}
+
 void ps_warmup(EncoderStruct * encoder, int n){
 #ifdef STM32F446
 	/* Hall position sensors noisy on startup.  Take a bunch of samples to clear this data */
@@ -102,6 +124,7 @@ void ps_warmup(EncoderStruct * encoder, int n){
 	uint32_t consecutive_good = 0U;
 	int warmup_ok = 0;
 	int saw_spi_timeout = 0;
+	(void)ps_clear_errors(encoder);
 
 	/* A debugger attach changes reset timing.  Absorb that startup race with a
 	 * bounded retry, while keeping all gate outputs disabled. */
