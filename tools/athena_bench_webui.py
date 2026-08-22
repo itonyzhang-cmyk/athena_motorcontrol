@@ -59,6 +59,9 @@ class Runner:
         with self.lock:
             if self.active is not None:
                 return False, f"已有动作运行中: {self.active['name']}"
+            if command and Path(command[0]).resolve() == DIAG.resolve() and \
+                    self.bridge is not None and self.bridge.poll() is None:
+                return False, "UC12 正被 CAN0 Trace 占用；请先停止桥接再执行诊断"
             self.active = {"name": name, "command": command, "started": time.time()}
             self.last_result = {"state": "running", "exit_code": None, "name": name}
         self.log("$ " + shlex.join(command))
