@@ -6,6 +6,7 @@
 #include "adc.h"
 #include "can.h"
 #include "diag_protocol.h"
+#include "drv8323.h"
 #include "gpio.h"
 #include "hw_config.h"
 #include "safety.h"
@@ -13,6 +14,7 @@
 #include "systick.h"
 #include "tim.h"
 #include "usart.h"
+#include "user_config.h"
 #ifdef BRINGUP_INJECT
 #include "inject.h"
 #endif
@@ -99,6 +101,20 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
                          ((TIMER_CH1CV(TIMER0) & 0xFFFFU) << 16);
         case 19U: return (TIMER_CH2CV(TIMER0) & 0xFFFFU) |
                          ((TIMER_CAR(TIMER0) & 0xFFFFU) << 16);
+#ifndef BRINGUP_INJECT
+        /* Keep the tested DRV evidence available in the normal image. */
+        case 24U: return (uint32_t)drv.fsr1 | ((uint32_t)drv.fsr2 << 16);
+        case 25U: return (uint32_t)DRV_DIAG_DCR_VALUE |
+                          ((uint32_t)(I_MAX <= 40.0f ? DRV_DIAG_CSACR_VALUE_40A :
+                                      DRV_DIAG_CSACR_VALUE_60A) << 16);
+        case 26U: return DRV_DIAG_OCPCR_VALUE;
+        case 27U: return (uint32_t)drv_enable_ready();
+        case 28U: return (uint32_t)DRV_DIAG_DCR_VALUE |
+                          ((uint32_t)(I_MAX <= 40.0f ? DRV_DIAG_CSACR_VALUE_40A :
+                                      DRV_DIAG_CSACR_VALUE_60A) << 16);
+        case 29U: return (uint32_t)drv.fsr1 | ((uint32_t)drv.fsr2 << 16);
+        case 30U: return DRV_DIAG_OCPCR_VALUE;
+#endif
 #ifdef BRINGUP_INJECT
         case 20U: /* fallthrough to shared handler */
         case 21U:

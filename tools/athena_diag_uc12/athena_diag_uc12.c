@@ -98,6 +98,7 @@ static const uint8_t drv_wake_pages[] = {
     27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
     40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55
 };
+static const uint8_t normal_drv_status_pages[] = {2, 3, 24, 25, 26, 27, 28, 29, 30};
 
 static void print_response(const struct response *response);
 
@@ -829,6 +830,14 @@ static int run_drv_wake_status(struct client *client)
                      sizeof(drv_wake_pages));
 }
 
+static int run_normal_drv_status(struct client *client)
+{
+    /* Normal firmware exposes read-only pages; the inject preflight is not
+     * applicable because it intentionally rejects an enabled app. */
+    return run_pages(client, OPCODE_SNAPSHOT, normal_drv_status_pages,
+                     sizeof(normal_drv_status_pages));
+}
+
 static FILE *open_csv(const char *path)
 {
     FILE *csv = fopen(path, "w");
@@ -981,6 +990,7 @@ static void usage(const char *program)
             "Commands: ping, info, snapshot, watch, export\n"
             "          inject VECTOR DUTY_PCT DURATION_MS, stop, drv, drv-wake,\n"
             "          drv-wake-status\n"
+            "          drv-status\n"
             "Options:\n"
             "  --channel 0|1              UC12 CAN channel (default 0)\n"
             "  --timeout-ms N             response timeout (default 1000)\n"
@@ -1101,7 +1111,8 @@ int main(int argc, char **argv)
         strcmp(command, "snapshot") && strcmp(command, "watch") &&
         strcmp(command, "export") && strcmp(command, "inject") &&
         strcmp(command, "stop") && strcmp(command, "drv") &&
-        strcmp(command, "drv-wake") && strcmp(command, "drv-wake-status")) {
+        strcmp(command, "drv-wake") && strcmp(command, "drv-wake-status") &&
+        strcmp(command, "drv-status")) {
         usage(argv[0]);
         return 2;
     }
@@ -1145,6 +1156,8 @@ int main(int argc, char **argv)
     else if (result == 0 && !strcmp(command, "drv-wake")) result = run_drv_wake(&client);
     else if (result == 0 && !strcmp(command, "drv-wake-status"))
         result = run_drv_wake_status(&client);
+    else if (result == 0 && !strcmp(command, "drv-status"))
+        result = run_normal_drv_status(&client);
     close_client(&client);
     return result == 0 ? 0 : 1;
 }

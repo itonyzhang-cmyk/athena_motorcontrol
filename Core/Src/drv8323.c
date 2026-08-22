@@ -17,10 +17,6 @@
 
 #define DRV_ENABLE_SETTLE_MS 10U
 #define DRV_DCR_CONFIG_VALUE 0x00A1U
-#define DRV_DCR_VERIFY_VALUE 0x00A0U
-#define DRV_CSACR_CONFIG_VALUE_40A 0x02C0U
-#define DRV_CSACR_CONFIG_VALUE_60A 0x0280U
-#define DRV_OCPCR_CONFIG_VALUE 0x0415U
 
 #ifndef STM32F446
 static volatile uint8_t drv_enable_pending;
@@ -143,8 +139,8 @@ void drv_service_enable(DRVStruct drv)
 	}
 	drv_write_register(drv, DCR, DRV_DCR_CONFIG_VALUE);
 	drv_write_register(drv, CSACR,
-		I_MAX <= 40.0f ? DRV_CSACR_CONFIG_VALUE_40A : DRV_CSACR_CONFIG_VALUE_60A);
-	drv_write_register(drv, OCPCR, DRV_OCPCR_CONFIG_VALUE);
+		I_MAX <= 40.0f ? DRV_DIAG_CSACR_VALUE_40A : DRV_DIAG_CSACR_VALUE_60A);
+	drv_write_register(drv, OCPCR, DRV_DIAG_OCPCR_VALUE);
 	if (drv_verify_configuration(&drv) != 0 ||
 	    gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
 		safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
@@ -246,10 +242,10 @@ static int drv_verify_configuration(DRVStruct *drv)
 
 	/* rx[0] is the response to the command before this sequence. */
 	if (rx[1] != 0U || rx[2] != 0U ||
-	    (rx[3] & 0x07FFU) != DRV_DCR_VERIFY_VALUE ||
-	    rx[4] != (I_MAX <= 40.0f ? DRV_CSACR_CONFIG_VALUE_40A :
-	                              DRV_CSACR_CONFIG_VALUE_60A) ||
-	    rx[5] != DRV_OCPCR_CONFIG_VALUE) {
+	    (rx[3] & 0x07FFU) != DRV_DIAG_DCR_VALUE ||
+	    rx[4] != (I_MAX <= 40.0f ? DRV_DIAG_CSACR_VALUE_40A :
+	                              DRV_DIAG_CSACR_VALUE_60A) ||
+	    rx[5] != DRV_DIAG_OCPCR_VALUE) {
 		ok = 0;
 	}
 	return ok ? 0 : -1;
@@ -286,11 +282,11 @@ int drv_init_config(DRVStruct drv)
 
 	// CSA Control, VREF_DIV=2, CSA_GAIN, DIS_SEN, SEN_LVL=0.25v
 	drv_write_register(drv, CSACR,
-		CSA_GAIN == CSA_GAIN_40 ? DRV_CSACR_CONFIG_VALUE_40A :
-		                          DRV_CSACR_CONFIG_VALUE_60A);
+		CSA_GAIN == CSA_GAIN_40 ? DRV_DIAG_CSACR_VALUE_40A :
+		                          DRV_DIAG_CSACR_VALUE_60A);
 
 	// OCP Contro, TRETRY=50us, DEAD_TIME=50us, OCP_MODE=retry, OCP_DEG=4us, VDS_LVL=0.45v
-	drv_write_register(drv, OCPCR, DRV_OCPCR_CONFIG_VALUE);
+	drv_write_register(drv, OCPCR, DRV_DIAG_OCPCR_VALUE);
 
 	/* Do not expose the application state machine until the same readback gate
 	 * used by the validated diagnostic wake has passed. */

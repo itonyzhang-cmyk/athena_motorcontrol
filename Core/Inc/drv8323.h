@@ -22,6 +22,13 @@
 #define OCPCR           0x5     /// OCP Control Register
 #define CSACR           0x6     /// CSA Control Register
 
+/* Read-only configuration values exposed by normal diagnostic pages. */
+#define DRV_DIAG_DCR_VALUE 0x00A0U
+#define DRV_DIAG_CSACR_VALUE_40A 0x02C0U
+#define DRV_DIAG_CSACR_VALUE_60A 0x0280U
+#define DRV_DIAG_OCPCR_VALUE 0x0415U
+
+
 /// Drive Control Fields ///
 #define DIS_CPUV_EN         0x0     /// Charge pump UVLO fault
 #define DIS_CPUV_DIS        0x1

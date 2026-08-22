@@ -212,29 +212,18 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
     return;
 #endif
 
-    /* Preserve the CAN0 diagnostic ping used to validate the bring-up image.
-     * This is deliberately narrower than ATHENA-DIAG: only a CRC-valid
-     * read-only ping is answered; all driver, injection and motion opcodes
-     * remain unavailable in the normal application. */
+    /* Keep the CAN0 diagnostic transport in the normal application. Only
+     * read-only ATHENA-DIAG opcodes 0..3 are accepted; wake/injection opcodes
+     * remain unavailable in this image. */
     {
         DiagRequest diagnostic_request;
 
-        if (normal_can_diag_ping_matches(can_rx.rx_sfid,
-                                         can_rx.rx_ff == CAN_FF_STANDARD,
-                                         can_rx.rx_ft == CAN_FT_DATA,
-                                         can_rx.rx_dlen, can_rx.rx_data,
-                                         &diagnostic_request)) {
-            can_trasnmit_message_struct diagnostic_response;
-
-            can_struct_para_init(CAN_TX_MESSAGE_STRUCT, &diagnostic_response);
-            diagnostic_response.tx_sfid = DIAG_CAN_RESPONSE_ID;
-            diagnostic_response.tx_efid = 0U;
-            diagnostic_response.tx_ft = CAN_FT_DATA;
-            diagnostic_response.tx_ff = CAN_FF_STANDARD;
-            diagnostic_response.tx_dlen = 8U;
-            diag_protocol_response(&diagnostic_request, DIAG_STATUS_OK,
-                                   0x4E485441U, diagnostic_response.tx_data);
-            (void)can_message_transmit(CAN0, &diagnostic_response);
+        if (can_rx.rx_sfid == DIAG_CAN_REQUEST_ID &&
+            can_rx.rx_ff == CAN_FF_STANDARD &&
+            can_rx.rx_ft == CAN_FT_DATA && can_rx.rx_dlen == 8U &&
+            diag_protocol_parse(can_rx.rx_data, &diagnostic_request) == 0 &&
+            diagnostic_request.opcode <= DIAG_OPCODE_GET_COUNTER) {
+            diagnostics_handle_can(&can_rx);
             return;
         }
     }
