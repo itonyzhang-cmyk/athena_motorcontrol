@@ -207,10 +207,12 @@ void MX_TIM0_Init(void)
 
     /* Channel output */
     timer_channel_output_struct_para_init(&timer_ocintpara);
-#ifdef SAFE_BRINGUP
+#if defined(SAFE_BRINGUP) || defined(BRINGUP_INJECT)
     timer_ocintpara.outputstate  = TIMER_CCX_DISABLE;
 #else
-    timer_ocintpara.outputstate  = TIMER_CCX_ENABLE;
+    /* Normal application enables channels only after DRV readback and gate
+     * preflight succeed. Keep all three channels disabled during startup. */
+    timer_ocintpara.outputstate  = TIMER_CCX_DISABLE;
 #endif
     timer_ocintpara.outputnstate = TIMER_CCXN_DISABLE;
     timer_ocintpara.ocpolarity   = TIMER_OC_POLARITY_LOW;

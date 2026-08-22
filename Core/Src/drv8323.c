@@ -149,6 +149,9 @@ void drv_service_enable(DRVStruct drv)
 	}
 
 	drv_enable_verified = 1U;
+	timer_channel_output_state_config(TIM_PWM, TIM_CH_U, TIMER_CCX_ENABLE);
+	timer_channel_output_state_config(TIM_PWM, TIM_CH_V, TIMER_CCX_ENABLE);
+	timer_channel_output_state_config(TIM_PWM, TIM_CH_W, TIMER_CCX_ENABLE);
 	timer_primary_output_config(TIM_PWM, ENABLE);
 #endif
 }

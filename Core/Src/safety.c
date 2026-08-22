@@ -18,6 +18,9 @@ void safety_outputs_off(void)
      * does not depend on SPI, the control loop, or timer state. */
     gpio_bit_reset(ENABLE_PIN);
     timer_primary_output_config(TIM_PWM, DISABLE);
+    timer_channel_output_state_config(TIM_PWM, TIM_CH_U, TIMER_CCX_DISABLE);
+    timer_channel_output_state_config(TIM_PWM, TIM_CH_V, TIMER_CCX_DISABLE);
+    timer_channel_output_state_config(TIM_PWM, TIM_CH_W, TIMER_CCX_DISABLE);
     timer_channel_output_pulse_value_config(TIM_PWM, TIM_CH_U, 0U);
     timer_channel_output_pulse_value_config(TIM_PWM, TIM_CH_V, 0U);
     timer_channel_output_pulse_value_config(TIM_PWM, TIM_CH_W, 0U);
