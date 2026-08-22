@@ -119,6 +119,12 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
         case 58U: return drv_init_final_fsr();
         case 59U: return drv_init_readback_dcr_csacr();
         case 60U: return drv_init_readback_ocpcr();
+        case 61U: return drv_init_spi_rx(0U);
+        case 62U: return drv_init_spi_rx(1U);
+        case 63U: return drv_init_spi_rx(2U);
+        case 64U: return drv_init_spi_rx(3U);
+        case 65U: return drv_init_spi_rx(4U);
+        case 66U: return drv_init_spi_rx(5U);
 #endif
 #ifdef BRINGUP_INJECT
         case 20U: /* fallthrough to shared handler */

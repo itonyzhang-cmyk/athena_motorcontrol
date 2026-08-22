@@ -31,6 +31,7 @@ static volatile uint32_t drv_init_pre_fsr_value;
 static volatile uint32_t drv_init_final_fsr_value;
 static volatile uint32_t drv_init_dcr_csacr_value;
 static volatile uint32_t drv_init_ocpcr_value;
+static volatile uint16_t drv_init_spi_rx_value[6];
 
 int drv_init_window_active(void) { return drv_init_window != 0U; }
 void drv_init_record_nfault_edge(void)
@@ -43,6 +44,10 @@ uint32_t drv_init_pre_fsr(void) { return drv_init_pre_fsr_value; }
 uint32_t drv_init_final_fsr(void) { return drv_init_final_fsr_value; }
 uint32_t drv_init_readback_dcr_csacr(void) { return drv_init_dcr_csacr_value; }
 uint32_t drv_init_readback_ocpcr(void) { return drv_init_ocpcr_value; }
+uint32_t drv_init_spi_rx(uint8_t index)
+{
+	return index < 6U ? drv_init_spi_rx_value[index] : 0U;
+}
 
 int drv_spi_transfer(DRVStruct * drv, uint16_t val, uint16_t *rx_word)
 {
@@ -262,6 +267,8 @@ static int drv_verify_configuration(DRVStruct *drv)
 			drv_init_reason_value |= DRV_INIT_REASON_SPI;
 		}
 	}
+	for (unsigned i = 0U; i < 6U; ++i)
+		drv_init_spi_rx_value[i] = rx[i];
 
 	/* rx[0] is the response to the command before this sequence. */
 	drv->fsr1 = rx[1];
@@ -310,6 +317,8 @@ int drv_init_config(DRVStruct drv)
 	drv_init_final_fsr_value = 0U;
 	drv_init_dcr_csacr_value = 0U;
 	drv_init_ocpcr_value = 0U;
+	for (unsigned i = 0U; i < 6U; ++i)
+		drv_init_spi_rx_value[i] = 0U;
 	safety_outputs_off();
 
 	// Up to 40A use 40X amplifier gain
