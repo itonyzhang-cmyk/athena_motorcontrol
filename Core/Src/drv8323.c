@@ -342,6 +342,13 @@ int drv_init_config(DRVStruct drv)
 	// OCP Contro, TRETRY=50us, DEAD_TIME=50us, OCP_MODE=retry, OCP_DEG=4us, VDS_LVL=0.45v
 	drv_write_register(drv, OCPCR, DRV_DIAG_OCPCR_VALUE);
 
+	/* The CSA calibration transaction can assert a transient CPUV/VGS fault
+	 * while the charge pump settles. The validated wake path clears latched
+	 * DRV faults after the complete register set, then performs its final
+	 * continuous readback. Keep the same ordering in the normal image. */
+	drv_write_register(drv, DCR, DRV_DCR_CONFIG_VALUE);
+	delay_1ms(1U);
+
 	/* Do not expose the application state machine until the same readback gate
 	 * used by the validated diagnostic wake has passed. */
 	if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET)
