@@ -89,6 +89,10 @@ class Runner:
                 return False, f"已有动作运行中: {self.active['name']}"
             if not BRIDGE.is_file():
                 return False, f"桥接程序不存在: {BRIDGE}"
+        owners = self._uc12_tool_owners()
+        if owners:
+            return False, "UC12 被以下本机进程占用，请先停止：" + "; ".join(owners)
+        with self.lock:
             self.bridge_tty = ""
             self.bridge = subprocess.Popen(
                 [str(BRIDGE), "--channel", "0", "--unsafe-tx", "--trace"],
@@ -119,8 +123,41 @@ class Runner:
         with self.lock:
             if self.bridge is None or self.bridge.poll() is not None:
                 return False, "CAN0 trace 桥接未运行"
-            self.bridge.terminate()
-        return True, "已请求停止 CAN0 trace 桥接"
+            process = self.bridge
+            process.terminate()
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            return False, "桥接未在 3 秒内退出；请勿启动新桥接，先停止占用进程"
+        return True, "CAN0 trace 桥接已停止并释放 UC12"
+
+    @staticmethod
+    def _uc12_tool_owners() -> list[str]:
+        names = ("athena_diag_uc12", "uc12_slcan_bridge", "uc12_gvret_bridge",
+                 "uc12_listen", "uc12_discover")
+        try:
+            # `pgrep -af` with an alternation can match its own shell command
+            # and is prone to racing an orphaned bridge during WebUI restart.
+            # Read the process table directly and match executable path tokens.
+            result = subprocess.run(
+                ["ps", "ax", "-o", "pid=,command="],
+                text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, check=False,
+            )
+        except OSError:
+            return []
+        own_pid = os.getpid()
+        owners: list[str] = []
+        for line in result.stdout.splitlines():
+            fields = line.split(maxsplit=1)
+            if not fields or not fields[0].isdigit() or int(fields[0]) == own_pid:
+                continue
+            command = fields[1] if len(fields) == 2 else ""
+            executable = command.split(None, 1)[0] if command else ""
+            base = os.path.basename(executable)
+            if base in names:
+                owners.append(line)
+        return owners
 
     def mit_check_repeat(self) -> tuple[bool, str]:
         with self.lock:
