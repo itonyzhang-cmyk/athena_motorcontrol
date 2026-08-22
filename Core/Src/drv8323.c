@@ -367,6 +367,22 @@ int drv_init_config(DRVStruct drv)
 		drv_init_reason_value |= DRV_INIT_REASON_FINAL_FAULT;
 	if (drv_verify_configuration(&drv) != 0 ||
 	    gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+		/* A DRV fault may be latched by the first charge-pump attempt even
+		 * after nFAULT has returned high. Give CLR_FLT one bounded retry while
+		 * PWM/POEN remain disabled; persistent FSR bits still fail closed. */
+		drv_write_register(drv, DCR, DRV_DCR_CONFIG_VALUE);
+		delay_1ms(1U);
+		if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) != RESET &&
+		    drv_verify_configuration(&drv) == 0) {
+			drv_init_reason_value &= ~DRV_INIT_REASON_READBACK;
+		} else {
+			drv_init_window = 0U;
+			safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
+			drv_disable_gd(drv);
+			return -1;
+		}
+	}
+	if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
 		drv_init_window = 0U;
 		safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
 		drv_disable_gd(drv);
