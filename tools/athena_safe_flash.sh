@@ -6,7 +6,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORKSPACE_DIR="$(cd "${REPO_DIR}/.." && pwd)"
 
-OPENOCD_BIN="${OPENOCD_BIN:-openocd}"
+if [[ -z "${OPENOCD_BIN:-}" ]]; then
+    if [[ -x /opt/homebrew/bin/openocd ]]; then
+        OPENOCD_BIN=/opt/homebrew/bin/openocd
+    elif [[ -x /usr/local/bin/openocd ]]; then
+        OPENOCD_BIN=/usr/local/bin/openocd
+    else
+        OPENOCD_BIN=openocd
+    fi
+fi
 OPENOCD_INTERFACE="${OPENOCD_INTERFACE:-interface/stlink.cfg}"
 OPENOCD_TARGET="${OPENOCD_TARGET:-target/stm32f1x.cfg}"
 OPENOCD_SPEED_KHZ="${OPENOCD_SPEED_KHZ:-100}"
