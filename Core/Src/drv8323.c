@@ -247,22 +247,18 @@ void drv_print_faults(DRVStruct drv, uint32_t loop_count){
 
 static int drv_verify_configuration(DRVStruct *drv)
 {
-	/* DRV8323 read responses are returned on the following SPI frame. Keep the
-	 * complete sequence explicit so a stale response can never be mistaken for
-	 * a successful readback. */
-	static const uint16_t commands[] = {
-		(uint16_t)(0x8000U | (FSR1 << 11)),
-		(uint16_t)(0x8000U | (FSR2 << 11)),
-		(uint16_t)(0x8000U | (DCR << 11)),
-		(uint16_t)(0x8000U | (CSACR << 11)),
-		(uint16_t)(0x8000U | (OCPCR << 11)),
-		(uint16_t)(0x8000U | (OCPCR << 11))
-	};
-	uint16_t rx[sizeof(commands) / sizeof(commands[0])] = {0U};
+	/* DRV8323 returns a read result on the next SPI frame. Read each register
+	 * independently and consume the pipeline explicitly; this avoids depending
+	 * on stale data left by a preceding write or on a particular burst layout. */
+	static const uint8_t registers[] = {FSR1, FSR2, DCR, CSACR, OCPCR};
+	uint16_t rx[6] = {0U};
 	int ok = 1;
 
-	for (unsigned i = 0U; i < sizeof(commands) / sizeof(commands[0]); ++i) {
-		if (drv_spi_transfer(drv, commands[i], &rx[i]) != SPI_TRANSFER_OK) {
+	for (unsigned i = 0U; i < sizeof(registers) / sizeof(registers[0]); ++i) {
+		uint16_t discard = 0U;
+		const uint16_t command = (uint16_t)(0x8000U | (registers[i] << 11));
+		if (drv_spi_transfer(drv, command, &discard) != SPI_TRANSFER_OK ||
+		    drv_spi_transfer(drv, command, &rx[i + 1U]) != SPI_TRANSFER_OK) {
 			ok = 0;
 			drv_init_reason_value |= DRV_INIT_REASON_SPI;
 		}
@@ -270,7 +266,6 @@ static int drv_verify_configuration(DRVStruct *drv)
 	for (unsigned i = 0U; i < 6U; ++i)
 		drv_init_spi_rx_value[i] = rx[i];
 
-	/* rx[0] is the response to the command before this sequence. */
 	drv->fsr1 = rx[1];
 	drv->fsr2 = rx[2];
 	drv_init_final_fsr_value = (uint32_t)rx[1] | ((uint32_t)rx[2] << 16);
