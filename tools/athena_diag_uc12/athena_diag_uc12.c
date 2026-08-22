@@ -98,7 +98,7 @@ static const uint8_t drv_wake_pages[] = {
     27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
     40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55
 };
-static const uint8_t normal_drv_status_pages[] = {2, 3, 24, 25, 26, 27, 28, 29, 30, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66};
+static const uint8_t normal_drv_status_pages[] = {2, 3, 24, 25, 26, 27, 28, 29, 30, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73};
 
 static void print_response(const struct response *response);
 
@@ -494,6 +494,13 @@ static const char *snapshot_name(uint8_t page)
     case 64: return "drv_init_spi_rx3";
     case 65: return "drv_init_spi_rx4";
     case 66: return "drv_init_spi_rx5";
+    case 67: return "drv_enable_verify_ok";
+    case 68: return "drv_enable_fsr1_fsr2";
+    case 69: return "drv_enable_dcr_csacr";
+    case 70: return "drv_enable_ocpcr";
+    case 71: return "drv_enable_spi_rx_fsr1";
+    case 72: return "drv_enable_spi_rx_fsr2";
+    case 73: return "drv_enable_spi_rx_dcr";
     default: return "unknown_snapshot";
     }
 }

@@ -32,6 +32,7 @@ static volatile uint32_t drv_init_final_fsr_value;
 static volatile uint32_t drv_init_dcr_csacr_value;
 static volatile uint32_t drv_init_ocpcr_value;
 static volatile uint16_t drv_init_spi_rx_value[6];
+static volatile uint32_t drv_enable_evidence_value[7];
 
 int drv_init_window_active(void) { return drv_init_window != 0U; }
 void drv_init_record_nfault_edge(void)
@@ -47,6 +48,10 @@ uint32_t drv_init_readback_ocpcr(void) { return drv_init_ocpcr_value; }
 uint32_t drv_init_spi_rx(uint8_t index)
 {
 	return index < 6U ? drv_init_spi_rx_value[index] : 0U;
+}
+uint32_t drv_enable_evidence(uint8_t page)
+{
+	return page < 7U ? drv_enable_evidence_value[page] : 0U;
 }
 
 int drv_spi_transfer(DRVStruct * drv, uint16_t val, uint16_t *rx_word)
@@ -128,9 +133,11 @@ void drv_enable_gd(DRVStruct drv){
 	 * TIMER0_UP_IRQHandler, so waiting on SysTick here would deadlock. */
 #ifndef STM32F446
 	(void)drv;
-	timer_primary_output_config(TIM_PWM, DISABLE);
-	gpio_bit_set(ENABLE_PIN);
-	drv_enable_started_ms = systick_uptime_ms();
+	 timer_primary_output_config(TIM_PWM, DISABLE);
+	 gpio_bit_set(ENABLE_PIN);
+	 for (unsigned i = 0U; i < 7U; ++i)
+		 drv_enable_evidence_value[i] = 0U;
+	 drv_enable_started_ms = systick_uptime_ms();
 	drv_enable_pending = 1U;
 	drv_enable_verified = 0U;
 #else
@@ -165,13 +172,23 @@ void drv_service_enable(DRVStruct drv)
 	drv_write_register(drv, CSACR,
 		I_MAX <= 40.0f ? DRV_DIAG_CSACR_VALUE_40A : DRV_DIAG_CSACR_VALUE_60A);
 	drv_write_register(drv, OCPCR, DRV_DIAG_OCPCR_VALUE);
-	if (drv_verify_configuration(&drv) != 0 ||
+	{
+		const int verify_failed = drv_verify_configuration(&drv);
+		/* Preserve the readback captured while PA11 was still high. The failure
+		 * path below disables the DRV, after which reads correctly return 0xFFFF. */
+		drv_enable_evidence_value[0] = verify_failed == 0 ? 1U : 0U;
+		drv_enable_evidence_value[1] = drv_init_final_fsr();
+		drv_enable_evidence_value[2] = drv_init_readback_dcr_csacr();
+		drv_enable_evidence_value[3] = drv_init_readback_ocpcr();
+		for (unsigned i = 0U; i < 3U; ++i)
+			drv_enable_evidence_value[4U + i] = drv_init_spi_rx((uint8_t)(i + 1U));
+		if (verify_failed != 0 ||
 	    gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
 		safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
 		drv.fault = 1U;
 		return;
+		}
 	}
-
 	drv_enable_verified = 1U;
 	timer_channel_output_state_config(TIM_PWM, TIM_CH_U, TIMER_CCX_ENABLE);
 	timer_channel_output_state_config(TIM_PWM, TIM_CH_V, TIMER_CCX_ENABLE);
