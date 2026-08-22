@@ -25,6 +25,25 @@ static uint32_t drv_enable_started_ms;
 static int drv_verify_configuration(DRVStruct *drv);
 #endif
 
+static volatile uint8_t drv_init_window;
+static volatile uint32_t drv_init_reason_value;
+static volatile uint32_t drv_init_pre_fsr_value;
+static volatile uint32_t drv_init_final_fsr_value;
+static volatile uint32_t drv_init_dcr_csacr_value;
+static volatile uint32_t drv_init_ocpcr_value;
+
+int drv_init_window_active(void) { return drv_init_window != 0U; }
+void drv_init_record_nfault_edge(void)
+{
+	if (drv_init_window != 0U)
+		drv_init_reason_value |= DRV_INIT_REASON_NFAULT_EDGE;
+}
+uint32_t drv_init_reason(void) { return drv_init_reason_value; }
+uint32_t drv_init_pre_fsr(void) { return drv_init_pre_fsr_value; }
+uint32_t drv_init_final_fsr(void) { return drv_init_final_fsr_value; }
+uint32_t drv_init_readback_dcr_csacr(void) { return drv_init_dcr_csacr_value; }
+uint32_t drv_init_readback_ocpcr(void) { return drv_init_ocpcr_value; }
+
 int drv_spi_transfer(DRVStruct * drv, uint16_t val, uint16_t *rx_word)
 {
 #ifdef STM32F446
@@ -240,18 +259,39 @@ static int drv_verify_configuration(DRVStruct *drv)
 	for (unsigned i = 0U; i < sizeof(commands) / sizeof(commands[0]); ++i) {
 		if (drv_spi_transfer(drv, commands[i], &rx[i]) != SPI_TRANSFER_OK) {
 			ok = 0;
+			drv_init_reason_value |= DRV_INIT_REASON_SPI;
 		}
 	}
 
 	/* rx[0] is the response to the command before this sequence. */
+	drv->fsr1 = rx[1];
+	drv->fsr2 = rx[2];
+	drv_init_final_fsr_value = (uint32_t)rx[1] | ((uint32_t)rx[2] << 16);
+	drv_init_dcr_csacr_value = (uint32_t)rx[3] |
+	                           ((uint32_t)rx[4] << 16);
+	drv_init_ocpcr_value = rx[5];
 	if (rx[1] != 0U || rx[2] != 0U ||
 	    (rx[3] & 0x07FFU) != DRV_DIAG_DCR_VALUE ||
 	    rx[4] != (I_MAX <= 40.0f ? DRV_DIAG_CSACR_VALUE_40A :
 	                              DRV_DIAG_CSACR_VALUE_60A) ||
 	    rx[5] != DRV_DIAG_OCPCR_VALUE) {
 		ok = 0;
+		drv_init_reason_value |= DRV_INIT_REASON_READBACK;
 	}
 	return ok ? 0 : -1;
+}
+
+static uint32_t drv_capture_fsr_pair(DRVStruct *drv)
+{
+	uint16_t rx0 = 0U, rx1 = 0U, rx2 = 0U;
+	int s0 = drv_spi_transfer(drv, (uint16_t)(0x8000U | (FSR1 << 11)), &rx0);
+	int s1 = drv_spi_transfer(drv, (uint16_t)(0x8000U | (FSR2 << 11)), &rx1);
+	int s2 = drv_spi_transfer(drv, (uint16_t)(0x8000U | (FSR2 << 11)), &rx2);
+	(void)rx0;
+	if (s0 != SPI_TRANSFER_OK || s1 != SPI_TRANSFER_OK ||
+	    s2 != SPI_TRANSFER_OK)
+		drv_init_reason_value |= DRV_INIT_REASON_SPI;
+	return (uint32_t)rx1 | ((uint32_t)rx2 << 16);
 }
 
 int drv_init_config(DRVStruct drv)
@@ -265,15 +305,26 @@ int drv_init_config(DRVStruct drv)
 #else
 	/* Start from a true electrical idle. PA11 is raised only for the bounded
 	 * DRV register setup and is lowered again before the application loop. */
+	drv_init_reason_value = 0U;
+	drv_init_pre_fsr_value = 0U;
+	drv_init_final_fsr_value = 0U;
+	drv_init_dcr_csacr_value = 0U;
+	drv_init_ocpcr_value = 0U;
 	safety_outputs_off();
 
 	// Up to 40A use 40X amplifier gain
 	// From 40-60A use 20X amplifier gain.  (Make this generic in the future)
 	int CSA_GAIN = I_MAX <= 40.0f ? CSA_GAIN_40 : CSA_GAIN_20;
 
-	// Enable DRV8323
+	/* The validated bring-up image keeps this bounded window open while the
+	 * charge pump settles. nFAULT edges here are evidence, not an application
+	 * safety trip: the final FSR/readback gate below decides success. */
+	drv_init_window = 1U;
 	gpio_bit_set(ENABLE_PIN);
-	delay_1ms(10);
+	delay_1ms(DRV_ENABLE_SETTLE_MS);
+	drv_init_pre_fsr_value = drv_capture_fsr_pair(&drv);
+	if (drv_init_pre_fsr_value != 0U)
+		drv_init_reason_value |= DRV_INIT_REASON_PRE_FAULT;
 
 	// Driver Control, Gate drive fault is disabled, 3x PWM mode, clear latched fault bits
 	drv_write_register(drv, DCR, DRV_DCR_CONFIG_VALUE);
@@ -293,8 +344,11 @@ int drv_init_config(DRVStruct drv)
 
 	/* Do not expose the application state machine until the same readback gate
 	 * used by the validated diagnostic wake has passed. */
-	if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET ||
-	    drv_verify_configuration(&drv) != 0) {
+	if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET)
+		drv_init_reason_value |= DRV_INIT_REASON_FINAL_FAULT;
+	if (drv_verify_configuration(&drv) != 0 ||
+	    gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+		drv_init_window = 0U;
 		safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
 		drv_disable_gd(drv);
 		return -1;
@@ -302,6 +356,7 @@ int drv_init_config(DRVStruct drv)
 
 	// all MOSFETs in the Hi-Z state, disable output
 	drv_disable_gd(drv);
+	drv_init_window = 0U;
 	safety_outputs_off();
 	return 0;
 #endif

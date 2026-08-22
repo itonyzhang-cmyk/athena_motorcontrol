@@ -28,6 +28,14 @@
 #define DRV_DIAG_CSACR_VALUE_60A 0x0280U
 #define DRV_DIAG_OCPCR_VALUE 0x0415U
 
+/* Normal-image startup evidence. These bits describe why the bounded DRV
+ * configuration gate failed; they are read-only diagnostic data. */
+#define DRV_INIT_REASON_NFAULT_EDGE   (1U << 0)
+#define DRV_INIT_REASON_PRE_FAULT     (1U << 1)
+#define DRV_INIT_REASON_SPI          (1U << 2)
+#define DRV_INIT_REASON_READBACK     (1U << 3)
+#define DRV_INIT_REASON_FINAL_FAULT  (1U << 4)
+
 
 /// Drive Control Fields ///
 #define DIS_CPUV_EN         0x0     /// Charge pump UVLO fault
@@ -208,6 +216,13 @@ void drv_print_faults(DRVStruct drv, uint32_t loop_count);
  * clear, and the three application configuration registers match. */
 int drv_init_config(DRVStruct drv);
 void drv_clear_fault(DRVStruct drv);
+int drv_init_window_active(void);
+void drv_init_record_nfault_edge(void);
+uint32_t drv_init_reason(void);
+uint32_t drv_init_pre_fsr(void);
+uint32_t drv_init_final_fsr(void);
+uint32_t drv_init_readback_dcr_csacr(void);
+uint32_t drv_init_readback_ocpcr(void);
 
 void MX_EXTI_Init();
 

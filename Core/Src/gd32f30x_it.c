@@ -365,7 +365,7 @@ void EXTI10_15_IRQHandler(void)
      * The dedicated wake window below keeps PA11 high solely to capture the
      * DRV status registers with PWM/POEN disabled. */
     if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
-#ifdef BRINGUP_INJECT
+#if defined(BRINGUP_INJECT)
         if (inject_drv_wake_window_active()) {
             /* PWM/POEN are disabled; preserve ENABLE for one bounded SPI
              * fault read so the diagnostic can identify the DRV failure. */
@@ -373,6 +373,12 @@ void EXTI10_15_IRQHandler(void)
             return;
         }
 #endif
+        if (drv_init_window_active()) {
+            /* The startup charge-pump transient is recorded by the bounded
+             * DRV init gate; do not turn it into a latched app fault here. */
+            drv_init_record_nfault_edge();
+            return;
+        }
         if (gpio_output_bit_get(GPIOA, GPIO_PIN_11) != RESET) {
             safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
             drv.fault = 1U;

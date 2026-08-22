@@ -27,8 +27,8 @@ from urllib.parse import parse_qs, urlparse
 REPO = Path(__file__).resolve().parent.parent
 WORKSPACE = REPO.parent
 TOOLCHAIN = Path("/tmp/arm-gnu-toolchain-15.2-root-new/bin")
-NORMAL_SHA = "7b4539af52a3d845d31b3488405a3f594ac14ddde23830b89f4604a020dc13fc"
-NORMAL_BIN = REPO / "artifacts/athena_normal_channel_gate_20260822/motorcontrol.bin"
+NORMAL_SHA = "de6e74bbb3a4b736a3a243d196c8837776936f8c208ba5abd76241123f44f335"
+NORMAL_BIN = REPO / "artifacts/athena_normal_drv_startup_20260822/motorcontrol.bin"
 BRIDGE = WORKSPACE / "tools/uc12_slcan_bridge/uc12_slcan_bridge"
 DIAG = REPO / "tools/athena_diag_uc12/athena_diag_uc12"
 FLASH = REPO / "tools/athena_safe_flash.sh"

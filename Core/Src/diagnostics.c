@@ -103,7 +103,7 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
                          ((TIMER_CAR(TIMER0) & 0xFFFFU) << 16);
 #ifndef BRINGUP_INJECT
         /* Keep the tested DRV evidence available in the normal image. */
-        case 24U: return (uint32_t)drv.fsr1 | ((uint32_t)drv.fsr2 << 16);
+        case 24U: return drv_init_final_fsr();
         case 25U: return (uint32_t)DRV_DIAG_DCR_VALUE |
                           ((uint32_t)(I_MAX <= 40.0f ? DRV_DIAG_CSACR_VALUE_40A :
                                       DRV_DIAG_CSACR_VALUE_60A) << 16);
@@ -112,8 +112,13 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
         case 28U: return (uint32_t)DRV_DIAG_DCR_VALUE |
                           ((uint32_t)(I_MAX <= 40.0f ? DRV_DIAG_CSACR_VALUE_40A :
                                       DRV_DIAG_CSACR_VALUE_60A) << 16);
-        case 29U: return (uint32_t)drv.fsr1 | ((uint32_t)drv.fsr2 << 16);
+        case 29U: return drv_init_final_fsr();
         case 30U: return DRV_DIAG_OCPCR_VALUE;
+        case 56U: return drv_init_reason();
+        case 57U: return drv_init_pre_fsr();
+        case 58U: return drv_init_final_fsr();
+        case 59U: return drv_init_readback_dcr_csacr();
+        case 60U: return drv_init_readback_ocpcr();
 #endif
 #ifdef BRINGUP_INJECT
         case 20U: /* fallthrough to shared handler */
