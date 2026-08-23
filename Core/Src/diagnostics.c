@@ -132,6 +132,14 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
         case 71U: return drv_enable_evidence(4U);
         case 72U: return drv_enable_evidence(5U);
         case 73U: return drv_enable_evidence(6U);
+        case 74U: return drv_enable_evidence(7U);  /* enable GPIOA CTL1 */
+        case 75U: return drv_enable_evidence(8U);  /* enable GPIOA OCTL */
+        case 76U: return drv_enable_evidence(9U);  /* enable GPIOA ISTAT */
+        case 77U: return drv_enable_evidence(10U); /* enable GPIOB CTL1 */
+        case 78U: return drv_enable_evidence(11U); /* enable GPIOB OCTL */
+        case 79U: return drv_enable_evidence(12U); /* enable GPIOB ISTAT */
+        case 80U: return drv_enable_evidence(13U); /* enable SPI STAT */
+        case 81U: return drv_enable_evidence(14U); /* nFAULT edge in enable window */
 #endif
 #ifdef BRINGUP_INJECT
         case 20U: /* fallthrough to shared handler */

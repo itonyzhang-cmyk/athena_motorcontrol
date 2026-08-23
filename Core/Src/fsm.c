@@ -178,11 +178,14 @@ static MotorGateResult motor_gate_preflight(void)
 					zero_commands(&controller);
 					drv_disable_gd(drv);
 					fsmstate->next_state = MENU_MODE;
-					fsmstate->ready = 0U;
+					/* The stop is already complete and outputs are disabled. Allow
+					 * run_fsm() to commit the MENU transition so a later 0xFC can
+					 * re-enter MOTOR_MODE without requiring a board reset. */
+					fsmstate->ready = 1U;
 				 } else if (motor_gate_preflight() != MOTOR_GATE_OK) {
 					drv_disable_gd(drv);
 					fsmstate->next_state = MENU_MODE;
-					fsmstate->ready = 0U;
+					fsmstate->ready = 1U;
 				 }
 			 /* Otherwise, commutate */
 			 else{
@@ -190,7 +193,14 @@ static MotorGateResult motor_gate_preflight(void)
 				 field_weaken(&controller);
 				 commutate(&controller, &comm_encoder);
 			 }
-			 controller.timeout ++;
+			 /* Count only an active MOTOR session and saturate the counter.  A
+			  * disabled watchdog (CAN_TIMEOUT=0) must not wrap an int after a
+			  * long idle run, and a pending MENU transition must not keep aging
+			  * the session that is already being shut down. */
+			 if (fsmstate->next_state == MOTOR_MODE && CAN_TIMEOUT > 0 &&
+			     controller.timeout <= CAN_TIMEOUT) {
+				 controller.timeout++;
+			 }
 			 break;
 
 		 case SETUP_MODE:
@@ -234,6 +244,8 @@ static MotorGateResult motor_gate_preflight(void)
 					fsmstate->ready = 1U;
 					return;
 				 }
+				 /* Entering MOTOR_MODE after a timeout is a new watchdog session. */
+				 controller.timeout = 0;
 				 reset_foc(&controller);
 				drv_enable_gd(drv);
 				break;
@@ -308,15 +320,22 @@ static MotorGateResult motor_gate_preflight(void)
 		fsmstate->ready = 0;
 		return;
 	}
+	/* A CAN control session may need to recover after the watchdog has
+	 * returned the FSM to MENU_MODE.  Treat a fresh MOTOR_CMD as an explicit
+	 * re-arm request in every state, including the short window where a
+	 * timeout has scheduled a pending MENU transition. */
+	if (fsm_input == MOTOR_CMD) {
+		fsmstate->next_state = MOTOR_MODE;
+		if (fsmstate->state != MOTOR_MODE) {
+			fsmstate->ready = 0;
+		}
+		return;
+	}
 	switch(fsmstate->state){
 		case MENU_MODE:
 			switch (fsm_input){
 				case CAL_CMD:
 					fsmstate->next_state = CALIBRATION_MODE;
-					fsmstate->ready = 0;
-					break;
-				case MOTOR_CMD:
-					fsmstate->next_state = MOTOR_MODE;
 					fsmstate->ready = 0;
 					break;
 				case ENCODER_CMD:

@@ -22,5 +22,7 @@ extern volatile uint32_t safety_fault_latched;
 void safety_force_outputs_off(uint32_t reason);
 void safety_outputs_off(void);
 uint32_t safety_get_faults(void);
+/* Clear only faults explicitly re-armed by a new enable session. */
+void safety_clear_faults(uint32_t mask);
 
 #endif /* INC_SAFETY_H_ */

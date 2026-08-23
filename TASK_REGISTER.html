@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Athena CyberDog Motor Firmware - Task Register</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #17212b; background: #f4f6f8; }
+    body { margin: 0; line-height: 1.5; }
+    main { max-width: 1440px; margin: 0 auto; padding: 28px 20px 48px; }
+    h1, h2 { margin: 0 0 12px; color: #102a43; }
+    h1 { font-size: 26px; }
+    h2 { font-size: 19px; margin-top: 30px; }
+    p { margin: 8px 0; }
+    .meta, .note { background: #fff; border: 1px solid #d9e2ec; padding: 14px; border-radius: 6px; }
+    .note { border-left: 4px solid #d64545; }
+    table { width: 100%; border-collapse: collapse; background: #fff; font-size: 14px; }
+    th, td { border: 1px solid #cbd5e0; padding: 9px; vertical-align: top; text-align: left; }
+    th { background: #eaf1f8; color: #102a43; white-space: nowrap; }
+    tr:nth-child(even) td { background: #fafcff; }
+    .status { font-weight: 700; white-space: nowrap; }
+    .done { color: #18794e; }
+    .active { color: #b45309; }
+    .blocked { color: #b42318; }
+    .pending { color: #475569; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+    ul { margin: 8px 0; padding-left: 22px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Athena CyberDog Motor Firmware Task Register</h1>
+  <section class="meta">
+    <p><strong>项目：</strong>小米 CyberDog 第一代关节控制器安全开源固件</p>
+    <p><strong>仓库：</strong><code>/Users/choqy/workspace/xiaomi_dog/athena_motorcontrol</code></p>
+    <p><strong>账本版本：</strong>v1.0 &nbsp; <strong>建立日期：</strong>2026-08-19 &nbsp; <strong>当前分支：</strong><code>cyberdog-safe-bringup</code></p>
+    <p><strong>状态枚举：</strong><span class="status done">已完成</span>、<span class="status active">进行中</span>、<span class="status blocked">阻塞</span>、<span class="status pending">待开始</span>、取消。</p>
+  </section>
+
+  <h2>最终目标与完成定义</h2>
+  <table>
+    <thead><tr><th>目标 ID</th><th>最终目标</th><th>完成定义</th><th>不可协商边界</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>G-01</td>
+        <td>交付可维护、可审计的 GD32F303 + DRV8323 + 绝对值编码器电机控制固件。</td>
+        <td>在已验证硬件映射、相序、电流采样比例/极性、编码器方向及故障保护后，实现受限的闭环位置、速度、力矩控制；通过 Mini-Cheetah/MIT 五参数 CAN 接口受控运行，并完成单电机可重复验收。</td>
+        <td>不追求原厂二进制/OTA 兼容；不写 Option Bytes；不 mass erase；任何功率测试前必须有独立的安全门和明确授权。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>执行规则</h2>
+  <section class="note">
+    <strong>所有后续步骤必须记录在本文件。</strong>执行前创建或更新任务行；执行后记录实际命令、硬件状态、结果、产物哈希、时间和下一步。重规划不删除历史任务，而是在“变更记录”中说明原因并新增替代任务。临时任务使用 <code>ADHOC-YYYYMMDD-NN</code>，同样填写依赖、验收和记录。
+  </section>
+  <table>
+    <thead><tr><th>规则 ID</th><th>要求</th></tr></thead>
+    <tbody>
+      <tr><td>R-01</td><td>刷写、启动、DRV 唤醒、注入和实际运动均为独立状态；不得以构建或 CAN 成功替代硬件验证。</td></tr>
+      <tr><td>R-02</td><td>任何主 Flash 写入前必须获得用户对该次操作的明确授权，并执行哈希锁定、双完整 Flash 备份、Option Bytes/保留配置区校验。</td></tr>
+      <tr><td>R-03</td><td>初次通电仅使用 12 V / 0.2 A 限流、空载或固定电机、可触达急停。未通过 <code>drv_ready</code> 前禁止注入。</td></tr>
+      <tr><td>R-04</td><td>每个任务必须有可验证验收标准；失败任务保留失败证据并创建纠正任务，禁止仅改状态为已完成。</td></tr>
+      <tr><td>R-05</td><td>用户已有的 <code>STM32F446RETX_FLASH.ld</code> 改动不属于本任务范围，除非用户明确授权。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>工作分解结构</h2>
+  <table>
+    <thead><tr><th>阶段</th><th>小目标</th><th>任务 / 子任务</th><th>依赖</th><th>验收标准</th><th>状态</th><th>完成时间</th><th>证据 / 备注</th></tr></thead>
+    <tbody>
+      <tr><td>M0</td><td>可复现安全基线</td><td>T-001 建立 GD32F303 构建、链接与配置页保护基线。</td><td>无</td><td>隔离构建可复现；镜像不覆盖配置页。</td><td class="status done">已完成</td><td>2026-08-14</td><td><code>GD32F303RETx_FLASH.ld</code>；两次构建一致。</td></tr>
+      <tr><td>M1</td><td>只读诊断固件</td><td>T-010 关闭 PA11/PWM，提供 ADC、编码器、CAN、霍尔、温度只读诊断。</td><td>T-001</td><td>符号审计无 Flash 写、校准、MIT/FOC 运行路径；被动诊断有效。</td><td class="status done">已完成</td><td>2026-08-18</td><td>SAFE_DIAGNOSTIC CAN/传感器验证通过。</td></tr>
+      <tr><td>M2</td><td>CAN 与主机工具</td><td>T-020 修复 UC12 发送确认判定与诊断重试；确认物理 CAN 链路。</td><td>T-010</td><td><code>ping</code>/<code>snapshot</code> 可响应，CAN 错误计数为零。</td><td class="status done">已完成</td><td>2026-08-18</td><td>确认问题在主机确认解析，而非 CAN 收发器。</td></tr>
+      <tr><td>M3</td><td>受限 DRV 验证</td><td>T-030 实现 BRINGUP_INJECT 的固定向量、定时、限流、故障关闭和注入禁止门。</td><td>T-010, T-020</td><td>固定 0.5-5.0% / 10-50 ms 表；未满足 <code>drv_ready</code> 时固件拒绝注入。</td><td class="status done">已完成</td><td>2026-08-19</td><td>镜像审计和主机测试通过。</td></tr>
+      <tr><td>M3</td><td>受限 DRV 验证</td><td>T-031 实现 <code>drv-wake</code> 与回读快照页 27-30。</td><td>T-030</td><td>仅在 PWM 全低时短暂使能 PA11；回读 FSR/DCR/CSACR/OCPCR 后才置 <code>drv_ready</code>。</td><td class="status done">已完成</td><td>2026-08-19</td><td>初版镜像存在 ISR 死锁，已由 T-032 替代。</td></tr>
+      <tr><td>M3</td><td>受限 DRV 验证</td><td>T-032 修复 <code>drv-wake</code> 在 CAN ISR 内等待 SysTick 的死锁：移至主循环服务状态机。</td><td>T-031</td><td>CAN ISR 不等待；1 ms 后主循环完成有界 SPI 事务并无条件 PA11 低；主机能收到响应。</td><td class="status active">进行中</td><td>-</td><td>新候选镜像已构建、两次独立构建一致；尚未获授权刷入并在硬件验证。</td></tr>
+      <tr><td>M3</td><td>安全刷写工具</td><td>T-040 完成哈希锁定、双备份、16 页分片刷写、每页验证和可见进度日志。</td><td>T-001</td><td>每页显示进度；读回镜像、配置区和 Option Bytes 均验证。</td><td class="status done">已完成</td><td>2026-08-19</td><td>最近一次刷写备份与读回均匹配。</td></tr>
+      <tr><td>M4</td><td>DRV/SPI 硬件验证</td><td>T-050 刷入 T-032 镜像并启动；只做 <code>ping</code>、<code>snapshot</code>、<code>drv-wake</code>。</td><td>T-032, T-040；用户明确刷写授权；电机电源关闭后接入</td><td>响应持续可用；PA11 最终为低；<code>drv_ready=1</code> 或留下可诊断的寄存器快照。</td><td class="status blocked">阻塞</td><td>-</td><td>阻塞于新镜像刷写授权与台架安全确认。</td></tr>
+      <tr><td>M4</td><td>相线/采样实测</td><td>T-060 以 0.5% / 10 ms 执行六向量矩阵，记录电源、ADC B/C 峰值和编码器变化。</td><td>T-050 通过；用户明确注入授权</td><td>六向量产生可重复、可解释的电流/编码器模式，无故障、异常热或超限。</td><td class="status pending">待开始</td><td>-</td><td>不得跳过 T-050。</td></tr>
+      <tr><td>M4</td><td>标定模型</td><td>T-070 固化相序、电流采样极性/比例、编码器方向和电角度关系。</td><td>T-060</td><td>由台架数据和复测支持；比例常数来源可追溯。</td><td class="status pending">待开始</td><td>-</td><td>不在未验证比例下进入闭环。</td></tr>
+      <tr><td>M5</td><td>低电流校准</td><td>T-080 设计事务性参数存储、零点/电机参数校准与失败回退。</td><td>T-070</td><td>失败不覆盖已知良好参数；配置区写入经审计和断电恢复测试。</td><td class="status pending">待开始</td><td>-</td><td>需要单独审查与授权。</td></tr>
+      <tr><td>M6</td><td>受限闭环控制</td><td>T-090 实现并验证电流、速度、位置闭环保护、故障关闭、看门狗和 MIT CAN 命令。</td><td>T-080</td><td>限流、限速、限位、通信超时、nFAULT、异常路径均可验证关闭功率级。</td><td class="status pending">待开始</td><td>-</td><td>不能从 BRINGUP_INJECT 直接升级。</td></tr>
+      <tr><td>M6</td><td>正常固件连续调试</td><td>T-091 固化显式 <code>0xFC</code> 重新使能、MIT 心跳、watchdog 关断与恢复流程。</td><td>T-090</td><td><code>0xFC</code> 后必须发送新 MIT；普通 MIT 不自动重新使能；超时关闭 PWM/DRV 并可由下一次 <code>0xFC</code> 恢复。</td><td class="status active">软件完成，待刷写验证</td><td>2026-08-23</td><td>正常固件已通过 GD32 编译、主机测试和刷写工具自检；硬件尚未刷入本候选。</td></tr>
+      <tr><td>M6</td><td>WebUI 连续测试</td><td>T-092 为每个动作增加中性 MIT 反馈前置检查；CAN Trace、受限使能和持续 MIT 使用统一状态边界。</td><td>T-091</td><td>无新反馈时不发送后续动作帧；收到反馈后发送一次 <code>0xFC</code>，再发送新的 MIT；持续会话可停止。</td><td class="status active">软件完成，待硬件验证</td><td>2026-08-23</td><td><code>tools/athena_bench_webui.py</code>；当前 WebUI 服务已重启。</td></tr>
+      <tr><td>M7</td><td>验收与集成</td><td>T-100 单电机重复验收、日志/文档、WebUI 集成与发布包。</td><td>T-090</td><td>回归测试、台架验收、版本化工件、可复现实验记录完整。</td><td class="status pending">待开始</td><td>-</td><td>最终交付门。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>当前候选与安全状态</h2>
+  <table>
+    <thead><tr><th>项目</th><th>记录</th><th>状态</th></tr></thead>
+    <tbody>
+      <tr><td>当前板上镜像</td><td>32,428-byte <code>drv-wake</code> 初版；已确认在 CAN ISR 内等待 SysTick 会死锁。</td><td class="status blocked">禁止继续启动或诊断</td></tr>
+      <tr><td>替代候选镜像</td><td><code>artifacts/athena_inject_bringup_drv_wake_isr_fix_20260819/motorcontrol.bin</code><br>SHA-256 <code>78226f6d833cd315d7de167790cf660d5b127d53a1989ad4804e507e0ee38c1f</code><br>32,604 bytes；末端 <code>0x08007F5C</code>。</td><td class="status active">待刷写硬件验证</td></tr>
+      <tr><td>最新正常候选镜像</td><td><code>artifacts/athena_normal_watchdog_audit_20260823/motorcontrol.bin</code><br>SHA-256 <code>229ddb217655131f9a3ab577932e5061e30d18fef41325805d1b68a4c43bf55c</code><br>55,244 bytes；显式 <code>0xFC</code> 重新使能、旧 MIT 清零、watchdog 饱和计数。</td><td class="status active">未刷写，等待用户授权</td></tr>
+      <tr><td>功率状态</td><td>旧镜像在 <code>drv-wake</code> 后可能让 PA11 保持高；必须先断开电机 12 V 电源，之后才可进行 SWD 刷写恢复。</td><td class="status blocked">等待安全操作</td></tr>
+    </tbody>
+  </table>
+
+  <h2>变更记录</h2>
+  <table>
+    <thead><tr><th>时间</th><th>变更 ID</th><th>类型</th><th>内容与理由</th><th>影响任务</th></tr></thead>
+    <tbody>
+      <tr><td>2026-08-19</td><td>CHG-001</td><td>建立基线</td><td>创建本任务账本，将现有软件、刷写、硬件验证状态纳入可追溯工作分解。</td><td>全部</td></tr>
+      <tr><td>2026-08-19</td><td>CHG-002</td><td>重规划</td><td>发现 <code>drv-wake</code> 在 CAN ISR 调用 <code>delay_1ms()</code>，因 ISR 优先级阻止 SysTick 而死锁。将原硬件验证路径替换为 T-032 后的候选镜像与 T-050。</td><td>T-031, T-032, T-050</td></tr>
+      <tr><td>2026-08-23</td><td>CHG-003</td><td>正常闭环边界</td><td>将正常固件的恢复边界收敛为显式 <code>0xFC</code>；普通 MIT 只更新设定值和 watchdog。WebUI 动作前先发中性 MIT 并等待新反馈，避免控制板已停机时盲发动作帧。</td><td>T-091, T-092, T-100</td></tr>
+    </tbody>
+  </table>
+
+  <h2>任务记录模板</h2>
+  <table>
+    <thead><tr><th>时间</th><th>任务 ID</th><th>动作 / 命令</th><th>硬件状态</th><th>结果与证据</th><th>状态变更</th><th>下一步</th></tr></thead>
+    <tbody>
+      <tr><td>YYYY-MM-DD HH:MM CST</td><td>T-XXX 或 ADHOC-YYYYMMDD-NN</td><td>精确命令、修改文件或实验动作。</td><td>供电、限流、电机连接、PA11/PWM/CPU 状态。</td><td>PASS/FAIL、输出摘要、文件路径、SHA-256。</td><td>旧状态 -> 新状态</td><td>下一安全动作或阻塞条件。</td></tr>
+    </tbody>
+  </table>
+</main>
+</body>
+</html>

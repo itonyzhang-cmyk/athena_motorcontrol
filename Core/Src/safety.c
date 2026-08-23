@@ -37,3 +37,8 @@ uint32_t safety_get_faults(void)
 {
     return safety_fault_latched;
 }
+
+void safety_clear_faults(uint32_t mask)
+{
+    safety_fault_latched &= ~mask;
+}

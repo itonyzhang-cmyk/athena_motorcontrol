@@ -225,6 +225,8 @@ uint32_t drv_init_readback_dcr_csacr(void);
 uint32_t drv_init_readback_ocpcr(void);
 uint32_t drv_init_spi_rx(uint8_t index);
 uint32_t drv_enable_evidence(uint8_t page);
+int drv_enable_window_active(void);
+void drv_enable_record_nfault_edge(void);
 
 void MX_EXTI_Init();
 

@@ -23,6 +23,7 @@ static volatile uint8_t drv_enable_pending;
 static volatile uint8_t drv_enable_verified;
 static uint32_t drv_enable_started_ms;
 static int drv_verify_configuration(DRVStruct *drv);
+static uint32_t drv_capture_fsr_pair(DRVStruct *drv);
 #endif
 
 static volatile uint8_t drv_init_window;
@@ -32,7 +33,8 @@ static volatile uint32_t drv_init_final_fsr_value;
 static volatile uint32_t drv_init_dcr_csacr_value;
 static volatile uint32_t drv_init_ocpcr_value;
 static volatile uint16_t drv_init_spi_rx_value[6];
-static volatile uint32_t drv_enable_evidence_value[7];
+static volatile uint32_t drv_enable_evidence_value[15];
+static volatile uint8_t drv_enable_window;
 
 int drv_init_window_active(void) { return drv_init_window != 0U; }
 void drv_init_record_nfault_edge(void)
@@ -51,8 +53,10 @@ uint32_t drv_init_spi_rx(uint8_t index)
 }
 uint32_t drv_enable_evidence(uint8_t page)
 {
-	return page < 7U ? drv_enable_evidence_value[page] : 0U;
+	return page < 15U ? drv_enable_evidence_value[page] : 0U;
 }
+int drv_enable_window_active(void) { return drv_enable_window != 0U; }
+void drv_enable_record_nfault_edge(void) { drv_enable_evidence_value[14] = 1U; }
 
 int drv_spi_transfer(DRVStruct * drv, uint16_t val, uint16_t *rx_word)
 {
@@ -135,8 +139,9 @@ void drv_enable_gd(DRVStruct drv){
 	(void)drv;
 	 timer_primary_output_config(TIM_PWM, DISABLE);
 	 gpio_bit_set(ENABLE_PIN);
-	 for (unsigned i = 0U; i < 7U; ++i)
-		 drv_enable_evidence_value[i] = 0U;
+		 for (unsigned i = 0U; i < 15U; ++i)
+			 drv_enable_evidence_value[i] = 0U;
+		drv_enable_window = 1U;
 	 drv_enable_started_ms = systick_uptime_ms();
 	drv_enable_pending = 1U;
 	drv_enable_verified = 0U;
@@ -159,11 +164,24 @@ void drv_service_enable(DRVStruct drv)
 	                                   DRV_ENABLE_SETTLE_MS)) {
 		return;
 	}
-	drv_enable_pending = 0U;
+		drv_enable_pending = 0U;
 
 	/* EN_GATE can reset the DRV register bank while low. Reapply the complete
 	 * runtime configuration after every enable, with POEN still disabled. */
 	if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+		/* nFAULT can assert before the first configuration read. Keep EN_GATE
+		 * high long enough to capture the DRV fault registers; the ISR has
+		 * already suppressed the immediate shutdown while this window is safe. */
+		drv_enable_evidence_value[0] = 0U;
+		drv_enable_evidence_value[1] = drv_capture_fsr_pair(&drv);
+		drv_enable_evidence_value[7] = GPIO_CTL1(GPIOA);
+		drv_enable_evidence_value[8] = GPIO_OCTL(GPIOA);
+		drv_enable_evidence_value[9] = GPIO_ISTAT(GPIOA);
+		drv_enable_evidence_value[10] = GPIO_CTL1(GPIOB);
+		drv_enable_evidence_value[11] = GPIO_OCTL(GPIOB);
+		drv_enable_evidence_value[12] = GPIO_ISTAT(GPIOB);
+		drv_enable_evidence_value[13] = SPI_STAT(SPI1);
+		drv_enable_window = 0U;
 		safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
 		drv.fault = 1U;
 		return;
@@ -181,15 +199,29 @@ void drv_service_enable(DRVStruct drv)
 		drv_enable_evidence_value[2] = drv_init_readback_dcr_csacr();
 		drv_enable_evidence_value[3] = drv_init_readback_ocpcr();
 		for (unsigned i = 0U; i < 3U; ++i)
-			drv_enable_evidence_value[4U + i] = drv_init_spi_rx((uint8_t)(i + 1U));
+            drv_enable_evidence_value[4U + i] = drv_init_spi_rx((uint8_t)(i + 1U));
+#ifndef STM32F446
+        /* Capture the electrical/software state before the failure path lowers
+         * EN_GATE. These values distinguish a DRV-side high-Z response from a
+         * local GPIO/SPI peripheral state without requiring a scope. */
+        drv_enable_evidence_value[7] = GPIO_CTL1(GPIOA);
+        drv_enable_evidence_value[8] = GPIO_OCTL(GPIOA);
+        drv_enable_evidence_value[9] = GPIO_ISTAT(GPIOA);
+        drv_enable_evidence_value[10] = GPIO_CTL1(GPIOB);
+        drv_enable_evidence_value[11] = GPIO_OCTL(GPIOB);
+        drv_enable_evidence_value[12] = GPIO_ISTAT(GPIOB);
+        drv_enable_evidence_value[13] = SPI_STAT(SPI1);
+#endif
 		if (verify_failed != 0 ||
 	    gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+		drv_enable_window = 0U;
 		safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
 		drv.fault = 1U;
 		return;
 		}
 	}
 	drv_enable_verified = 1U;
+	drv_enable_window = 0U;
 	timer_channel_output_state_config(TIM_PWM, TIM_CH_U, TIMER_CCX_ENABLE);
 	timer_channel_output_state_config(TIM_PWM, TIM_CH_V, TIMER_CCX_ENABLE);
 	timer_channel_output_state_config(TIM_PWM, TIM_CH_W, TIMER_CCX_ENABLE);
@@ -216,6 +248,7 @@ void drv_disable_gd(DRVStruct drv){
 	gpio_bit_reset(ENABLE_PIN);
 	drv_enable_pending = 0U;
 	drv_enable_verified = 0U;
+	drv_enable_window = 0U;
 #else
 	__HAL_TIM_MOE_DISABLE(&TIM_PWM);
 	HAL_GPIO_WritePin(ENABLE_PIN, GPIO_PIN_RESET);

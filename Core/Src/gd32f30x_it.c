@@ -260,6 +260,17 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
         switch (special_command)
         {
         case 0xFC:
+            /* A new enable frame starts a fresh control session.  Without
+             * clearing the stale watchdog value, recovery after a CAN timeout
+             * re-enters MOTOR_MODE and immediately trips the old timeout. */
+            controller.timeout = 0;
+            /* Do not replay a stale high-torque command after re-arm.  The
+             * host must provide a fresh MIT frame after this explicit enable. */
+            zero_commands(&controller);
+            /* Gate-driver faults are latched for diagnostics, but an explicit
+             * new enable is the controlled re-arm point.  drv_service_enable()
+             * still rechecks nFAULT and register readback before PWM output. */
+            safety_clear_faults(SAFETY_FAULT_GATE_DRIVER);
             update_fsm(&state, MOTOR_CMD);
             break;
         
@@ -365,6 +376,13 @@ void EXTI10_15_IRQHandler(void)
      * The dedicated wake window below keeps PA11 high solely to capture the
      * DRV status registers with PWM/POEN disabled. */
     if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+        if (drv_enable_window_active()) {
+            /* Preserve the fact that nFAULT interrupted the enable window
+             * before the bounded service reads FSR1/FSR2. PWM/POEN are still
+             * disabled, so retaining PA11 here is electrically safe. */
+            drv_enable_record_nfault_edge();
+            return;
+        }
 #if defined(BRINGUP_INJECT)
         if (inject_drv_wake_window_active()) {
             /* PWM/POEN are disabled; preserve ENABLE for one bounded SPI
