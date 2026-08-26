@@ -21,6 +21,7 @@
 #ifndef STM32F446
 static volatile uint8_t drv_enable_pending;
 static volatile uint8_t drv_enable_verified;
+static volatile uint8_t drv_fault_clear_attempted;
 static uint32_t drv_enable_started_ms;
 static int drv_verify_configuration(DRVStruct *drv);
 static uint32_t drv_capture_fsr_pair(DRVStruct *drv);
@@ -35,6 +36,7 @@ static volatile uint32_t drv_init_ocpcr_value;
 static volatile uint16_t drv_init_spi_rx_value[6];
 static volatile uint32_t drv_enable_evidence_value[15];
 static volatile uint8_t drv_enable_window;
+static volatile uint32_t drv_enable_grace_until_ms;
 
 int drv_init_window_active(void) { return drv_init_window != 0U; }
 void drv_init_record_nfault_edge(void)
@@ -57,6 +59,18 @@ uint32_t drv_enable_evidence(uint8_t page)
 }
 int drv_enable_window_active(void) { return drv_enable_window != 0U; }
 void drv_enable_record_nfault_edge(void) { drv_enable_evidence_value[14] = 1U; }
+
+void drv_capture_runtime_fault(DRVStruct *drv)
+{
+#ifndef STM32F446
+	/* This is called from the short EXTI fault path while EN_GATE is still
+	 * asserted.  Preserve the pair before safety shutdown drops the DRV bank. */
+	if (drv != NULL)
+		drv_enable_evidence_value[1] = drv_capture_fsr_pair(drv);
+#else
+	(void)drv;
+#endif
+}
 
 int drv_spi_transfer(DRVStruct * drv, uint16_t val, uint16_t *rx_word)
 {
@@ -141,10 +155,12 @@ void drv_enable_gd(DRVStruct drv){
 	 gpio_bit_set(ENABLE_PIN);
 		 for (unsigned i = 0U; i < 15U; ++i)
 			 drv_enable_evidence_value[i] = 0U;
-		drv_enable_window = 1U;
+	drv_enable_window = 1U;
+	drv_enable_grace_until_ms = 0U;
 	 drv_enable_started_ms = systick_uptime_ms();
 	drv_enable_pending = 1U;
 	drv_enable_verified = 0U;
+	drv_fault_clear_attempted = 0U;
 #else
 	uint16_t val = (drv_read_register(drv, DCR)) & (~(0x1<<2));
 	drv_write_register(drv, DCR, val);
@@ -158,17 +174,38 @@ void drv_service_enable(DRVStruct drv)
 #if defined(SAFE_BRINGUP) || defined(BRINGUP_INJECT) || defined(STM32F446)
 	(void)drv;
 #else
+	/* Consume the short post-enable grace period even after the pending
+	 * transaction has completed; this must run before the pending guard. */
+	if (drv_enable_verified != 0U && drv_enable_window != 0U) {
+		if ((int32_t)(systick_uptime_ms() - drv_enable_grace_until_ms) >= 0) {
+			drv_enable_window = 0U;
+			/* Only expose PWM after the DRV charge-pump/nFAULT settling
+			 * interval.  Enabling POEN in the same cycle as the final SPI
+			 * readback can turn a harmless startup edge into a latched gate
+			 * fault before the first MIT command arrives. */
+			timer_channel_output_state_config(TIM_PWM, TIM_CH_U, TIMER_CCX_ENABLE);
+			timer_channel_output_state_config(TIM_PWM, TIM_CH_V, TIMER_CCX_ENABLE);
+			timer_channel_output_state_config(TIM_PWM, TIM_CH_W, TIMER_CCX_ENABLE);
+			timer_primary_output_config(TIM_PWM, ENABLE);
+		}
+		return;
+	}
 	if (drv_enable_pending == 0U ||
 	    !motor_gate_precharge_complete(drv_enable_started_ms,
 	                                   systick_uptime_ms(),
 	                                   DRV_ENABLE_SETTLE_MS)) {
 		return;
 	}
-		drv_enable_pending = 0U;
-
 	/* EN_GATE can reset the DRV register bank while low. Reapply the complete
 	 * runtime configuration after every enable, with POEN still disabled. */
 	if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+		if (drv_fault_clear_attempted == 0U) {
+			/* Clear one latched DRV fault while the bounded enable window is
+			 * still active; otherwise recovery would wait forever on nFAULT. */
+			drv_write_register(drv, DCR, DRV_DCR_CONFIG_VALUE);
+			drv_fault_clear_attempted = 1U;
+			return;
+		}
 		/* nFAULT can assert before the first configuration read. Keep EN_GATE
 		 * high long enough to capture the DRV fault registers; the ISR has
 		 * already suppressed the immediate shutdown while this window is safe. */
@@ -184,8 +221,10 @@ void drv_service_enable(DRVStruct drv)
 		drv_enable_window = 0U;
 		safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
 		drv.fault = 1U;
+		drv_enable_pending = 0U;
 		return;
 	}
+	drv_enable_pending = 0U;
 	drv_write_register(drv, DCR, DRV_DCR_CONFIG_VALUE);
 	drv_write_register(drv, CSACR,
 		I_MAX <= 40.0f ? DRV_DIAG_CSACR_VALUE_40A : DRV_DIAG_CSACR_VALUE_60A);
@@ -217,15 +256,14 @@ void drv_service_enable(DRVStruct drv)
 		drv_enable_window = 0U;
 		safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
 		drv.fault = 1U;
+		/* A failed readback must remove EN_GATE as well as disabling PWM. */
+		drv_disable_gd(drv);
 		return;
 		}
 	}
 	drv_enable_verified = 1U;
-	drv_enable_window = 0U;
-	timer_channel_output_state_config(TIM_PWM, TIM_CH_U, TIMER_CCX_ENABLE);
-	timer_channel_output_state_config(TIM_PWM, TIM_CH_V, TIMER_CCX_ENABLE);
-	timer_channel_output_state_config(TIM_PWM, TIM_CH_W, TIMER_CCX_ENABLE);
-	timer_primary_output_config(TIM_PWM, ENABLE);
+	drv_enable_grace_until_ms = systick_uptime_ms() + 20U;
+	drv_enable_window = 1U;
 #endif
 }
 
@@ -234,7 +272,12 @@ int drv_enable_ready(void)
 #ifdef STM32F446
 	return 1;
 #else
-	return drv_enable_verified != 0U;
+	/* Verification completes before the DRV8323 nFAULT line has finished
+	 * settling.  Do not let the FSM run its gate preflight in that interval:
+	 * a transient-low nFAULT would immediately tear down an otherwise valid
+	 * enable session.  drv_service_enable() owns the bounded grace window and
+	 * clears it after the deadline. */
+	return drv_enable_verified != 0U && drv_enable_window == 0U;
 #endif
 }
 
@@ -244,6 +287,13 @@ void drv_disable_gd(DRVStruct drv){
 	 * access is attempted. */
 #ifndef STM32F446
 	(void)drv;
+	/* MOE/POEN alone is not sufficient on GD32: the channel enable bits
+	 * remain set and make the board appear unsafe to the diagnostic reader.
+	 * Clear all three channel outputs before dropping EN_GATE so every stop
+	 * and re-arm boundary reaches the same electrical idle state. */
+	timer_channel_output_state_config(TIM_PWM, TIM_CH_U, TIMER_CCX_DISABLE);
+	timer_channel_output_state_config(TIM_PWM, TIM_CH_V, TIMER_CCX_DISABLE);
+	timer_channel_output_state_config(TIM_PWM, TIM_CH_W, TIMER_CCX_DISABLE);
 	timer_primary_output_config(TIM_PWM, DISABLE);
 	gpio_bit_reset(ENABLE_PIN);
 	drv_enable_pending = 0U;
@@ -387,14 +437,14 @@ int drv_init_config(DRVStruct drv)
 	/* Do not issue the legacy CSA_CAL_A/B/C pulse during normal startup. The
 	 * validated DRV wake sequence configures CSACR directly; on this board the
 	 * separate calibration write can assert VGS_HA/OTW before the final readback
-	 * and permanently gate the application. Current offsets are established by
-	 * the ADC path below instead. */
-	zero_current(&controller);
-
+	 * and permanently gate the application. Configure the final gain before
+	 * sampling ADC offsets so the offset and scale always describe the same CSA
+	 * state on both boot and re-arm paths. */
 	// CSA Control, VREF_DIV=2, CSA_GAIN, DIS_SEN, SEN_LVL=0.25v
 	drv_write_register(drv, CSACR,
 		CSA_GAIN == CSA_GAIN_40 ? DRV_DIAG_CSACR_VALUE_40A :
 		                          DRV_DIAG_CSACR_VALUE_60A);
+	zero_current(&controller);
 
 	// OCP Contro, TRETRY=50us, DEAD_TIME=50us, OCP_MODE=retry, OCP_DEG=4us, VDS_LVL=0.45v
 	drv_write_register(drv, OCPCR, DRV_DIAG_OCPCR_VALUE);
@@ -405,6 +455,10 @@ int drv_init_config(DRVStruct drv)
 	 * continuous readback. Keep the same ordering in the normal image. */
 	drv_write_register(drv, DCR, DRV_DCR_CONFIG_VALUE);
 	delay_1ms(1U);
+	/* DRV8323 CSA output bias can move when OCP/DCR and the charge pump settle.
+	 * The first sample above establishes the chain, but only this post-settle
+	 * sample matches the configuration used during normal commutation. */
+	zero_current(&controller);
 
 	/* Do not expose the application state machine until the same readback gate
 	 * used by the validated diagnostic wake has passed. */
@@ -438,6 +492,10 @@ int drv_init_config(DRVStruct drv)
 	drv_disable_gd(drv);
 	drv_init_window = 0U;
 	safety_outputs_off();
+	/* The CSA common-mode level changes when the gate driver is taken back to
+	 * Hi-Z.  Re-sample in the same disabled state used by the idle control loop;
+	 * retaining the pre-disable offset creates a persistent false phase current. */
+	zero_current(&controller);
 	return 0;
 #endif
 }

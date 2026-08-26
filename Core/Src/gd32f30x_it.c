@@ -213,8 +213,8 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
 #endif
 
     /* Keep the CAN0 diagnostic transport in the normal application. Only
-     * read-only ATHENA-DIAG opcodes 0..3 are accepted; wake/injection opcodes
-     * remain unavailable in this image. */
+     * read-only ATHENA-DIAG plus the structured control opcode are accepted;
+     * raw UART text and arbitrary CAN writes remain unavailable. */
     {
         DiagRequest diagnostic_request;
 
@@ -222,7 +222,7 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
             can_rx.rx_ff == CAN_FF_STANDARD &&
             can_rx.rx_ft == CAN_FT_DATA && can_rx.rx_dlen == 8U &&
             diag_protocol_parse(can_rx.rx_data, &diagnostic_request) == 0 &&
-            diagnostic_request.opcode <= DIAG_OPCODE_GET_COUNTER) {
+            diagnostic_request.opcode <= DIAG_OPCODE_CONTROL) {
             diagnostics_handle_can(&can_rx);
             return;
         }
@@ -260,6 +260,7 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
         switch (special_command)
         {
         case 0xFC:
+            diagnostics_debug_record(DIAG_DEBUG_EVENT_ENABLE, 0xFCU);
             /* A new enable frame starts a fresh control session.  Without
              * clearing the stale watchdog value, recovery after a CAN timeout
              * re-enters MOTOR_MODE and immediately trips the old timeout. */
@@ -270,15 +271,27 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
             /* Gate-driver faults are latched for diagnostics, but an explicit
              * new enable is the controlled re-arm point.  drv_service_enable()
              * still rechecks nFAULT and register readback before PWM output. */
+            /* 0xFC is the explicit recovery boundary.  Drop the old gate
+             * driver latch only after EN_GATE has been removed; the FSM then
+             * waits for a fresh valid encoder sample and nFAULT before
+             * enabling PWM again. */
+            drv_disable_gd(drv);
+            /* Restart the bounded DRV enable window.  The service routine
+             * performs one CLR_FLT retry if nFAULT is still low, then verifies
+             * the complete register set before POEN is enabled. */
+            drv_enable_gd(drv);
+            drv.fault = 0U;
             safety_clear_faults(SAFETY_FAULT_GATE_DRIVER);
             update_fsm(&state, MOTOR_CMD);
             break;
         
         case 0xFD:
+            diagnostics_debug_record(DIAG_DEBUG_EVENT_DISABLE, 0xFDU);
             update_fsm(&state, ESC_CMD);
             break;
         
         case 0xFE:
+            diagnostics_debug_record(DIAG_DEBUG_EVENT_ZERO, 0xFEU);
             update_fsm(&state, ZERO_CMD);
             break;
         
@@ -288,6 +301,10 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
     } else {
         unpack_cmd(can_rx, controller.commands); // Unpack commands
         controller.timeout = 0;                  // Reset timeout counter
+        /* Store compact signed centi-radian position/velocity evidence. */
+        diagnostics_debug_record(DIAG_DEBUG_EVENT_MIT_RX,
+                                 ((uint32_t)(uint16_t)(int16_t)(controller.commands[0] * 100.0f) << 16) |
+                                 (uint32_t)(uint16_t)(int16_t)(controller.commands[1] * 100.0f));
 
 #ifdef DEBUG_CAN
         debug("CAN RX P:%.3f V:%.3f KP:%.3f KD:%.3f I:%.3f\r\n",
@@ -381,6 +398,7 @@ void EXTI10_15_IRQHandler(void)
              * before the bounded service reads FSR1/FSR2. PWM/POEN are still
              * disabled, so retaining PA11 here is electrically safe. */
             drv_enable_record_nfault_edge();
+            drv_capture_runtime_fault(&drv);
             return;
         }
 #if defined(BRINGUP_INJECT)
@@ -398,6 +416,9 @@ void EXTI10_15_IRQHandler(void)
             return;
         }
         if (gpio_output_bit_get(GPIOA, GPIO_PIN_11) != RESET) {
+            /* Read FSR1/FSR2 before dropping EN_GATE; otherwise the DRV8323
+             * bank resets and post-fault diagnostics misleadingly show zero. */
+            drv_capture_runtime_fault(&drv);
             safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
             drv.fault = 1U;
         }

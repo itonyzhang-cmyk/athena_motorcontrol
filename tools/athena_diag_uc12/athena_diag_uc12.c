@@ -31,6 +31,7 @@
 #define OPCODE_INJECT 0x04U
 #define OPCODE_STOP 0x05U
 #define OPCODE_DRV_WAKE 0x06U
+#define OPCODE_CONTROL 0x07U
 
 /* Must match the BRINGUP_INJECT firmware tables exactly. */
 static const double inject_duty_percent[] = {
@@ -87,7 +88,8 @@ struct query_page {
 };
 
 static const uint8_t snapshot_pages[] = {
-    0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
+    0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    116, 117, 118, 119, 120, 121, 122
 };
 
 static const uint8_t counter_pages[] = {9, 10, 11, 12, 13};
@@ -98,7 +100,7 @@ static const uint8_t drv_wake_pages[] = {
     27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
     40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55
 };
-static const uint8_t normal_drv_status_pages[] = {2, 3, 24, 25, 26, 27, 28, 29, 30, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81};
+static const uint8_t normal_drv_status_pages[] = {2, 3, 24, 25, 26, 27, 28, 29, 30, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122};
 
 static void print_response(const struct response *response);
 
@@ -172,6 +174,14 @@ static void build_request(uint8_t opcode, uint8_t sequence, uint8_t page,
     data[4] = sequence;
     data[5] = page;
     data[6] = 0U;
+    data[7] = crc8_atm(data, 7U);
+}
+
+static void build_control_request(uint8_t sequence, uint8_t page,
+                                  uint8_t argument, uint8_t data[8])
+{
+    build_request(OPCODE_CONTROL, sequence, page, data);
+    data[6] = argument;
     data[7] = crc8_atm(data, 7U);
 }
 
@@ -418,6 +428,15 @@ static int query(struct client *client, uint8_t opcode, uint8_t page,
     return query_raw(client, request, opcode, page, response);
 }
 
+static int control(struct client *client, uint8_t page, uint8_t argument,
+                   struct response *response)
+{
+    uint8_t request[8];
+    uint8_t sequence = ++client->sequence;
+    build_control_request(sequence, page, argument, request);
+    return query_raw(client, request, OPCODE_CONTROL, page, response);
+}
+
 static const char *status_name(uint8_t status)
 {
     static const char *names[] = {
@@ -509,6 +528,47 @@ static const char *snapshot_name(uint8_t page)
     case 79: return "drv_enable_gpiob_istat";
     case 80: return "drv_enable_spi_stat";
     case 81: return "drv_enable_nfault_edge";
+    case 82: return "runtime_fsm_state";
+    case 83: return "runtime_gate_flags";
+    case 84: return "runtime_i_max_mA";
+    case 85: return "runtime_iq_des_mA";
+    case 86: return "runtime_iq_filt_mA";
+    case 87: return "runtime_phase_iab_mA";
+    case 88: return "runtime_pwm_ch0_ch1";
+    case 89: return "runtime_pwm_ch2_period";
+    case 90: return "runtime_p_des_mrad";
+    case 91: return "runtime_v_des_mrad_s";
+    case 92: return "runtime_kp_milli";
+    case 93: return "runtime_kd_milli";
+    case 94: return "runtime_tff_milliNm";
+    case 95: return "cal_fsm_status";
+    case 96: return "cal_phase_pairs_samples";
+    case 97: return "cal_e_zero";
+    case 98: return "cal_current_mA";
+    case 100: return "cal_theta_start_mrad";
+    case 101: return "cal_theta_end_mrad";
+    case 102: return "cal_angle_delta_mrad";
+    case 103: return "cal_i_d_des_mA";
+    case 104: return "cal_i_d_mA";
+    case 105: return "cal_i_q_mA";
+    case 106: return "cal_v_d_mV";
+    case 107: return "cal_v_q_mV";
+    case 108: return "cal_dtc_u_v";
+    case 109: return "cal_dtc_w";
+    case 110: return "cal_theta_ref_mrad";
+    case 111: return "boot_ppairs_milli";
+    case 112: return "boot_phase_order_runtime_ppairs";
+    case 113: return "boot_e_zero";
+    case 114: return "boot_config_crc32";
+    case 115: return "boot_encoder_lut_checksum";
+    case 116: return "adc_raw_bc";
+    case 117: return "adc_offset_bc";
+    case 118: return "adc_delta_bc";
+    case 119: return "adc_i_scale_uA_count";
+    case 120: return "runtime_phase_ibc_mA";
+    case 121: return "adc_valid_sample_count";
+    case 122: return "adc_timeout_count";
+    case 99: return "debug_status";
     default: return "unknown_snapshot";
     }
 }
@@ -619,7 +679,8 @@ static void print_response(const struct response *response)
                            ? snapshot_name(response->page)
                            : response->opcode == OPCODE_COUNTER
                                  ? counter_name(response->page)
-                                 : "info";
+                           : response->opcode == (OPCODE_CONTROL | 0x80U)
+                                 ? "control" : "info";
     printf("op=%u page=%u %-24s status=%-11s payload=0x%08X (%u)\n",
            response->opcode, response->page, name,
            status_name(response->status), response->payload,
@@ -627,6 +688,23 @@ static void print_response(const struct response *response)
     if (response->opcode == OPCODE_SNAPSHOT && response->page == 3U &&
         response->status == 0U) {
         print_safety_flags(response->payload);
+    }
+    if (response->opcode == (OPCODE_CONTROL | 0x80U) &&
+        response->page == 10U && response->status == 0U) {
+        printf("  debug timestamp_ms=%u\n", response->payload);
+    } else if (response->opcode == (OPCODE_CONTROL | 0x80U) &&
+               response->page == 11U && response->status == 0U) {
+        static const char *const events[] = {
+            "none", "MIT_RX", "ENABLE", "DISABLE", "ZERO",
+            "WATCHDOG_TIMEOUT", "GATE_PREFLIGHT", "FSM", "DRV_FAULT",
+            "DEBUG_CONTROL", "CALIBRATION_FAIL"
+        };
+        printf("  debug event=%u (%s)\n", response->payload,
+               response->payload < sizeof(events) / sizeof(events[0])
+                   ? events[response->payload] : "UNKNOWN");
+    } else if (response->opcode == (OPCODE_CONTROL | 0x80U) &&
+               response->page == 12U && response->status == 0U) {
+        printf("  debug payload=0x%08X\n", response->payload);
     }
     if (response->opcode == OPCODE_SNAPSHOT && response->page == 49U &&
         response->status == 0U) {
@@ -654,6 +732,99 @@ static void print_response(const struct response *response)
         response->page <= 39U && response->status == 0U) {
         printf("  SPI tx=0x%04X rx=0x%04X\n", (unsigned)(response->payload & 0xFFFFU),
                (unsigned)(response->payload >> 16));
+    }
+    if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+        response->page >= 82U && response->page <= 94U) {
+        int32_t signed_value = (int32_t)response->payload;
+        if (response->page == 82U) {
+            printf("  FSM state=%u next=%u ready=%u\n",
+                   response->payload & 0xFFU,
+                   (response->payload >> 8) & 0xFFU,
+                   (response->payload >> 16) & 0xFFU);
+        } else if (response->page == 83U) {
+            printf("  GATE drv_ready=%u drv_fault=%u adc=%u enc=%u PA11=%u POEN=%u CH=%u%u%u\n",
+                   response->payload & 1U, (response->payload >> 1) & 1U,
+                   (response->payload >> 2) & 1U, (response->payload >> 3) & 1U,
+                   (response->payload >> 4) & 1U, (response->payload >> 5) & 1U,
+                   (response->payload >> 8) & 1U, (response->payload >> 7) & 1U,
+                   (response->payload >> 6) & 1U);
+        } else if (response->page == 87U) {
+            printf("  phase_i a=%.3f A b=%.3f A\n",
+                   (int16_t)(response->payload & 0xFFFFU) / 1000.0,
+                   (int16_t)((response->payload >> 16) & 0xFFFFU) / 1000.0);
+        } else if (response->page >= 84U && response->page <= 86U) {
+            printf("  %.3f A\n", signed_value / 1000.0);
+        } else if (response->page >= 90U && response->page <= 94U) {
+            printf("  %.3f\n", signed_value / 1000.0);
+        }
+    }
+    if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+        response->page >= 116U && response->page <= 122U) {
+        if (response->page == 116U) {
+            printf("  adc_raw B=%u C=%u\n", response->payload & 0xFFFFU,
+                   (response->payload >> 16) & 0xFFFFU);
+        } else if (response->page == 117U) {
+            printf("  adc_offset B=%u C=%u\n", response->payload & 0xFFFFU,
+                   (response->payload >> 16) & 0xFFFFU);
+        } else if (response->page == 118U) {
+            printf("  adc_delta B=%d C=%d counts\n",
+                   (int16_t)(response->payload & 0xFFFFU),
+                   (int16_t)((response->payload >> 16) & 0xFFFFU));
+        } else if (response->page == 119U) {
+            printf("  i_scale=%.6f A/count\n", response->payload / 1000000.0);
+        } else if (response->page == 120U) {
+            printf("  phase_i b=%.3f A c=%.3f A\n",
+                   (int16_t)(response->payload & 0xFFFFU) / 1000.0,
+                   (int16_t)((response->payload >> 16) & 0xFFFFU) / 1000.0);
+        } else if (response->page == 121U) {
+            printf("  adc_valid=%u sample_count=%u\n",
+                   response->payload & 0xFFU, response->payload >> 8);
+        } else {
+            printf("  adc_timeout_count=%u\n", response->payload);
+        }
+    }
+    if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+        response->page == 95U) {
+        printf("  calibration started=%u done_cal=%u done_ordering=%u\n",
+               (response->payload >> 16) & 1U,
+               (response->payload >> 25) & 1U,
+               (response->payload >> 24) & 1U);
+    } else if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+               response->page == 96U) {
+        printf("  phase_order=%u pole_pairs=%u samples=%u\n",
+               response->payload & 0xFFU,
+               (response->payload >> 8) & 0xFFU,
+               (response->payload >> 16) & 0xFFFFU);
+    } else if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+               response->page >= 100U && response->page <= 107U) {
+        printf("  %.3f\n", (int32_t)response->payload / 1000.0);
+    } else if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+               response->page == 108U) {
+        printf("  dtc_u=%.4f dtc_v=%.4f\n",
+               (int16_t)(response->payload & 0xFFFFU) / 10000.0,
+               (int16_t)((response->payload >> 16) & 0xFFFFU) / 10000.0);
+    } else if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+               response->page == 109U) {
+        printf("  dtc_w=%.4f\n", (int16_t)(response->payload & 0xFFFFU) / 10000.0);
+    } else if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+               response->page == 110U) {
+        printf("  %.3f\n", (int32_t)response->payload / 1000.0);
+    } else if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+               response->page == 97U) {
+        printf("  E_ZERO=%d\n", (int32_t)response->payload);
+    } else if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+               response->page == 98U) {
+        printf("  I_CAL=%.1f A\n", response->payload / 1000.0);
+    } else if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+               response->page == 111U) {
+        printf("  PPAIRS=%.3f\n", (int32_t)response->payload / 1000.0);
+    } else if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+               response->page == 112U) {
+        printf("  PHASE_ORDER=%u comm_encoder.ppairs=%u\n",
+               response->payload & 0xFFFFU, (response->payload >> 16) & 0xFFFFU);
+    } else if (response->opcode == OPCODE_SNAPSHOT && response->status == 0U &&
+               response->page == 113U) {
+        printf("  E_ZERO=%d\n", (int32_t)response->payload);
     }
 }
 
@@ -864,6 +1035,66 @@ static int run_normal_drv_status(struct client *client)
                      sizeof(normal_drv_status_pages));
 }
 
+static int run_control(struct client *client, const char *name, double value,
+                       int has_value)
+{
+    uint8_t page;
+    uint8_t argument = 0U;
+    int debug_log = 0;
+    struct response response;
+    if (!strcmp(name, "esc")) page = 1U;
+    else if (!strcmp(name, "motor")) page = 2U;
+    else if (!strcmp(name, "encoder")) page = 3U;
+    else if (!strcmp(name, "calibrate")) {
+        if (!has_value || !isfinite(value) || value < 0.1 || value > 2.0) {
+            fprintf(stderr, "Calibration current must be 0.1..2.0 A.\n");
+            return -1;
+        }
+        page = 4U;
+        argument = (uint8_t)lround(value * 10.0);
+    } else if (!strcmp(name, "zero")) page = 5U;
+    else if (!strcmp(name, "abort")) page = 6U;
+    else if (!strcmp(name, "debug-on")) page = 7U;
+    else if (!strcmp(name, "debug-off")) page = 8U;
+    else if (!strcmp(name, "debug-clear")) page = 9U;
+    else if (!strcmp(name, "debug-status")) {
+        if (query(client, OPCODE_SNAPSHOT, 99U, &response) != 0) return -1;
+        print_response(&response);
+        return response.status == 0U ? 0 : -1;
+    }
+    else if (!strcmp(name, "debug-log")) {
+        if (!has_value || !isfinite(value) || value < 0.0 || value > 31.0 ||
+            lround(value) != value) {
+            fprintf(stderr, "Debug log index must be an integer 0..31.\n");
+            return -1;
+        }
+        page = 10U;
+        argument = (uint8_t)lround(value);
+        debug_log = 1;
+    }
+    else {
+        fprintf(stderr, "Unknown control '%s'.\n", name);
+        return -1;
+    }
+    if (debug_log) {
+        uint8_t field;
+        for (field = 0U; field < 3U; ++field) {
+            if (control(client, (uint8_t)(10U + field), argument, &response) != 0) return -1;
+            print_response(&response);
+            if (response.status != 0U) return -1;
+            /* The UC12 firmware rate-limits diagnostic control frames.  A
+             * debug-log entry is three consecutive control requests; without
+             * the normal inter-request spacing the second/third request can
+             * be dropped and look like a missing log record. */
+            if (field < 2U) sleep_ms(client->options.interval_ms);
+        }
+        return 0;
+    }
+    if (control(client, page, argument, &response) != 0) return -1;
+    print_response(&response);
+    return response.status == 0U ? 0 : -1;
+}
+
 static FILE *open_csv(const char *path)
 {
     FILE *csv = fopen(path, "w");
@@ -1016,7 +1247,8 @@ static void usage(const char *program)
             "Commands: ping, info, snapshot, watch, export\n"
             "          inject VECTOR DUTY_PCT DURATION_MS, stop, drv, drv-wake,\n"
             "          drv-wake-status\n"
-            "          drv-status\n"
+            "          drv-status, control esc|motor|encoder|zero|abort|debug-on|debug-off|debug-clear|debug-status\n"
+            "          control calibrate CURRENT_A, control debug-log INDEX\n"
             "Options:\n"
             "  --channel 0|1              UC12 CAN channel (default 0)\n"
             "  --timeout-ms N             response timeout (default 1000)\n"
@@ -1076,6 +1308,9 @@ int main(int argc, char **argv)
     double inject_duty = 0.0;
     unsigned inject_duration = 0;
     int have_inject_args = 0;
+    const char *control_name = NULL;
+    double control_value = 0.0;
+    int have_control_value = 0;
 
     memset(&client, 0, sizeof(client));
     client.options.timeout_ms = 1000;
@@ -1128,7 +1363,8 @@ int main(int argc, char **argv)
     }
     if (do_self_test) return self_test();
     if (optind + 1 != argc &&
-        !(optind + 4 == argc && !strcmp(argv[optind], "inject"))) {
+        !(optind + 4 == argc && !strcmp(argv[optind], "inject")) &&
+        !(optind + 2 <= argc && optind + 3 >= argc && !strcmp(argv[optind], "control"))) {
         usage(argv[0]);
         return 2;
     }
@@ -1138,7 +1374,7 @@ int main(int argc, char **argv)
         strcmp(command, "export") && strcmp(command, "inject") &&
         strcmp(command, "stop") && strcmp(command, "drv") &&
         strcmp(command, "drv-wake") && strcmp(command, "drv-wake-status") &&
-        strcmp(command, "drv-status")) {
+        strcmp(command, "drv-status") && strcmp(command, "control")) {
         usage(argv[0]);
         return 2;
     }
@@ -1154,6 +1390,13 @@ int main(int argc, char **argv)
         if (parse_unsigned(argv[optind + 3], &inject_duration) != 0 ||
             inject_duration == 0U) return 2;
         have_inject_args = 1;
+    } else if (!strcmp(command, "control")) {
+        if (optind + 1 >= argc || optind + 3 < argc) return 2;
+        control_name = argv[optind + 1];
+        if (!strcmp(control_name, "calibrate") || !strcmp(control_name, "debug-log")) {
+            if (optind + 2 >= argc || parse_double_value(argv[optind + 2], &control_value) != 0) return 2;
+            have_control_value = 1;
+        }
     }
 
     signal(SIGINT, on_signal);
@@ -1184,6 +1427,8 @@ int main(int argc, char **argv)
         result = run_drv_wake_status(&client);
     else if (result == 0 && !strcmp(command, "drv-status"))
         result = run_normal_drv_status(&client);
+    else if (result == 0 && !strcmp(command, "control"))
+        result = run_control(&client, control_name, control_value, have_control_value);
     close_client(&client);
     return result == 0 ? 0 : 1;
 }

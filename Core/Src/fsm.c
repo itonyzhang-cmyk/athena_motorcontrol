@@ -19,6 +19,7 @@
 #include "drv8323.h"
 #include "safety.h"
 #include "motor_gate.h"
+#include "diagnostics.h"
 
 #ifdef SAFE_BRINGUP
 
@@ -125,8 +126,45 @@ static MotorGateResult motor_gate_preflight(void)
 	                        comm_encoder.valid, controller.adc_valid);
 }
 
- void run_fsm(FSMStruct * fsmstate){
+	 void run_fsm(FSMStruct * fsmstate){
 	 /* run_fsm is run every commutation interrupt cycle */
+	 /* A fresh 0xFC may arrive immediately after the previous session's
+	  * shutdown.  Give the encoder and DRV one bounded control-rate window to
+	  * report healthy data before attempting MOTOR_MODE. */
+	 if (fsmstate->rearm_pending != 0U) {
+		 /* Service the DRV enable window before checking nFAULT.  The service
+		  * routine owns the bounded CLR_FLT retry; returning early here would
+		  * leave every recovery attempt stuck in state=0 forever. */
+		 drv_service_enable(drv);
+		 const uint8_t nfault_high =
+			 (uint8_t)(gpio_input_bit_get(GPIOA, GPIO_PIN_12) != RESET);
+		 if (drv_enable_ready() != 0 && comm_encoder.valid != 0U && controller.adc_valid != 0U &&
+			 nfault_high != 0U) {
+			 /* drv.fault is a software latch from the previous session.  The
+			  * explicit 0xFC recovery request permits clearing it once the
+			  * physical nFAULT input has returned high; drv_service_enable() still
+			  * performs the complete SPI readback gate below. */
+			 drv.fault = 0U;
+			 safety_clear_faults(SAFETY_FAULT_GATE_DRIVER |
+				 SAFETY_FAULT_ENCODER | SAFETY_FAULT_SPI_TIMEOUT |
+				 SAFETY_FAULT_ADC_TIMEOUT);
+			 fsmstate->rearm_pending = 0U;
+			 fsmstate->rearm_wait_cycles = 0U;
+			 /* update_fsm(MOTOR_CMD) deliberately held the transition until
+			  * the DRV/encoder/ADC preflight completed.  Commit it now; without
+			  * restoring ready, a healthy rearm still remained stuck in MENU. */
+			 fsmstate->ready = 1U;
+		 } else if (fsmstate->rearm_wait_cycles++ >= 3000U) {
+			 /* 100 ms at 30 kHz is enough for a transient SPI/DRV recovery;
+			  * persistent faults remain fail-closed and can be diagnosed. */
+			 fsmstate->rearm_pending = 0U;
+			 fsmstate->rearm_wait_cycles = 0U;
+			 fsmstate->next_state = MENU_MODE;
+			 fsmstate->ready = 1U;
+		 } else {
+			 return;
+		 }
+	 }
 
 	 /* state transition management */
 	 if(fsmstate->next_state != fsmstate->state){
@@ -142,14 +180,49 @@ static MotorGateResult motor_gate_preflight(void)
 			 break;
 
 		 case CALIBRATION_MODE:
+			/* GD32 gate enable is non-blocking: drv_enable_gd() only starts
+			 * the charge-pump/configuration window.  Service it here as well as
+			 * in MOTOR_MODE; otherwise calibration runs with PWM/POEN disabled
+			 * and the rotor never follows the calibration field. */
+			 drv_service_enable(drv);
+			 if (!drv_enable_ready()) {
+				/* Do not leave EN_GATE asserted forever if DRV readback cannot
+				 * complete. Return to MENU so the next session can retry. */
+				if ((uint32_t)(controller.loop_count - comm_encoder_cal.gate_wait_start) >
+				    (uint32_t)(200U / (DT * 1000.0f))) {
+					diagnostics_debug_record(DIAG_DEBUG_EVENT_GATE_PREFLIGHT, 2U);
+					drv_disable_gd(drv);
+					comm_encoder_cal.failed = 1U;
+					comm_encoder_cal.done_cal = 1U;
+					comm_encoder_cal.done_ordering = 1U;
+					fsmstate->next_state = MENU_MODE;
+					fsmstate->ready = 1U;
+				}
+				 break;
+			}
 			 if(!comm_encoder_cal.done_ordering){
 				 order_phases(&comm_encoder, &controller, &comm_encoder_cal, controller.loop_count);
 			 }
 			 else if(!comm_encoder_cal.done_cal){
 				 calibrate_encoder(&comm_encoder, &controller, &comm_encoder_cal, controller.loop_count);
 			 }
-			 else{
+			else{
 				 /* Exit calibration mode when done */
+				 if (comm_encoder_cal.failed != 0U) {
+					PPAIRS = comm_encoder_cal.saved_ppairs;
+					PHASE_ORDER = comm_encoder_cal.saved_phase_order;
+					E_ZERO = comm_encoder_cal.saved_ezero;
+					memcpy(&ENCODER_LUT, comm_encoder_cal.saved_lut,
+					       sizeof(comm_encoder_cal.saved_lut));
+					comm_encoder.ppairs = PPAIRS;
+					comm_encoder.e_zero = E_ZERO;
+					memcpy(&comm_encoder.offset_lut, &ENCODER_LUT,
+					       sizeof(comm_encoder.offset_lut));
+					printf("Calibration rejected; previous configuration restored.\r\n");
+					comm_encoder_cal.failed = 0U;
+					update_fsm(fsmstate, ESC_CMD);
+					break;
+				 }
 				 //for(int i = 0; i<128*PPAIRS; i++){printf("%d\r\n", error_array[i]);}
 				 E_ZERO = comm_encoder_cal.ezero;
 				 printf("E_ZERO: %d  %f\r\n", E_ZERO, TWO_PI_F*fmodf((comm_encoder.ppairs*(float)(-E_ZERO))/((float)ENC_CPR), 1.0f));
@@ -172,7 +245,10 @@ static MotorGateResult motor_gate_preflight(void)
 					 break;
 				 }
 				 /* If CAN has timed out, reset all commands */
+				 uint8_t gate_ok = 1U;
 				 if((CAN_TIMEOUT > 0 ) && (controller.timeout > CAN_TIMEOUT)){
+					diagnostics_debug_record(DIAG_DEBUG_EVENT_WATCHDOG_TIMEOUT,
+							(uint32_t)controller.timeout);
 					/* A timeout is a power-stage stop, not merely a zero reference.
 					 * Requiring a fresh MOTOR command makes recovery explicit. */
 					zero_commands(&controller);
@@ -182,13 +258,20 @@ static MotorGateResult motor_gate_preflight(void)
 					 * run_fsm() to commit the MENU transition so a later 0xFC can
 					 * re-enter MOTOR_MODE without requiring a board reset. */
 					fsmstate->ready = 1U;
-				 } else if (motor_gate_preflight() != MOTOR_GATE_OK) {
-					drv_disable_gd(drv);
-					fsmstate->next_state = MENU_MODE;
-					fsmstate->ready = 1U;
+					gate_ok = 0U;
+				 } else {
+					const MotorGateResult gate_result = motor_gate_preflight();
+					if (gate_result != MOTOR_GATE_OK) {
+						diagnostics_debug_record(DIAG_DEBUG_EVENT_GATE_PREFLIGHT,
+								(uint32_t)gate_result);
+						drv_disable_gd(drv);
+						fsmstate->next_state = MENU_MODE;
+						fsmstate->ready = 1U;
+						gate_ok = 0U;
+					}
 				 }
 			 /* Otherwise, commutate */
-			 else{
+			 if (gate_ok != 0U){
 				 torque_control(&controller);
 				 field_weaken(&controller);
 				 commutate(&controller, &comm_encoder);
@@ -238,16 +321,26 @@ static MotorGateResult motor_gate_preflight(void)
 #ifdef STM32F446
 				HAL_GPIO_WritePin(LED, GPIO_PIN_SET );
 #endif
-				 if (motor_gate_preflight() != MOTOR_GATE_OK) {
-					zero_commands(&controller);
-					fsmstate->next_state = MENU_MODE;
-					fsmstate->ready = 1U;
-					return;
-				 }
+					 {
+						const MotorGateResult gate_result = motor_gate_preflight();
+						if (gate_result != MOTOR_GATE_OK) {
+							diagnostics_debug_record(DIAG_DEBUG_EVENT_GATE_PREFLIGHT,
+									(uint32_t)gate_result);
+						zero_commands(&controller);
+						fsmstate->next_state = MENU_MODE;
+						fsmstate->ready = 1U;
+						return;
+						}
+					 }
 				 /* Entering MOTOR_MODE after a timeout is a new watchdog session. */
 				 controller.timeout = 0;
 				 reset_foc(&controller);
-				drv_enable_gd(drv);
+				/* The 0xFC re-arm path may already have completed the bounded
+				 * DRV verification before the FSM commits this transition. Do not
+				 * start a second enable window here, which would clear
+				 * drv_enable_verified and leave MOTOR_MODE permanently gated. */
+				if (!drv_enable_ready())
+					drv_enable_gd(drv);
 				break;
 			case CALIBRATION_MODE:
 				//printf("Entering Calibration Mode\r\n");
@@ -260,7 +353,14 @@ static MotorGateResult motor_gate_preflight(void)
 
 				comm_encoder_cal.done_cal = 0;
 				comm_encoder_cal.done_ordering = 0;
+				comm_encoder_cal.failed = 0;
 				comm_encoder_cal.started = 0;
+				comm_encoder_cal.gate_wait_start = controller.loop_count;
+				comm_encoder_cal.saved_ppairs = PPAIRS;
+				comm_encoder_cal.saved_phase_order = (uint8_t)PHASE_ORDER;
+				comm_encoder_cal.saved_ezero = E_ZERO;
+				memcpy(comm_encoder_cal.saved_lut, &ENCODER_LUT,
+				       sizeof(comm_encoder_cal.saved_lut));
 				comm_encoder.e_zero = 0;
 				memset(&comm_encoder.offset_lut, 0, sizeof(comm_encoder.offset_lut));
 				drv_enable_gd(drv);
@@ -302,6 +402,17 @@ static MotorGateResult motor_gate_preflight(void)
 			case CALIBRATION_MODE:
 				//printf("Exiting Calibration Mode\r\n");
 				drv_disable_gd(drv);
+				if (!comm_encoder_cal.done_cal) {
+					/* An aborted/incomplete calibration must not leave a mixed
+					 * phase-order/pole-pair/offset state in RAM. */
+					PPAIRS = comm_encoder_cal.saved_ppairs;
+					PHASE_ORDER = comm_encoder_cal.saved_phase_order;
+					E_ZERO = comm_encoder_cal.saved_ezero;
+					memcpy(&ENCODER_LUT, comm_encoder_cal.saved_lut,
+					       sizeof(comm_encoder_cal.saved_lut));
+					memcpy(comm_encoder.offset_lut, comm_encoder_cal.saved_lut,
+					       sizeof(comm_encoder_cal.saved_lut));
+				}
 				//free(error_array);
 				//free(lut_array);
 
@@ -328,6 +439,8 @@ static MotorGateResult motor_gate_preflight(void)
 		fsmstate->next_state = MOTOR_MODE;
 		if (fsmstate->state != MOTOR_MODE) {
 			fsmstate->ready = 0;
+			fsmstate->rearm_pending = 1U;
+			fsmstate->rearm_wait_cycles = 0U;
 		}
 		return;
 	}
