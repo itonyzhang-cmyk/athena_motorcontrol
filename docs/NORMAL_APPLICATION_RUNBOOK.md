@@ -9,9 +9,9 @@ authorize a hardware write by itself.
 make host-test host-app-test host-tools-test
 make SAFE_BRINGUP=0 BRINGUP_INJECT=0 \
   BUILD_DIR=/tmp/athena-normal-audit \
-  GCC_PATH=/tmp/arm-gnu-toolchain-15.2-root-new/bin -j4
+  GCC_PATH=/Users/choqy/toolchains/arm-gnu-toolchain-15.2/bin -j4
 tools/verify_normal_image.sh \
-  /tmp/arm-gnu-toolchain-15.2-root-new/bin/arm-none-eabi-nm \
+  /Users/choqy/toolchains/arm-gnu-toolchain-15.2/bin/arm-none-eabi-nm \
   /tmp/athena-normal-audit/unsafe/motorcontrol.elf
 tools/athena_safe_flash.sh self-test
 ```

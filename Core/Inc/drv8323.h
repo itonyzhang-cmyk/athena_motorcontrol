@@ -225,6 +225,10 @@ uint32_t drv_init_readback_dcr_csacr(void);
 uint32_t drv_init_readback_ocpcr(void);
 uint32_t drv_init_spi_rx(uint8_t index);
 uint32_t drv_enable_evidence(uint8_t page);
+/* Runtime nFAULT evidence is retained before EN_GATE is removed.  These
+ * values are diagnostic-only and let the host distinguish a DRV fault from
+ * the all-zero register bank visible after shutdown. */
+uint32_t drv_runtime_fault_evidence(uint8_t page);
 int drv_enable_window_active(void);
 void drv_enable_record_nfault_edge(void);
 /* Capture FSR1/FSR2 immediately when nFAULT asserts, before EN_GATE is

@@ -61,13 +61,24 @@ factory firmware.
 
 ### Build
 
+- **唯一允许的 Arm GNU 工具链**：项目内固定目录
+  `/Users/choqy/workspace/xiaomi_dog/.toolchains/arm-gnu-15.3`（Arm GNU
+  Toolchain 15.3.Rel1 / GCC 15.3.1，包含完整 Newlib）。构建禁止引用
+  `/tmp` 或 Homebrew 的不完整 `arm-none-eabi-gcc`。
+- 构建时必须显式指定：
+
+  ```sh
+  make -C athena_motorcontrol \
+    GCC_PATH=/Users/choqy/workspace/xiaomi_dog/.toolchains/arm-gnu-15.3/bin \
+    SAFE_BRINGUP=0 -j4
+  ```
+
 - Homebrew `arm-none-eabi-gcc` 16.2.0 was installed, but that formula does not
   contain Newlib headers/libraries and cannot build this project (`stdio.h`
   missing).
 - The Arm official 15.3.rel1 package was downloaded by Homebrew. Its installer
   requires an interactive administrator password, so it was not system-installed.
-- For a non-privileged build check, the official package payload was extracted
-  under `/tmp/arm-gnu-toolchain-15.3-root` and passed through `GCC_PATH`.
+- The project-local toolchain above is the authoritative build source.
 - The official compiler found a Newlib compatibility defect in
   `Core/Src/sysmem.c`: obsolete `caddr_t` use. It was replaced with `void *`.
 - The default `SAFE_BRINGUP=1` build now completes successfully with no C
@@ -78,12 +89,12 @@ factory firmware.
 Current first-flash safe build command:
 
 ```sh
-make BUILD_DIR=/tmp/athena-safe-build \
-  GCC_PATH=/tmp/arm-gnu-toolchain-15.3-root/bin -j4
+make BUILD_DIR=build \
+  GCC_PATH=/Users/choqy/workspace/xiaomi_dog/.toolchains/arm-gnu-15.3/bin -j4
 ```
 
 Outputs are always profile-isolated under
-`/tmp/athena-safe-build/safe/`. An unsafe build made with
+`build/safe/`. An unsafe build made with
 `SAFE_BRINGUP=0` goes under `/tmp/athena-safe-build/unsafe/` and cannot share
 objects with the safe image. The safe ELF is first linked as `.unverified` and
 only renamed to `.elf` after `tools/verify_safe_image.sh` passes; HEX/BIN are
@@ -155,6 +166,116 @@ After each material step, update this file with:
 Do not record secrets, access tokens, or private credentials here.
 
 ## Session Log
+
+### 2026-08-20 - encoder-startup image bench result
+
+- Flashed `artifacts/athena_inject_encoder_startup_20260820/motorcontrol.bin`
+  (SHA-256
+  `ba9dafc0fb6585558f2981f1298e5b86f3ef6109d6ccb9d10882828b2da19955`).
+- Immediately after flashing, the controller LED was off and `ping` did not
+  respond; after a controller power cycle, CAN and LED operation resumed. This
+  matches the flash tool's documented CPU-halted post-write state.
+- After power cycle, `snapshot` passed with `SAFE=1`, `PA11=0`, `POEN=0`,
+  `enc=1`, `adc=1`, `passive=PASS`, `safety_fault_latched=0`, zero SPI/ADC,
+  encoder parity/EF/jump errors, and zero CAN errors.
+- The bounded encoder startup delay/retry fix is therefore effective in the
+  no-debugger cold-start path. Next gate is one bounded `drv-wake` test with
+  the ST-LINK disconnected and the current-limited bench ready.
+
+### 2026-08-20 - no-debugger startup fallback image
+
+- Further bench evidence: with ST-LINK fully disconnected, LED and CAN stopped;
+  source audit found the selected GD32 `system_clock_120m_hxtal()` could halt
+  forever when HXTAL did not assert stable. The previously edited generic
+  HXTAL helper was not on the active path and was corrected.
+- Active 120 MHz HXTAL startup now falls back to the existing 120 MHz IRC8M
+  PLL path on HXTAL timeout. No PWM or DRV enable behavior changed.
+- New reviewed image: `artifacts/athena_inject_clock_fallback_20260820/motorcontrol.bin`
+  (33508 bytes, SHA-256
+  `b42993500eda792774bd39ad0ae3cd2557810a8b1dd4c84fb7a6e79e4bc73c90`).
+- The safe-flash script is hash- and size-locked to this image; image audit,
+  host tests, and flash-script self-test passed.
+- Next safe action: flash this exact image, power-cycle with ST-LINK fully
+  disconnected, and verify LED plus `ping`/`snapshot` before any `drv-wake`.
+
+### 2026-08-20 - standalone IRC startup image
+
+- Because the fallback image still showed no CAN after full ST-LINK removal,
+  the active GD32 clock selection was changed to direct IRC8M PLL at 120 MHz;
+  this removes the external HXTAL startup path entirely for the next isolated
+  test while preserving peripheral clock assumptions.
+- New image: `artifacts/athena_inject_irc_startup_20260820/motorcontrol.bin`,
+  33308 bytes, SHA-256
+  `06e1f7c107fd158b1532c90b7b7145714c96af3d827a298cca02d9a41fa4e637`.
+- Image audit, host tests, and flash-script self-test passed. LED behavior is
+  not a valid standalone proof in BRINGUP_INJECT because the main loop can
+  continue before its legacy LED block; CAN `ping` is the required proof.
+
+### 2026-08-20 - DRV fault-read diagnostic image
+
+- `drv-wake` left `safety_fault_latched=0x20` (`SAFETY_FAULT_GATE_DRIVER`),
+  proving nFAULT fell immediately after ENABLE and the prior implementation
+  skipped the SPI reads, leaving `0xFFFF` defaults.
+- Added a bounded, PWM/POEN-disabled fault-read window: the EXTI handler records
+  nFAULT during this window without forcing PA11 low, the service performs one
+  complete 8-frame SPI capture, then always disables PA11 and reports the wake
+  unavailable unless nFAULT and all register checks pass.
+- New image:
+  `artifacts/athena_inject_drv_fault_read_20260820/motorcontrol.bin`, 33332
+  bytes, SHA-256
+  `6e1eb4e5397d95de802b3f225a2163d80604effb0570d7c35df5f3606d9213bd`.
+- Host tests, image audit, and flash-script self-test passed. No PWM output was
+  added.
+
+### 2026-08-20 - standalone DRV wake verification
+
+- After a full power cycle with ST-LINK disconnected, `drv-wake` returned
+  `status=OK payload=1`; snapshot page 27 reported `drv_ready=1`.
+- FSR1/FSR2 were zero, DCR/CSACR/OCPCR matched `0x00A0/0x02DC/0x0415`, all
+  eight SPI transfers completed with valid RX words, and passive safety flags
+  passed (`PA11=0`, `POEN=1`, `enc=1`, `adc=1`).
+- No-debugger cold-start and DRV read/configuration gates are proven. Further
+  work requires physical bench confirmation before any bounded PWM/injection
+  test.
+
+### 2026-08-20 - DRV SPI fault read and readiness latch result
+
+- On the fault-read image, `drv-wake` returned `status=OK payload=1` and real
+  DRV values: FSR1/FSR2 `0x0000`, DCR `0x00A0`, CSACR `0x02DC`, OCPCR `0x0415`;
+  all eight SPI RX words were valid. This proves DRV SPI and ENABLE sequencing
+  are functional.
+- The following snapshot showed `drv_ready=0` only because read-only diagnostic
+  frames cleared the readiness latch. Fixed `inject_handle_can()` so opcodes
+  0..3 preserve a successful wake result.
+- New image:
+  `artifacts/athena_inject_drv_ready_latch_20260820/motorcontrol.bin`, 33340
+  bytes, SHA-256
+  `bb92730f4bf6e46655ec8817891d73e7994d883590784ab2e4181a7390600c1a`.
+- Host tests, image audit, and flash-script self-test passed. No PWM output was
+  added; the next manual step is to flash and verify `drv_ready=1` after the
+  wake command.
+
+### 2026-08-20 - ST-LINK-independent encoder startup audit
+
+- Bench comparison: with the ST-LINK board cable removed but the controller
+  powered, the MCU LED and CAN remained alive while `enc=0`; removing the
+  ST-LINK USB power stopped the board entirely. This is treated as a startup
+  sequencing/debugger-timing symptom, not evidence of incorrect hardware.
+- Updated `Core/Src/main.c` to allow 100 ms for the AS5047P power-up path before
+  the first read-only sample.
+- Updated `Core/Src/position_sensor.c` so encoder warm-up retries up to three
+  times with 20 ms gaps. A transient warm-up failure no longer latches a safety
+  fault before the bounded retries finish; final failure still latches the
+  appropriate encoder/SPI fault, and DRV/PWM remain disabled.
+- Host protocol tests and `tools/athena_safe_flash.sh self-test` passed.
+- A new firmware artifact/SHA was not produced in this session because the
+- A complete Arm GNU 15.2.rel1 toolchain was restored under `/tmp` and used to
+  build two isolated, byte-identical BRINGUP_INJECT outputs. The reviewed BIN
+  is `artifacts/athena_inject_encoder_startup_20260820/motorcontrol.bin`,
+  SHA-256 `ba9dafc0fb6585558f2981f1298e5b86f3ef6109d6ccb9d10882828b2da19955`.
+- `tools/athena_safe_flash.sh` now defaults to and hash-locks this image.
+- Next safe action: user flashes this exact image, repeats the two ST-LINK cable
+  states, and confirms `enc=1` before any `drv-wake` request.
 
 ### 2026-08-14 — Project initialization
 
@@ -326,9 +447,59 @@ Do not record secrets, access tokens, or private credentials here.
 - Added the read-only `tools/athena_safe_flash.sh identify` action. Preflight
   and future backup metadata now also capture the UID automatically.
 - The local board registry is
-  `/Users/choqy/workspace/xiaomi_dog/backups/BOARD_REGISTRY.md`. The earlier
-  2026-08-12 board cannot be assigned a UID from its main-Flash backup alone;
-  reconnect it once to register it.
+  `/Users/choqy/workspace/xiaomi_dog/backups/BOARD_REGISTRY.md`.
+
+### 2026-08-18 — original-motor-connected board identification
+
+- Identified the board connected to the original motor through ST-LINK V2J37S7
+  using a halt-only SWD session. UID: `39305137-14303434-47457A29`
+  (`UID[95:64]..UID[31:0]`), which is distinct from `独板`.
+- The target reported 3.214 V, debug/device word `0x17010414`, and 512 KiB
+  Flash. It is now bound to the double-read 2026-08-12 factory backup
+  `gd32f303ret6_factory_20260812_170113_CST/` and designated as the next safe
+  first-flash target.
+- No main Flash or Option Bytes write was issued. The CPU remains halted;
+  do not reset/run it until the bench supply and first-flash conditions are
+  reconfirmed.
+
+### 2026-08-18 — SAFE_DIAGNOSTIC first flash on original-motor board
+
+- Bench conditions: 12 V controller supply, 0.2 A current limit. Target UID was
+  rechecked as `39305137-14303434-47457A29` before the write.
+- Pre-flash backup: `/Users/choqy/workspace/xiaomi_dog/backups/gd32f303ret6_preflash_20260818_113741_CST/`;
+  two complete 512 KiB reads were byte-identical (SHA-256
+  `378978bafac4a3e04454c4ff135b8f342dc5c04809c2197cafa2ecebf6d962ab`).
+- Programmed image: `artifacts/athena_safe_diagnostic_ccf6522/motorcontrol.bin`,
+  SHA-256 `9824e0587281bd6bcf6b1915c764c46d30a1843b24d4ee488ea1b308513c1e82`.
+  Only `0x08000000..0x080077FF` was erased/programmed; readback matched
+  exactly. Reserved config and Option Bytes were unchanged.
+- Result: flash verification passed; CPU remains halted. `boot-safe` and CAN
+  ping/snapshot are the next separate actions and have not been performed.
+
+### 2026-08-18 — factory image recovery after erase timeout
+
+- User authorized restoration of the board-specific factory image. The initial
+  full-chip erase timed out before programming completed; the application was
+  observed erased (`0xFF`) and the target was kept halted.
+- Recovery was completed from the same hash-locked 512 KiB image in sixteen
+  32 KiB erase/write blocks. Each block passed `verify_image` with no error.
+- Verification directory:
+  `/Users/choqy/workspace/xiaomi_dog/backups/factory_restore_verification_20260818_123605_CST/`.
+  Option Bytes readback matched the expected SHA-256
+  `c0b942fbb9fe967ec0e7b675e080d48c930fc5fe3fde70f6dd6f9646fdffc0d3`.
+- CPU remains halted. Do not run factory firmware until the user explicitly
+  authorizes the separate boot/test step.
+
+### 2026-08-18 — factory CAN physical-link verification
+
+- After factory boot and correction of the CANH/CANL orientation, the read-only
+  `tools/uc12_discover/uc12_discover --send --motor-id 1` test succeeded at
+  1 Mbps.
+- Received extended response `0x000001FE` with payload
+  `29 7A 45 47 34 34 30 14`, identifying motor ID 1 and MCU UID
+  `297A454734343014`.
+- This confirms the UC12 adapter, bus power/termination path, CAN transceiver,
+  and current CANH/CANL direction. Do not swap the lines again.
 
 ### 2026-08-16 — BRINGUP_INJECT gated single-phase injection profile
 
@@ -378,3 +549,527 @@ Do not record secrets, access tokens, or private credentials here.
 - Next action requires explicit user authorization: connect motor + bench
   supply, then `flash-inject`, `boot-inject`, passive checks, and the six-
   vector injection matrix at 0.5 % / 10 ms.
+
+### 2026-08-18 — CAN verified: root cause was the host tool, not firmware
+
+- Restored the board-specific 512 KiB factory backup in 16 x 32 KiB
+  erase/write/verify blocks (single full-chip erase times out at 100 kHz
+  SWD). Whole-flash readback SHA-256 matched
+  `302f25ed7848ec22c77dbce177c79f548b6de502be71f06976034f8df9cb1ec7`;
+  Option Bytes unchanged (`c0b942fb...`). CPU was kept halted throughout.
+- Ran the factory firmware briefly and captured live GPIO/CAN registers:
+  factory drives PB10 output-push-pull 2 MHz high and PB12 at 50 MHz; the
+  safe image left PB10 floating. Live full-GPIO parity to factory did NOT
+  change CAN behavior, ruling out a transceiver enable-pin difference.
+- TX beacon probe proved MCU -> UC12 (and mailbox/TX) fully working; the
+  real failure was `athena_diag_uc12` requiring `confirmation[2] & 0x80`
+  after a CAN TX, while the proven `uc12_discover` path only requires
+  `confirmation[2] >= 1`. The stricter check rejected every valid UC12 TX
+  confirmation and produced the misleading "UC12 did not confirm".
+- Fixes kept in the workspace:
+  - `tools/athena_diag_uc12/athena_diag_uc12.c`: TX confirmation check now
+    matches `uc12_discover`; read-only queries (opcode 0..3) retry once if
+    the firmware 20 ms rate limiter drops the request.
+  - `Core/Src/can.c`: factory CAN timing (prescaler 4, BS1 10 TQ, BS2 4 TQ,
+    auto bus-off, retransmit enabled).
+  - `Core/Src/gpio.c`: PB9 = AF push-pull 50 MHz, matching factory
+    `GPIOB_CTL1=0x949342B8` nibble 0xB (GD32 mode; factory is NOT open-drain).
+- Verified safe diagnostic firmware (SAFE_DIAGNOSTIC, gate off):
+  - 29,380 bytes, SHA-256
+    `96f03a7a64a6f450734f5bc851731691d556f9e7869243d7ee35420eb34aee52`,
+    stored under
+    `/Users/choqy/workspace/xiaomi_dog/artifacts/athena_safe_diagnostic_factory_can_96f03a7a/`;
+    registered as the default safe image in `tools/athena_safe_flash.sh`.
+  - CAN results: `ping` returns `ATHN`; `info` pages 0..4 OK; `snapshot`
+    pages 0..19 OK; `watch` counter pages 9..13 OK. Safety flags:
+    `SAFE=1 PA11=0 POEN=0 CH=000 CAN_ERR=0`.
+  - Firmware counters: every accepted request received a response
+    (`rx_valid == tx_submit`); the few observed timeouts were the
+    firmware's 20 ms response rate limiter under burst polling, now
+    absorbed by the tool's single retry.
+
+### 2026-08-19 — BRINGUP_INJECT flashed and verified
+
+- User explicitly authorized `flash-inject` after the motor bench was
+  prepared. The tool's missing `--confirm-inject-sha` parser case was added;
+  no erase/write occurred during the initial rejected invocation.
+- Target UID `39305137-14303434-47457A29` and target voltage `3.216 V` passed
+  preflight. A fresh two-read 512 KiB backup was created under
+  `/Users/choqy/workspace/xiaomi_dog/backups/gd32f303ret6_preflash_20260819_103523_CST/`;
+  both reads matched with SHA-256
+  `9432474f75e4066b732d15a625f25301a8f98d04e5cacfd81e26dff34e66c7a7`.
+- Programmed the reviewed `BRINGUP_INJECT` image
+  (`98cac3d5bb76601b82214e349a5dba63b41218910b3a052168f207037d9f6de2`) only
+  into `0x08000000..0x08007FFF`. The 31,940-byte readback matched exactly;
+  reserved config and Option Bytes were unchanged.
+- CPU remains halted. No `boot-inject` or injection pulse has been issued.
+  Next safe action is passive bench boot and `ping`/`drv`/`snapshot` checks.
+
+### 2026-08-19 — BRINGUP_INJECT CAN receive-path rebuild
+
+- Passive diagnostics after `boot-inject` timed out. This was not the prior
+  UC12 transmit-confirmation parser bug: `athena_diag_uc12` already accepts
+  the validated transmit confirmation condition (`confirmation[2] >= 1`) and
+  retries one read-only request after the 20 ms response limiter.
+- Root cause in the old `89b6629` inject image: `BRINGUP_INJECT=1` forces
+  `SAFE_BRINGUP=0`, while `can_rx_init()` and `can_tx_init()` selected the
+  ATHENA-DIAG filter/response defaults only for `SAFE_BRINGUP`. The hardware
+  therefore filtered diagnostic request `0x701` as if it were motor ID 1.
+- Corrected only these two selection conditions so `BRINGUP_INJECT` shares the
+  diagnostic receive-all hardware filter and `0x781`/DLC8 response defaults.
+  The change does not alter PA11 gating, the fixed 0.5..5% / 10..50 ms pulse
+  tables, DRV setup, current watchdog, calibration exclusion, or reserved
+  Flash configuration range.
+- Rebuilt twice in isolated output trees with xPack Arm GNU Toolchain 15.2.1;
+  ELF/HEX/BIN were byte-identical. `make host-test host-inject-test
+  host-tools-test` and `verify-inject` passed. The one inherited RWX LOAD
+  segment linker warning remains.
+- Published the hash-locked candidate image at
+  `artifacts/athena_inject_bringup_can_fix_20260819/motorcontrol.bin`:
+  31,980 bytes, SHA-256
+  `9c3003c28a65eb601cf5d918f3a748e730bd3f3cef2d7c2a72fe2333339e42fe`,
+  image end `0x08007CEC`; configuration remains reserved at
+  `0x0803C000..0x0803CFFF`. No Flash write, boot, CAN injection, or motor
+  movement was performed for this rebuild. Reflashing this replacement image
+  is a separate explicit authorization.
+
+### 2026-08-19 — paged BRINGUP_INJECT flash procedure
+
+- Replaced the one-shot `flash-inject` application-area erase/write with a
+  fixed 16 x 2 KiB page procedure. Each page is erased, written when it
+  contains image bytes, and verified in an independent OpenOCD invocation.
+  The partial final image page is verified for its programmed bytes while the
+  rest of the approved application erase range remains erased.
+- The procedure retains its existing pre-write double 512 KiB backup,
+  target/Option-Byte checks, post-write complete image readback, reserved
+  configuration-range comparison, and Option-Byte hash validation. A page
+  failure stops immediately with the CPU halted; it does not continue to later
+  pages or reset/run the target.
+- No hardware connection, Flash write, boot, CAN injection, or motor movement
+  was performed while adding this procedure.
+
+### 2026-08-19 — gated DRV wake/configuration verification image
+
+- Investigated the `drv` readback of `0xFFFF` with PA11 low. It is not treated
+  as a usable driver state and injection remains rejected until a separate
+  `drv-wake` request verifies the driver configuration.
+- Added CAN opcode `0x06`, requiring the host-side `--confirm-drv-wake` flag.
+  It disables TIMER0 primary output, sets all comparisons low, raises PA11 for
+  a bounded 1 ms, writes/reads the restricted DRV configuration, then always
+  drops PA11 before it replies. Boot performs no DRV SPI writes.
+- `drv_ready` is set only for clean FSR1/FSR2 plus DCR `0x00A0`/`0x00A1`
+  (self-clearing fault-clear bit), CSACR `0x02DC`, and OCPCR `0x0415`.
+  `inject` explicitly refuses all requests until that condition holds.
+- Added snapshot pages 27..30 for the latched wake verification values and
+  updated the UC12 tool/runbook. Two isolated xPack 15.2.1 builds were
+  byte-identical; host protocol/tool tests and the inject symbol audit passed.
+- Published hash-locked candidate
+  `artifacts/athena_inject_bringup_drv_wake_20260819/motorcontrol.bin`:
+  32,428 bytes, SHA-256
+  `76726989c1f2a0af5e62f0b10e58fe34ae06a281dd1c789857189cbfc094bcd1`,
+  image end `0x08007EAC`. `tools/athena_safe_flash.sh` now selects this image.
+  No controller was flashed, booted, or commanded during this change.
+
+### 2026-08-19 — DRV wake CAN-ISR deadlock fix
+
+- Hardware evidence: the first `drv-wake` request produced no command response,
+  and all subsequent `ping` requests timed out. Root cause: its 1 ms
+  `delay_1ms()` ran in the CAN RX interrupt, whose priority prevents SysTick
+  from decrementing the delay counter. The MCU remained in that ISR and PA11
+  could remain asserted. The operator was instructed to remove motor power.
+- Reworked opcode `0x06`: CAN RX now only records the request and enters a
+  PWM-disabled wake window; `inject_service()` in the main loop waits for the
+  SysTick deadline, performs the bounded DRV SPI transaction, unconditionally
+  drops PA11, restores all-low PWM idle, and then sends the response. TIMER0
+  maintains PWM disabled during the wake window. Stop/unrelated frames cancel
+  the pending wake safely.
+- Added host-only `drv-wake-status` for reading pages 27..30 without reissuing
+  the PA11 wake request. It cannot recover a deadlocked old image; that image
+  must be replaced while motor power is off.
+- Two isolated xPack 15.2.1 builds are byte-identical. Host tests and inject
+  symbol audit passed. Published hash-locked candidate
+  `artifacts/athena_inject_bringup_drv_wake_isr_fix_20260819/motorcontrol.bin`:
+  32,604 bytes, SHA-256
+  `78226f6d833cd315d7de167790cf660d5b127d53a1989ad4804e507e0ee38c1f`,
+  image end `0x08007F5C`. `tools/athena_safe_flash.sh` selects it. No agent
+  flash, boot, CAN command, or motor movement was performed for this fix.
+
+### 2026-08-19 — DRV wake PA11 output-latch check fix
+
+- Hardware result from the ISR-fix image: opcode `0x06` returned without
+  deadlocking, but reported `UNAVAILABLE`, `drv_ready=0`, and all four latched
+  DRV values as zero. This establishes that the SPI transaction was not entered;
+  it is not evidence of a zero-valued DRV register set.
+- Cause: `inject_service()` additionally required PA11's GPIO output-data
+  latch to read high before starting SPI. On this board that readback was not a
+  reliable proof of the physical enable state, so it blocked the transaction
+  after the bounded wake interval.
+- Removed only that output-latch predicate. The wake still requires nFAULT
+  high, disables TIMER0 primary output and holds all compares low, waits one
+  millisecond in the main-loop state machine, then unconditionally pulls PA11
+  low before responding. `drv_ready` remains gated on clean FSR values and an
+  exact restricted configuration readback; `inject` remains unavailable unless
+  `drv_ready=1`.
+- Two isolated xPack 15.2.1 builds were byte-identical; `verify-inject` and
+  host protocol/tool tests passed. Published the unflashed candidate
+  `artifacts/athena_inject_bringup_drv_wake_latch_fix_20260819/motorcontrol.bin`:
+  32,588 bytes, SHA-256
+  `ae23073ca5871fa5fe0545f0c9f7ab6f018155c4e72d263e0381cb421615276b`,
+  image end `0x08007F4C`. `tools/athena_safe_flash.sh` now selects it. No agent
+  Flash write, boot, CAN command, or motor movement was performed for this fix.
+
+### 2026-08-19 — DRV wake hardware-ready interval correction
+
+- The PA11 output-latch fix was flashed and its image readback matched
+  `ae23073...`, but `drv-wake` still returned `UNAVAILABLE` with all latched
+  SPI values zero. PA12/nFAULT was high (the diagnostic prints `nFAULT=0` for
+  a non-asserted active-low input), so the transaction reached its SPI section.
+- The bounded interval had been set to 1 ms. The existing non-bring-up
+  `drv_init_config()` path documents and uses a 10 ms delay after PA11 rises
+  before its first DRV SPI write. One millisecond can sample the DRV before
+  its digital interface is ready, explaining a zero MISO readback.
+- Restored the 10 ms hardware-ready interval. TIMER0 primary output remains
+  disabled and all compares remain all-low for the entire interval; PA11 is
+  still unconditionally pulled low before the response. No injection is
+  permitted without the same strict `drv_ready=1` readback gate.
+- Two isolated xPack 15.2.1 builds were byte-identical; published the
+  unflashed candidate
+  `artifacts/athena_inject_bringup_drv_wake_settle_fix_20260819/motorcontrol.bin`:
+  32,588 bytes, SHA-256
+  `1040c4ca322fb4b457a708543edb46951d399c8147749f62a59db04bb3878cf8`,
+  image end `0x08007F4C`. `tools/athena_safe_flash.sh` now selects it. No agent
+  Flash write, boot, CAN command, or motor movement was performed for this fix.
+
+### 2026-08-19 — DRV SPI frequency and chip-select timing correction
+
+- The 10 ms wake image was flashed and reached the SPI transaction: latched
+  values changed from zero to `FSR1/FSR2/DCR/CSACR/OCPCR = 0xFFFF`. This is a
+  no-response MISO pattern, not a clean DRV configuration or a `drv_ready`
+  pass. Injection remains blocked.
+- `MX_SPI1_Init()` used APB1/8. With the GD32 120 MHz clock profile APB1 is
+  60 MHz, so the DRV bus ran at 7.5 MHz, above the DRV8323's 5 MHz SPI limit.
+  Changed only SPI1 (DRV) to APB1/16 = 3.75 MHz; encoder SPI2 is unchanged.
+- Added deterministic CS setup/hold delays around every DRV SPI transfer using
+  the existing bounded NOP helper. The wake still holds PWM disabled/all-low,
+  always lowers PA11 before replying, and still requires full exact readback
+  before it reports `drv_ready=1`.
+- Two isolated xPack 15.2.1 builds were byte-identical; published the
+  unflashed candidate
+  `artifacts/athena_inject_bringup_drv_spi_rate_fix_20260819/motorcontrol.bin`:
+  32,644 bytes, SHA-256
+  `4bb4c470b2fc502ce5e4fe94e0128eeed992a4bff7e7266c166bf6c27beb72ad`,
+  image end `0x08007F84`. `tools/athena_safe_flash.sh` now selects it. No agent
+  Flash write, boot, CAN command, or motor movement was performed for this fix.
+
+### 2026-08-19 — DRV SPI evidence capture after persistent all-high readback
+
+- The rate/timing image (`4bb4c470...`) was flashed and still returned clean
+  SPI words of `0xFFFF` for every DRV register. This is explicitly not treated
+  as a configuration success and `drv_ready` remains zero; no injection is
+  authorized.
+- Rechecked the DRV8323 Revision D datasheet, section 7.6/page 19. It specifies
+  `tCLK >= 100 ns` (10 MHz maximum), not the earlier undocumented 5 MHz claim.
+  The existing 3.75 MHz SPI1 setting remains conservative, but its former
+  5 MHz comment was corrected and frequency is no longer presented as a proven
+  root cause.
+- Added a one-shot evidence record to the existing bounded `drv-wake` command:
+  all eight SPI TX/RX words, each TBE/RBNE/BUSY completion result, SPI1
+  CTL0/CTL1/STAT, and GPIO A/B control/output/input snapshots are latched on
+  pages 31..48 before PA11 is dropped. RX is initialized to `0xFFFF` before
+  every transfer; `drv_ready` now additionally requires all eight transfers to
+  report `SPI_TRANSFER_OK`.
+- The host `drv-wake` command prints all evidence pages in one run. It still
+  raises PA11 for only the bounded 10 ms all-low/PWM-disabled window and always
+  lowers it before responding. It does not add PWM output, inject commands, or
+  Flash writes.
+- Two isolated xPack 15.2.1 builds produced byte-identical ELF/HEX/BIN;
+  protocol, host-tool, flashing-tool self-tests, and the inject symbol/config
+  audit passed. Published the unflashed candidate
+  `artifacts/athena_inject_bringup_drv_spi_evidence_20260819/motorcontrol.bin`:
+  33,300 bytes, SHA-256
+  `0eb86f727f82dba3451854a8d4dde068d4cd329c5b613d712a8349795d856ea0`,
+  image end `0x08008214`. The hash-locked flash tool now selects this image.
+- The image exceeds the former 16-page/32 KiB application range. The paged
+  flasher was therefore extended to exactly 17 x 2 KiB pages
+  (`0x08000000..0x080087FF`), still well below the immutable configuration
+  reservation at `0x0803C000`. Its self-test verifies this non-overlap.
+  No controller Flash write, boot, CAN command, or motor movement was
+  performed during this change.
+
+### 2026-08-19 — SPI1 mapping cross-check and nSCS high-time correction
+
+- The evidence image showed all eight SPI transfers completed (`page 31 = 0`),
+  TX words were correct, and every RX word was `0xFFFF`. PB13/PB15 were
+  alternate-function outputs, PB14 was a high input, and PA12/nFAULT was high.
+- A proposed SPI1 AFIO-remap change was rejected at compile time because this
+  GD32 library exposes no `GPIO_SPI1_REMAP`. Source and the independent
+  hardware audit confirm that SPI1 is natively PB13/PB14/PB15; only encoder
+  SPI2 is remapped to PC10/PC11/PC12. No unbuildable remap code was retained.
+- Rechecked the DRV8323 section 7.6 timing sequence: it requires nSCS to stay
+  high for at least 400 ns between frames. The previous transfer helper delayed
+  after nSCS low and before nSCS high but not after the high transition. Added
+  the existing deterministic delay after every nSCS high transition. This is a
+  genuine protocol correction; it does not establish the root cause until one
+  bounded wake is tested. PA11/PWM/injection behavior is unchanged.
+- Two isolated xPack 15.2.1 builds, host tests, image audit, and flasher
+  self-test passed. Published candidate
+  `artifacts/athena_inject_bringup_drv_cshigh_20260819/motorcontrol.bin`:
+  33,324 bytes, SHA-256
+  `d4dea6e94f024bcbfb2e8d61b0dca338aadc0087d3e5528328833e86d4908802`.
+  No controller was flashed or commanded after this rebuild.
+
+### 2026-08-19 — DRV SDO input bias correction candidate
+
+- Re-audited the all-`0xFFFF` result under the assumption that the board
+  wiring and DRV8323RS variant are correct. The firmware configured PB14/SDO
+  as `GPIO_MODE_IN_FLOATING`, while DRV8323 SDO is open-drain and releases the
+  line between response bits. Changed only PB14 to `GPIO_MODE_IPU`; SPI mode,
+  frame format, timing, PA11 window, PWM shutdown, and `drv_ready` validation
+  are unchanged.
+- This is an unverified candidate. It must be tested with one bounded
+  `drv-wake`; no injection is allowed unless the exact readback passes.
+- Two isolated builds, host tests, image audit, and flasher self-test passed.
+  Candidate image:
+  `artifacts/athena_inject_bringup_drv_sdo_ipu_20260819/motorcontrol.bin`,
+  33,324 bytes, SHA-256
+  `9bde97ea0923cdc57ac33ca43ccac0272359d751603fc3f419e0bea4d5a892f5`.
+  No controller was flashed or commanded for this candidate.
+
+### 2026-08-20 — drv_ready clear-reason page dispatch correction
+
+- Page 49 (`drv_ready_clear_reason`) was implemented in `inject_snapshot()`,
+  but the diagnostic dispatcher forwarded only pages 20 through 48. Therefore
+  `page=49 status=BAD_PAGE` was a firmware dispatch omission, not evidence of
+  a failed flash or unsupported diagnostic version.
+- Added only the missing page-49 dispatch case. The page reports why the
+  readiness latch was last cleared: 1 boot/reset, 2 new wake, 3 explicit stop,
+  or 4 unknown control frame. No PWM, wake sequencing, injection acceptance,
+  or Flash-writing behavior changed.
+- Published the unflashed candidate
+  `artifacts/athena_inject_drv_ready_reason_page49_20260820/motorcontrol.bin`:
+  33,380 bytes, SHA-256
+  `eaf40e726236aa4c3f3762e4fa5509a4648ba03c9ce0e75009fdab0769ee32a5`.
+  The hash-locked flash script selects this image. Build image audit and
+  host/host-tool/flasher self-tests passed before bench use. No controller
+  Flash write, boot, CAN command, or motor movement was performed for this fix.
+
+### 2026-08-20 — nFAULT edge qualification after controlled disable
+
+- Bench evidence: `drv-wake` completed with `drv_ready=1` and zero DRV status
+  faults, but the immediate `inject 0 0.5 10` request was refused with
+  `payload=0x20` (`SAFETY_FAULT_GATE_DRIVER`). This is a firmware sequencing
+  issue, not a failed DRV wake: `inject_service()` intentionally lowers PA11
+  after the verified wake; the DRV then normally asserts nFAULT because it is
+  disabled, and EXTI incorrectly latched that post-disable edge as a gate
+  fault.
+- The nFAULT ISR now records a gate-driver fault only while PA11 is high. It
+  retains the bounded wake-window fault capture with PWM/POEN disabled, and
+  real nFAULT assertions during an active injected pulse still force immediate
+  shutdown and fault latching.
+- Published the unflashed candidate
+  `artifacts/athena_inject_drv_nfault_disable_edge_20260820/motorcontrol.bin`:
+  33,396 bytes, SHA-256
+  `8f0c90c211a8153ca20ba9d7fd02c242398c383d05abaea11f967a50458b2cf5`.
+  The hash-locked flash script selects this image. No controller Flash write,
+  boot, CAN command, or motor movement was performed for this fix.
+
+### 2026-08-20 — pre-clear DRV fault capture
+
+- The first bounded injection was accepted but aborted at 2 PWM ticks with
+  `SAFETY_FAULT_GATE_DRIVER (0x20)`. Added a diagnostic-only recovery path:
+  when that is the sole MCU-latched fault, the next `drv-wake` may enter the
+  existing PWM/POEN-disabled window even if nFAULT is low.
+- The wake service now reads DRV FSR1/FSR2 before any DCR write containing
+  `CLR_FLT`; pages 50 and 51 expose those pre-clear values. All other safety
+  faults still reject wake, and no PWM is enabled by this recovery path.
+- Published unflashed candidate
+  `artifacts/athena_inject_drv_prefault_capture_20260820/motorcontrol.bin`:
+  33,460 bytes, SHA-256
+  `34df802ff94bf4af3ac5ce4c67d6d3b5b011831994c033510bfdba463fe7a366`.
+  Hash-locked flasher, image audit, host tests and diagnostic-tool tests pass.
+  No controller Flash write, boot, CAN command, or motor movement was
+  performed for this change.
+
+### 2026-08-20 — post-abort DRV fault capture
+
+- The pre-clear FSR1/FSR2 pages returned zero after the aborted pulse, so the
+  next diagnostic must capture the DRV status at the actual nFAULT edge. Added
+  pages 52/53 for a bounded post-abort FSR1/FSR2 read with PWM disabled; the
+  first-tick and later-tick nFAULT paths both set the capture request.
+- Published unflashed candidate
+  `artifacts/athena_inject_drv_fault_capture_20260820/motorcontrol.bin`:
+  33,612 bytes, SHA-256
+  `ab2105e69da4638eea029c104b07c5c391a89b8d2a0ebc20bb501d1440405a8e`.
+  No controller Flash write, boot, CAN command, or motor movement was
+  performed for this diagnostic-only change.
+
+### 2026-08-20 — injection charge-pump precharge
+
+- Post-abort DRV evidence decoded as `FSR1=0x0400` (global FAULT) and
+  `FSR2=0x0040` (CPUV). The injection path previously disabled PA11 after
+  `drv-wake`, then re-enabled it only on the first PWM tick. That allowed a
+  switching edge before the DRV8323 charge pump had settled.
+- Injection now enters a 10 ms precharge state after command acceptance: PA11
+  is high while PWM primary output is disabled and all three switching inputs
+  are all-low. It enables PWM only after nFAULT, PA11 and all latched safety
+  checks pass. The requested pulse duration and 0.5% minimum duty are
+  unchanged; stop/unknown traffic still aborts precharge.
+- Published unflashed candidate
+  `artifacts/athena_inject_drv_precharge_20260820/motorcontrol.bin`:
+  33,780 bytes, SHA-256
+  `5eb1af4e31da09efbe400b519c33e63676f11349f4d65d11fe02fd05eb2c586a`.
+  No controller Flash write, boot, CAN command, or motor movement was
+  performed for this timing correction.
+
+### 2026-08-20 — strict idle output-off state
+
+- Tightened the post-wake and post-injection idle invariant to PA11 low and
+  TIMER0 primary output disabled (`POEN=0`), with all three compare registers
+  at their all-low value. The former `POEN=1` idle condition was electrically
+  benign with PA11 low but did not meet the stricter bench precondition.
+- The nFAULT ISR already latches `SAFETY_FAULT_GATE_DRIVER` only when PA11 is
+  high, while preserving the controlled wake-window diagnostic read. Injection
+  still enables POEN only after its 10 ms PA11-high charge-pump precharge and
+  safety recheck; any completion, stop, or fault returns to strict idle.
+- Published unflashed candidate
+  `artifacts/athena_inject_strict_idle_20260820/motorcontrol.bin`: 33,588
+  bytes, SHA-256
+  `ca40e8d1e9c0f286e19b26644288d9159561c953fc9f32dfe67565c47602e68d`.
+  No controller Flash write, boot, CAN command, or motor movement was
+  performed for this safety-state correction.
+
+### 2026-08-20 — POEN-only staged injection diagnostic
+
+- Added a bounded intermediate `POEN_TEST` state after the existing 10 ms
+  PA11-high charge-pump precharge. TIMER0 primary output is enabled while all
+  three compare values remain all-low for 10 ms; DRV FSR1/FSR2 are captured on
+  pages 54/55 before the real PWM vector is allowed.
+- A nonzero POEN-stage FSR or any safety fault aborts before phase PWM. The
+  existing nFAULT shutdown and post-abort pages 52/53 remain unchanged.
+- Published unflashed candidate
+  `artifacts/athena_inject_poen_stage_20260820/motorcontrol.bin`: 33,788
+  bytes, SHA-256
+  `dad1a6343156c6528829990daf4c0d56d6b03186527b97d8a45ae0588564c639`.
+
+### 2026-08-20 — normal application audit candidate
+
+- Audited the `SAFE_BRINGUP=0 BRINGUP_INJECT=0` path. Startup now returns to
+  PA11 low with TIMER0 primary output disabled; MOTOR/CALIBRATION entry checks
+  latched safety faults, DRV fault, nFAULT, encoder validity and ADC validity.
+- Gate enable raises PA11, waits for nFAULT, clears DRV coast, then enables the
+  TIMER0 primary output. CAN timeout now disables the driver and returns to
+  MENU_MODE, requiring a fresh explicit motor command.
+- Added the pure host-tested `motor_gate_check()` policy and a normal-image
+  symbol audit; no BRINGUP_INJECT source or symbols are linked in the normal
+  image.
+- Published unflashed candidate
+  `artifacts/athena_normal_app_audit_20260820/motorcontrol.bin`: 48,940 bytes,
+  SHA-256 `e94eefe1c7052b20e2bb53796199c3f729cd8c93645b1794784bfd05d1812b4b`.
+- `make host-test host-app-test host-tools-test`, normal symbol audit, and
+  flash-tool self-test passed. No controller Flash write, boot, CAN motor
+  command, or motor movement was performed.
+
+### 2026-08-20 — normal application LED heartbeat correction
+
+- Bench boot of the first normal candidate showed no LED blinking. Static
+  audit found `status = ~status`, which changed the `FlagStatus` value to
+  `0xFFFFFFFF` after the first loop and prevented further toggling.
+- Replaced it with an explicit `RESET`/`SET` toggle and rebuilt the candidate.
+- Updated normal application BIN SHA-256 to
+  `4d8e4d2a50a0f3310f552e9cd0dced61632a443d775073e45adad134c97c3ef5`.
+  The previous normal image must not be used for the next boot test.
+
+### 2026-08-20 — SysTick heartbeat during normal startup
+
+- The normal candidate's main-loop LED fix was present, but its heartbeat only
+  ran after DRV/encoder startup. Added a 500 ms PC13 toggle in `SysTick` so the
+  LED also proves that the CPU is executing during peripheral initialization.
+- Published replacement candidate SHA-256
+  `820df55b32701b3efd09ed41690b45f4443fa29728a9050a69ebeca5d3136598`.
+  The earlier `4d8e...` image must not be used for the next test.
+
+### 2026-08-20 — normal CAN receive filter correction
+
+- The normal application still used the legacy GD32-incompatible hardware CAN
+  mask (`CAN_ID << 5`) that had already been removed from BRINGUP_INJECT.
+- Normal CAN now accepts frames in the hardware filter and applies exact
+  standard/data/DLC8/`CAN_ID` validation in the RX ISR, matching the proven
+  diagnostic receive path.
+- Published replacement candidate SHA-256
+  `4fdd467d97996fb570715bb4304785c4baf85c7295531aaefb66a564a75c8830`.
+  The previous `820df...` image must not be used for CAN testing.
+
+### 2026-08-20 — normal DRV configuration/readback gate migration
+
+- The bring-up wake path had already demonstrated that successful SPI writes
+  alone were insufficient: every transfer must complete, FSR1/FSR2 must be
+  clear, nFAULT must be high, and DCR/CSACR/OCPCR must read back as configured.
+- The normal `drv_init_config()` path now performs that same pipelined DRV8323
+  readback before returning to strict idle. Any timeout, fault, low nFAULT, or
+  mismatched register latches `SAFETY_FAULT_GATE_DRIVER` and keeps MOTOR_MODE
+  unavailable. Injection-only pages/state machines remain excluded.
+- Updated normal candidate:
+  `artifacts/athena_normal_app_audit_20260820/motorcontrol.bin`, 49,252 bytes,
+  SHA-256 `2d986c368d40564890179d81f543edbe361ec3c38c473c727904a332eb873137`.
+  Offline host tests, normal symbol audit, and flash-tool self-test passed.
+  No controller Flash write, boot, CAN motor command, or motor movement was
+  performed for this build.
+
+### 2026-08-20 — normal configuration format and CAN-ID fallback correction
+
+- Bench evidence showed the normal image received no matching `0x001` frame.
+  The preserved page at `0x0803C000` began with factory instruction/string
+  words, including `CAN_ID=0x000D0A6C`; the old loader rejected only `-1` and
+  therefore treated those words as application settings.
+- Added an application-owned configuration format with `ATHN` magic, version,
+  payload length, CRC32, and range validation across CAN and motor parameters.
+  Invalid/legacy pages now select explicit RAM defaults (`CAN_ID=1`,
+  `CAN_MASTER=0`, timeout 1000) without modifying Flash.
+- Configuration saving validates before erase and writes the commit magic
+  last. Invalid or interrupted saves cannot replace the last valid page.
+- Updated unflashed normal candidate is 51,220 bytes, SHA-256
+  `3f7c245cb1b22f9ee37ccd637a4afb20557f1ce7e1ed3992202d7d660b74cbd1`.
+  Normal/safe/inject builds, configuration host tests, normal symbol audit,
+  and flash-tool self-test passed. No controller Flash write or CAN command
+  was performed for this correction.
+
+### 2026-08-21 — normal motor-entry sequencing correction
+
+- Re-auditing the normal application found an ISR deadlock regression:
+  `drv_enable_gd()` waited on SysTick while called from the 30 kHz TIMER0 ISR.
+  It also wrote OCPCR `0x0455` while its readback gate required the bench-proven
+  `0x0415`, so the normal startup gate could never pass.
+- Motor entry is now a non-blocking 10 ms charge-pump precharge with PA11 high,
+  POEN disabled and no commutation. After the interval it reapplies the full
+  runtime DRV configuration, verifies SPI completion/register readback/nFAULT,
+  and only then enables POEN.
+- The runtime CSA configuration disables calibration and enables sense OCP.
+  Disable/timeout paths lower POEN and PA11 immediately and no longer attempt
+  SPI access after EN_GATE is low.
+- Configuration format v2 now uses the two reserved 2 KiB pages as sequenced
+  A/B slots. New settings are written and readback-verified in the inactive
+  slot while the previous valid slot remains intact, satisfying the retained
+  configuration requirement under reset or power loss.
+- A replacement normal artifact must be built and hash-locked before flashing;
+  the prior `3f7c245c...` image is obsolete.
+- Two isolated normal builds were byte-identical. Published unflashed artifact:
+  `artifacts/athena_normal_app_audit_20260821/motorcontrol.bin`, 52,372 bytes,
+  SHA-256 `538da9dc8aac7c4e144de6d6b8f126fbc8f7fee348ef1976ed6b9a6e72330afa`;
+  image end `0x0800CC94`, below configuration base `0x0803C000`.
+
+### 2026-08-21 — normal LED heartbeat ownership correction
+
+- The normal application drove PC13 from SysTick, its one-second main loop,
+  and the 30 kHz TIMER0 ISR. Those writers race, so the visible heartbeat was
+  not a reliable startup indication despite the known PC13 board mapping.
+- PC13 is now initialized low and is owned solely by the 1 kHz SysTick path,
+  which alternates the output every 500 ms. The symmetric toggle remains
+  visible for either board LED polarity and does not affect CAN, DRV enable,
+  PWM, or motor state.
+- Published unflashed normal artifact:
+  `artifacts/athena_normal_led_heartbeat_20260821/motorcontrol.bin`, 52,292
+  bytes, SHA-256
+  `5687609beeabd8fea8a4bf4566fd9847589ee0f7e92fd562d9d314ab9388167c`.
+  Host tests, normal symbol audit, and flash-tool self-test passed. No
+  controller Flash write, boot, CAN motor command, or motor movement was
+  performed for this correction.

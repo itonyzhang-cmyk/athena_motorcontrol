@@ -17,7 +17,8 @@ uint8_t diag_crc8_atm(const uint8_t *data, uint32_t length)
 int diag_protocol_parse(const uint8_t data[8], DiagRequest *request)
 {
     if (data[0] != 0xA5U || data[1] != 0x5AU ||
-        data[2] != DIAG_PROTOCOL_MAJOR || data[6] != 0U) {
+        data[2] != DIAG_PROTOCOL_MAJOR ||
+        (data[6] != 0U && data[3] != DIAG_OPCODE_CONTROL)) {
         return -1;
     }
     if (diag_crc8_atm(data, 7U) != data[7]) {
@@ -27,6 +28,7 @@ int diag_protocol_parse(const uint8_t data[8], DiagRequest *request)
     request->opcode = data[3];
     request->sequence = data[4];
     request->page = data[5];
+    request->argument = data[6];
     return 0;
 }
 

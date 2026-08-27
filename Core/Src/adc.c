@@ -520,12 +520,17 @@ void MX_ADC2_Init(void)
   adc_channel_length_config(ADC2, ADC_REGULAR_CHANNEL, 1U);
   adc_channel_length_config(ADC2, ADC_INSERTED_CHANNEL, 1U);
 
-  adc_regular_channel_config(ADC2, 0U, ADC_CHANNEL_13, ADC_SAMPLETIME_1POINT5);
+  /* PC3 is the VBUS resistor-divider input (about 15:1), unlike the
+   * low-impedance DRV8323 CSA outputs on ADC0/ADC1.  At the 30 MHz ADC clock
+   * used on this target, 1.5 cycles is only 50 ns and does not allow its
+   * sample-and-hold capacitor to settle.  Keep the phase-current aperture
+   * short for PWM timing, but give VBUS 55.5 cycles (1.85 us). */
+  adc_regular_channel_config(ADC2, 0U, ADC_CHANNEL_13, ADC_SAMPLETIME_55POINT5);
 
   adc_external_trigger_source_config(ADC2, ADC_REGULAR_CHANNEL, ADC0_1_2_EXTTRIG_REGULAR_NONE);
   adc_external_trigger_config(ADC2, ADC_REGULAR_CHANNEL, ENABLE);
 
-  adc_inserted_channel_config(ADC2, 0U, ADC_CHANNEL_13, ADC_SAMPLETIME_1POINT5);
+  adc_inserted_channel_config(ADC2, 0U, ADC_CHANNEL_13, ADC_SAMPLETIME_55POINT5);
 
   adc_external_trigger_source_config(ADC2, ADC_INSERTED_CHANNEL, ADC0_1_2_EXTTRIG_INSERTED_NONE);
   adc_external_trigger_config(ADC2, ADC_INSERTED_CHANNEL, ENABLE);

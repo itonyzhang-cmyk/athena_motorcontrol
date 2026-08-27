@@ -30,11 +30,30 @@ typedef struct{
 	int ezero;
 	uint8_t phase_order;							// phase order correct (0) or swapped (1)
 	uint8_t done_ordering, done_cal, done_rl;		// flags for different cals finished
+	uint8_t failed;									// invalid motion/encoder result
+	uint32_t gate_wait_start;									// loop count when DRV enable wait began
 	uint16_t sample_count;							// keep track of how many samples taken
 	float next_sample_time;							// time to take next sample
 	int error_arr[N_CAL];
 	int lut_arr[N_LUT];
 	EncoderStruct cal_position;						// Position reference used for calibration
+	/* Snapshot of last known-good runtime calibration.  Restored on abort. */
+	float saved_ppairs;
+	uint8_t saved_phase_order;
+	int saved_ezero;
+	int saved_lut[N_LUT];
+	/* Last calibration-cycle evidence, captured before outputs are reset. */
+	float evidence_theta_end;
+	float evidence_theta_ref;
+	float evidence_angle_delta;
+	float evidence_i_d_des;
+	float evidence_i_d;
+	float evidence_i_q;
+	float evidence_v_d;
+	float evidence_v_q;
+	float evidence_dtc_u;
+	float evidence_dtc_v;
+	float evidence_dtc_w;
 
 } CalStruct;
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """Small authenticated LAN panel for the reviewed Athena bench workflow.
 
 Only named workflow actions below can execute. There is deliberately no shell
@@ -31,9 +32,20 @@ from athena_mit_codec import decode_feedback, encode_command, format_slcan
 
 REPO = Path(__file__).resolve().parent.parent
 WORKSPACE = REPO.parent
-TOOLCHAIN = Path("/tmp/arm-gnu-toolchain-15.2-root-new/bin")
-NORMAL_SHA = "229ddb217655131f9a3ab577932e5061e30d18fef41325805d1b68a4c43bf55c"
-NORMAL_BIN = REPO / "artifacts/athena_normal_watchdog_audit_20260823/motorcontrol.bin"
+# Keep the compiler outside /tmp so a cleanup cannot silently remove the
+# runtime used by the WebUI build action.  The legacy temporary path remains a
+# fallback for existing bench setups.
+_TOOLCHAIN_CANDIDATES = (
+    Path(os.environ.get(
+        "ATHENA_TOOLCHAIN",
+        str(Path.home() / ".cache/arm-gnu-toolchain-15.2.rel1-20260825/bin"))),
+    Path("/Users/choqy/toolchains/arm-gnu-toolchain-15.2/bin"),
+    Path("/Users/choqy/toolchains/arm-gnu-toolchain-15.2/bin"),
+)
+TOOLCHAIN = next((path for path in _TOOLCHAIN_CANDIDATES
+                  if (path / "arm-none-eabi-gcc").is_file()),
+                 _TOOLCHAIN_CANDIDATES[0])
+NORMAL_CONFIG = REPO / "athena_bench_webui.json"
 BRIDGE = WORKSPACE / "tools/uc12_slcan_bridge/uc12_slcan_bridge"
 DIAG = REPO / "tools/athena_diag_uc12/athena_diag_uc12"
 FLASH = REPO / "tools/athena_safe_flash.sh"
@@ -47,6 +59,21 @@ MIT_DEFAULT_DURATION_S = 10.0
 MIT_MAX_DURATION_S = 300.0
 FEEDBACK_RE = re.compile(r"TRACE CAN RX t000#([0-9A-Fa-f]{12})")
 TX_RE = re.compile(r"TRACE CAN TX t001#([0-9A-Fa-f]{16})")
+
+
+def normal_firmware_config() -> tuple[str, Path]:
+    """Read the selected normal image on each request so config changes are live."""
+    try:
+        data = json.loads(NORMAL_CONFIG.read_text(encoding="utf-8"))
+        sha = str(data["normal_sha"]).strip().lower()
+        image = (REPO / str(data["normal_image"])).resolve()
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError(f"正常固件配置无效: {exc}") from exc
+    if not re.fullmatch(r"[0-9a-f]{64}", sha):
+        raise RuntimeError("正常固件配置中的 SHA-256 无效")
+    if REPO not in image.parents or not image.is_file():
+        raise RuntimeError("正常固件镜像路径无效")
+    return sha, image
 
 def _semantic_can_line(clean: str) -> str | None:
     tx = TX_RE.search(clean)
@@ -85,6 +112,15 @@ def _semantic_can_line(clean: str) -> str | None:
     return None
 
 
+def _diag_crc8(data: bytes) -> int:
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xff if crc & 0x80 else (crc << 1) & 0xff
+    return crc
+
+
 class Runner:
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -101,6 +137,7 @@ class Runner:
         self.last_feedback_position = ""
         self.last_feedback_position_rad: float | None = None
         self.feedback_generation = 0
+        self.diag_sequence = 0
 
     def log(self, text: str) -> None:
         stamp = time.strftime("%H:%M:%S")
@@ -143,6 +180,72 @@ class Runner:
     def clear_logs(self) -> None:
         with self.lock:
             self.logs.clear()
+
+    def send_diag(self, opcode: int, page: int, argument: int = 0) -> tuple[bool, str]:
+        """Submit a diagnostic CAN frame through the already-running bridge."""
+        with self.lock:
+            tty = self.bridge_tty
+            live = self.bridge is not None and self.bridge.poll() is None
+            sequence = self.diag_sequence & 0xff
+            self.diag_sequence = (self.diag_sequence + 1) & 0xff
+        if not live or not tty:
+            return False, "请先启动 CAN0 Trace；诊断请求必须复用桥接连接"
+        if not 0 <= page <= 255 or not 0 <= argument <= 255:
+            return False, "诊断 page/argument 超出范围"
+        frame = bytearray((0xA5, 0x5A, 1, opcode & 0xff, sequence, page, argument, 0))
+        frame[7] = _diag_crc8(frame[:7])
+        slcan = "t7018" + frame.hex().upper() + "\r"
+        try:
+            with self._open_serial(tty) as serial_port:
+                serial_port.write(slcan)
+        except (OSError, TimeoutError) as exc:
+            return False, f"诊断帧发送失败: {exc}"
+        self.log(f"桥接诊断请求: opcode=0x{opcode:02X} page={page} argument={argument}")
+        return True, "诊断请求已交给 CAN0 桥接"
+
+    def send_debug_log(self, index: int) -> tuple[bool, str]:
+        if not 0 <= index <= 31:
+            return False, "日志索引必须是 0..31"
+        for page in (10, 11, 12):
+            ok, message = self.send_diag(0x07, page, index)
+            if not ok:
+                return False, message
+            time.sleep(0.025)
+        return True, f"已通过桥接请求 RAM 调试日志 #{index} 的时间戳、事件和 payload"
+
+    def send_diag_action(self, name: str) -> tuple[bool, str]:
+        if name == "ping":
+            requests = [(0x00, 0, 0)]
+        elif name == "snapshot":
+            requests = [(0x02, page, 0) for page in
+                        (0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)]
+            requests += [(0x03, page, 0) for page in (9, 10, 11, 12, 13)]
+        elif name == "drv-status":
+            requests = [(0x02, page, 0) for page in
+                        (2, 3, 24, 25, 26, 27, 28, 29, 30, 56, 57, 58, 59, 60,
+                         61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73,
+                         74, 75, 76, 77, 78, 79, 80, 81)]
+        elif name == "drv-fault-snapshot":
+            requests = [(0x02, page, 0) for page in (2, 3, 123, 124, 125, 126, 127, 128, 129,
+                                                       130, 131, 132, 133, 134, 135, 136)]
+        elif name == "debug-on":
+            requests = [(0x07, 7, 0)]
+        elif name == "debug-off":
+            requests = [(0x07, 8, 0)]
+        elif name == "debug-status":
+            requests = [(0x02, 99, 0)]
+        else:
+            return False, f"未知诊断动作: {name}"
+        for opcode, page, argument in requests:
+            ok, message = self.send_diag(opcode, page, argument)
+            if not ok:
+                return False, message
+            # Firmware deliberately accepts at most one diagnostic request per
+            # 20 ms.  A shorter interval deterministically drops alternate
+            # pages, including the enable readback evidence required to decide
+            # whether a motion failure is PWM, gate-driver or FOC related.
+            time.sleep(0.025)
+        return True, f"已通过 CAN0 桥接发送诊断动作: {name}（{len(requests)} 个请求）"
 
     def stop_mit(self) -> tuple[bool, str]:
         with self.lock:
@@ -235,6 +338,9 @@ class Runner:
             )
             thread = threading.Thread(target=self._read_bridge, daemon=True)
             thread.start()
+        # Runtime diagnostics share the UC12 CAN queue with MIT traffic. They
+        # remain available through send_diag_action(), but must be requested
+        # explicitly instead of continuously competing with motion control.
         self.log("$ " + shlex.join([str(BRIDGE), "--channel", "0", "--unsafe-tx", "--trace"]))
         return True, "CAN0 trace 桥接已启动，等待伪串口路径"
 
@@ -718,6 +824,12 @@ class Runner:
                     serial_port.write(frame)
                     self.mit_session_frames += 1
                     time.sleep(MIT_KEEPALIVE_INTERVAL_S)
+                # End every bounded session explicitly.  Letting the stream
+                # go silent makes the firmware watchdog perform the normal
+                # stop, but leaves the next enable racing a stale DRV/encoder
+                # fault.  0xFD follows the firmware's clean ESC path.
+                serial_port.write(STOP_FRAME)
+                self.log("自定义 MIT 会话已发送停止帧（0xFD）")
         except OSError as exc:
             return False, f"无法写入桥接伪串口 {tty}: {exc}"
         finally:
@@ -742,8 +854,8 @@ class Runner:
             "enable_active": enable_active,
             "mit_session_frames": self.mit_session_frames,
             "last_feedback_position_rad": self.last_feedback_position_rad,
-            "normal_sha": NORMAL_SHA,
-            "normal_image": str(NORMAL_BIN),
+            "normal_sha": normal_firmware_config()[0],
+            "normal_image": str(normal_firmware_config()[1]),
             "logs": list(self.logs),
         }
 
@@ -767,20 +879,25 @@ def local_addresses() -> list[str]:
 def actions() -> dict[str, tuple[str, list[str], bool]]:
     build = [
         "make", "SAFE_BRINGUP=0", "BRINGUP_INJECT=0",
-        "BUILD_DIR=/tmp/athena-normal-webui", f"GCC_PATH={TOOLCHAIN}", "-j4",
+        f"BUILD_DIR={REPO / 'build/webui-normal'}", f"GCC_PATH={TOOLCHAIN}", "-j4",
     ]
+    normal_sha, _ = normal_firmware_config()
     return {
         "offline-tests": ("离线主机测试", ["make", "host-test", "host-app-test", "host-tools-test"], False),
         "build-normal": ("重新构建正常固件", build, False),
         "flash-normal": (
             "刷入正常固件",
-            [str(FLASH), "flash-normal", "--confirm-normal-sha", NORMAL_SHA,
+            [str(FLASH), "flash-normal", "--confirm-normal-sha", normal_sha,
              "--i-understand-this-writes-main-flash"], True,
         ),
         "boot-normal": ("启动正常固件", [str(FLASH), "boot-normal"], True),
-        "diag-ping": ("正常固件兼容 PING", [str(DIAG), "ping"], False),
-        "diag-snapshot": ("诊断 Snapshot", [str(DIAG), "snapshot"], False),
-        "diag-drv-status": ("正常固件 DRV 状态", [str(DIAG), "drv-status"], False),
+        "diag-ping": ("正常固件兼容 PING", ["__bridge_diag__", "ping"], False),
+        "diag-snapshot": ("诊断 Snapshot", ["__bridge_diag__", "snapshot"], False),
+        "diag-drv-status": ("正常固件 DRV 状态", ["__bridge_diag__", "drv-status"], False),
+        "diag-drv-fault-snapshot": ("读取 DRV 故障瞬间快照", ["__bridge_diag__", "drv-fault-snapshot"], False),
+        "diag-debug-on": ("开启 RAM 调试日志", ["__bridge_diag__", "debug-on"], False),
+        "diag-debug-off": ("关闭 RAM 调试日志", ["__bridge_diag__", "debug-off"], False),
+        "diag-debug-status": ("读取 RAM 调试日志状态", ["__bridge_diag__", "debug-status"], False),
     }
 
 
@@ -863,14 +980,31 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "unknown action"})
                 return
             label, command, requires_confirmation = entry
+            if command and command[0] == "__bridge_diag__":
+                ok, message = RUNNER.send_diag_action(command[1])
+                self._json(HTTPStatus.OK if ok else HTTPStatus.CONFLICT,
+                           {"ok": ok, "message": message})
+                return
             if requires_confirmation:
                 if not body.get("physical_ready"):
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "请确认台架、限流和断电路径已就绪"})
                     return
-                if action == "flash-normal" and body.get("sha") != NORMAL_SHA:
+                if action == "flash-normal" and body.get("sha", "").lower() != normal_firmware_config()[0]:
                     self._json(HTTPStatus.BAD_REQUEST, {"error": "SHA-256 未匹配当前镜像"})
                     return
             ok, message = RUNNER.start_action(label, command)
+            self._json(HTTPStatus.OK if ok else HTTPStatus.CONFLICT, {"ok": ok, "message": message})
+            return
+        if parsed.path == "/api/debug/log":
+            try:
+                index = int(body.get("index", -1))
+            except (TypeError, ValueError):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "日志索引必须是 0..31 的整数"})
+                return
+            if not 0 <= index <= 31:
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "日志索引必须是 0..31"})
+                return
+            ok, message = RUNNER.send_debug_log(index)
             self._json(HTTPStatus.OK if ok else HTTPStatus.CONFLICT, {"ok": ok, "message": message})
             return
         if parsed.path == "/api/bridge/start":
@@ -953,15 +1087,15 @@ PAGE = r'''<!doctype html>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#111827;color:#e5e7eb}body{margin:0}.wrap{max-width:1180px;margin:auto;padding:14px 18px}header{display:flex;gap:20px;justify-content:space-between;align-items:end;border-bottom:1px solid #374151;padding-bottom:12px}h1{font-size:22px;margin:0}h2{font-size:15px;margin:0 0 8px}.muted{color:#9ca3af;font-size:12px}.summary{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0;color:#cbd5e1;font-size:12px}.summary code{background:#0b1220;border:1px solid #374151;border-radius:4px;padding:4px 6px;color:#93c5fd}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px;margin:10px 0}.panel{border:1px solid #374151;border-radius:6px;padding:11px;background:#172033}.panel p{font-size:12px;line-height:1.35;color:#cbd5e1;margin:6px 0}.command{background:#0b1220;padding:7px;border-radius:4px;font:11px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}button{border:1px solid #64748b;border-radius:4px;background:#1e3a5f;color:white;padding:7px 9px;font-size:13px;cursor:pointer}button.danger{background:#7f1d1d;border-color:#ef4444}button.secondary{background:#263449}button:disabled{opacity:.5;cursor:not-allowed}input{width:100%;box-sizing:border-box;background:#0b1220;border:1px solid #475569;color:#e5e7eb;border-radius:4px;padding:7px;margin:5px 0}.check{display:flex;gap:8px;align-items:start;font-size:12px;margin:7px 0}.check input{width:auto;margin:2px 0}#notice{min-height:18px;color:#fcd34d;font-size:13px}.log-head{display:flex;justify-content:space-between;align-items:start;gap:12px}.log-head h2{margin-top:8px}pre{height:330px;overflow:auto;margin:0;background:#050a14;border:1px solid #374151;border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-word;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.state{color:#93c5fd;font-size:12px}@media(max-width:550px){header{display:block}.wrap{padding:12px}pre{height:280px}}
 </style><body><main class="wrap"><header><div><h1>Athena 电机控制台架</h1><div class="muted">固定动作面板。无任意 Shell/CAN 命令入口。</div></div><div id="state" class="state">等待连接</div></header>
 <p id="notice"></p><div class="summary"><span>当前正常固件 SHA-256</span><code id="shaTop">加载中…</code><span>最近反馈位置</span><code id="positionRad">暂无</code><span>推荐顺序：刷写 → 启动 → PING → Snapshot → DRV 状态 → CAN Trace</span></div><section class="grid">
-<article class="panel"><h2>离线验证</h2><p>构建前或代码修改后执行。不会访问控制板。</p><div class="command">make host-test host-app-test host-tools-test</div><p><button data-action="offline-tests">执行离线主机测试</button></p><div class="command">make SAFE_BRINGUP=0 BRINGUP_INJECT=0 BUILD_DIR=/tmp/athena-normal-webui GCC_PATH=/tmp/arm-gnu-toolchain-15.2-root-new/bin -j4</div><p><button data-action="build-normal">重新构建正常固件</button></p></article>
+<article class="panel"><h2>离线验证</h2><p>构建前或代码修改后执行。不会访问控制板。</p><div class="command">make host-test host-app-test host-tools-test</div><p><button data-action="offline-tests">执行离线主机测试</button></p><div class="command">make SAFE_BRINGUP=0 BRINGUP_INJECT=0 BUILD_DIR=build/webui-normal GCC_PATH=&lt;持久化 Arm GNU Toolchain&gt; -j4</div><p><button data-action="build-normal">重新构建正常固件</button></p></article>
 <article class="panel"><h2>刷写与启动</h2><p>刷写使用逐页擦写、写入、读回校验，并保留 CPU halted。启动前不发送任何运动命令。</p><div class="command">tools/athena_safe_flash.sh flash-normal --confirm-normal-sha <span id="sha"></span> --i-understand-this-writes-main-flash</div><input id="shaInput" aria-label="SHA-256" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="可手动粘贴完整 SHA-256"><p><button class="secondary" id="fillSha" type="button">填入当前 SHA</button></p><label class="check"><input id="physical" type="checkbox">我已确认控制板、ST-LINK、限流电源、机械固定和可断电路径均已就绪。</label><button class="danger" id="flash">刷入正常固件</button><hr><div class="command">tools/athena_safe_flash.sh boot-normal</div><label class="check"><input id="bootReady" type="checkbox">我已确认物理台架可安全启动。</label><button id="boot">启动正常固件</button></article>
-<article class="panel"><h2>正常固件只读验证</h2><p>PING、Snapshot 和 DRV 状态均为只读，不会启用电机。</p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 ping</div><p><button data-action="diag-ping">执行 PING</button></p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 snapshot</div><p><button data-action="diag-snapshot">执行 Snapshot</button></p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 drv-status</div><p><button data-action="diag-drv-status">读取 DRV 状态</button></p></article>
+<article class="panel"><h2>正常固件只读验证</h2><p>PING、Snapshot 和 DRV 状态均为只读，不会启用电机。</p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 ping</div><p><button data-action="diag-ping">执行 PING</button></p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 snapshot</div><p><button data-action="diag-snapshot">执行 Snapshot</button></p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 drv-status</div><p><button data-action="diag-drv-status">读取 DRV 状态</button> <button class="secondary" data-action="diag-drv-fault-snapshot">读取故障瞬间快照</button></p><hr><h2>RAM 调试日志</h2><p>默认关闭；开启后只记录运行期关键事件，重启会清空。读取前请停止 CAN0 Trace。</p><p><button data-action="diag-debug-on">开启记录</button> <button class="secondary" data-action="diag-debug-status">读取状态</button> <button class="secondary" data-action="diag-debug-off">关闭记录</button></p><div style="display:flex;gap:6px;align-items:center"><input id="debugLogIndex" type="number" min="0" max="31" step="1" value="0" aria-label="RAM 调试日志索引"><button id="debugLogRead" class="secondary">读取该条日志</button></div></article>
 <article class="panel"><h2>CAN0 收发与受限使能</h2><p>桥接独占 UC12。先用非使能帧确认收到控制板回复，再在电机固定、限流和断电路径确认后发送一次 0xFC。</p><div class="command">./uc12_slcan_bridge --channel 0 --unsafe-tx --trace</div><p><button id="bridgeStart">启动 CAN0 Trace</button> <button class="secondary" id="bridgeStop">停止</button></p><div class="command">printf 't00187FFF7FF0000007FF\\r' &gt; &lt;bridge-pty&gt; (固定执行 3 次，间隔 200 ms)</div><p><button id="mitCheck">发送三次 MIT 非使能验证</button></p><div class="command">printf 't0018FFFFFFFFFFFFFFFC\\r' &gt; &lt;bridge-pty&gt; (仅发送一次)</div><label class="check"><input id="enableReady" type="checkbox">我已确认电机已固定、限流已设置，并能立即断电。</label><p><button class="danger" id="enableOnce">单次受限使能</button> <button id="holdZero">1 秒零输出保持</button> <button id="holdTinyKp">1 秒极小 Kp 闭环</button> <button id="feedforwardMin">1 秒约 0.02 Nm</button> <button id="feedforwardLow">1 秒约 0.2 Nm</button> <button id="feedforwardMedium">1 秒约 0.5 Nm</button> <button id="feedforwardHigh">1 秒约 1.0 Nm</button> <button id="positionStep">1 秒 1° 位置阶跃</button> <button id="positionStepStiff">1 秒 1° 阶跃(Kp≈20)</button></p><p class="muted">力矩测试持续 1 秒自动停止。位置阶跃会尝试小幅运动，必须确认运动空间已释放、限流 0.2 A 且可立即断电。</p></article>
 </section><p class="panel"><label>Kp（位置阶跃，0-100）：<input id="customKp" type="number" min="0" max="100" step="1" value="20"></label> <button id="positionStepCustom">执行输入 Kp 的 1° 阶跃</button></p><div class="log-head"><h2>实时日志</h2><button class="secondary" id="clearLogs">清除当前内容</button></div><pre id="log">等待认证…</pre></main><script>
 const params=new URLSearchParams(location.search), fromUrl=params.get('token'); let token=fromUrl||localStorage.getItem('athenaBenchToken')||'';if(fromUrl)localStorage.setItem('athenaBenchToken',fromUrl);if(!token){token=prompt('输入服务启动时显示的访问令牌：')||'';localStorage.setItem('athenaBenchToken',token)}
 const note=t=>document.querySelector('#notice').textContent=t;const api=async(path,body)=>{let r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Bench-Token':token},body:JSON.stringify(body||{})});let j=await r.json();if(!r.ok)throw Error(j.error||j.message||r.status);return j};
 async function action(name,extra={}){try{let j=await api('/api/action',{action:name,...extra});note(j.message)}catch(e){note('失败: '+e.message)}}
-document.querySelector('#positionStepCustom').onclick=()=>api('/api/bridge/position-step-custom',{physical_ready:document.querySelector('#enableReady').checked,kp:document.querySelector('#customKp').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
+document.querySelector('#positionStepCustom').onclick=()=>api('/api/bridge/position-step-custom',{physical_ready:document.querySelector('#enableReady').checked,kp:document.querySelector('#customKp').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#debugLogRead').onclick=()=>api('/api/debug/log',{index:document.querySelector('#debugLogIndex').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
 document.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>action(b.dataset.action));document.querySelector('#fillSha').onclick=()=>{document.querySelector('#shaInput').value=document.querySelector('#sha').textContent;note('已填入当前镜像 SHA-256')};document.querySelector('#flash').onclick=()=>action('flash-normal',{physical_ready:document.querySelector('#physical').checked,sha:document.querySelector('#shaInput').value.trim()});document.querySelector('#boot').onclick=()=>action('boot-normal',{physical_ready:document.querySelector('#bootReady').checked});document.querySelector('#bridgeStart').onclick=()=>api('/api/bridge/start').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#bridgeStop').onclick=()=>api('/api/bridge/stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#mitCheck').onclick=()=>api('/api/bridge/mit-check').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#enableOnce').onclick=()=>api('/api/bridge/enable-once',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#holdZero').onclick=()=>api('/api/bridge/hold-zero',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#holdTinyKp').onclick=()=>api('/api/bridge/hold-tiny-kp',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#feedforwardMin').onclick=()=>api('/api/bridge/feedforward-min',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#feedforwardLow').onclick=()=>api('/api/bridge/feedforward-low',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#feedforwardMedium').onclick=()=>api('/api/bridge/feedforward-medium',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#feedforwardHigh').onclick=()=>api('/api/bridge/feedforward-high',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#positionStep').onclick=()=>api('/api/bridge/position-step',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#positionStepStiff').onclick=()=>api('/api/bridge/position-step-stiff',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#clearLogs').onclick=()=>api('/api/logs/clear').then(x=>{document.querySelector('#log').textContent='';note(x.message)}).catch(e=>note('失败: '+e.message));
 async function refresh(){try{let r=await fetch('/api/status',{headers:{'X-Bench-Token':token}});if(!r.ok)throw Error('令牌无效');let s=await r.json();document.querySelector('#sha').textContent=s.normal_sha;document.querySelector('#shaTop').textContent=s.normal_sha;document.querySelector('#positionRad').textContent=s.last_feedback_position_rad===null?'暂无':Number(s.last_feedback_position_rad).toFixed(5)+' rad';let busy=s.mit_active||s.enable_active;document.querySelector('#state').textContent=s.active?'正在执行: '+s.active.name:(busy?'CAN 动作运行中':(s.bridge_running?'CAN0 Trace 运行中 '+s.bridge_tty:'空闲'));['mitCheck','enableOnce','holdZero','holdTinyKp','feedforwardMin','feedforwardLow','feedforwardMedium','feedforwardHigh','positionStep','positionStepStiff','positionStepCustom','mitCustom'].forEach(id=>{let e=document.querySelector('#'+id);if(e)e.disabled=busy});let log=document.querySelector('#log'),nearEnd=log.scrollHeight-log.scrollTop-log.clientHeight<40;log.textContent=s.logs.join('\n');if(nearEnd)log.scrollTop=log.scrollHeight}catch(e){note('无法读取状态: '+e.message)}}refresh();setInterval(refresh,1200);
 </script></body></html>'''
@@ -1033,6 +1167,28 @@ PAGE = PAGE.replace(
 ).replace(
     "document.querySelector('#shaTop').textContent=s.normal_sha;",
     "document.querySelector('#shaTop').textContent=s.normal_sha;document.querySelector('#positionRad').textContent=s.last_feedback_position_rad===null?'暂无':Number(s.last_feedback_position_rad).toFixed(5)+' rad';",
+)
+
+# The fixed Kp position-step control is intentionally no longer exposed in the UI.
+# Keep its backend endpoint for compatibility with older scripts, but remove its
+# panel and click binding from the rendered page.
+PAGE = re.sub(r'<p class="panel"><label>Kp（位置阶跃，0-100）：.*?</p>', '', PAGE, flags=re.S)
+PAGE = re.sub(r"document\.querySelector\('#positionStepCustom'\)\.onclick=.*?;\n", '', PAGE)
+
+# Diagnostics are sent through the bridge-owned USB session; keep the rendered
+# command hints consistent with that single-owner architecture.
+PAGE = PAGE.replace(
+    'tools/athena_diag_uc12/athena_diag_uc12 ping',
+    'CAN 诊断帧 0x701 / PING',
+).replace(
+    'tools/athena_diag_uc12/athena_diag_uc12 snapshot',
+    'CAN 诊断帧 0x701 / Snapshot',
+).replace(
+    'tools/athena_diag_uc12/athena_diag_uc12 drv-status',
+    'CAN 诊断帧 0x701 / DRV 状态',
+).replace(
+    '读取前请停止 CAN0 Trace。',
+    '诊断请求与 MIT 控制共用同一个 CAN0 桥接连接。',
 )
 
 # Keep the frequently used CAN controls above the tabs as a compact strip.

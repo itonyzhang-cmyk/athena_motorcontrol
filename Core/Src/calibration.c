@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include "usart.h"
 #include "math_ops.h"
+#include "diagnostics.h"
+#include <math.h>
 
 void order_phases(EncoderStruct *encoder, ControllerStruct *controller, CalStruct * cal, int loop_count){
 	/* Checks phase order, to ensure that positive Q current produces
@@ -46,10 +48,48 @@ void order_phases(EncoderStruct *encoder, ControllerStruct *controller, CalStruc
     	return;
     }
 
-	reset_foc(controller);
-
 	float theta_end = encoder->angle_multiturn[0];
-	cal->ppairs = round(2.0f*PI_F/fabsf(theta_end-cal->theta_start));
+	float angle_delta = fabsf(theta_end - cal->theta_start);
+	/* Capture the actual control-loop state before reset_foc() clears it. */
+	cal->evidence_theta_end = theta_end;
+	cal->evidence_theta_ref = cal->theta_ref;
+	cal->evidence_angle_delta = angle_delta;
+	cal->evidence_i_d_des = controller->i_d_des;
+	cal->evidence_i_d = controller->i_d;
+	cal->evidence_i_q = controller->i_q;
+	cal->evidence_v_d = controller->v_d;
+	cal->evidence_v_q = controller->v_q;
+	cal->evidence_dtc_u = controller->dtc_u;
+	cal->evidence_dtc_v = controller->dtc_v;
+	cal->evidence_dtc_w = controller->dtc_w;
+	reset_foc(controller);
+	int measured_ppairs;
+	/* Reject stationary/wrapped motion before assigning the uint8_t ppairs. */
+	if (!isfinite(angle_delta) || angle_delta < 0.20f || angle_delta > (TWO_PI_F * 1.5f)) {
+		reset_foc(controller);
+		cal->failed = 1U;
+		cal->done_ordering = 1U;
+		cal->done_cal = 1U;
+		cal->ppairs = 0U;
+		diagnostics_debug_record(DIAG_DEBUG_EVENT_CALIBRATION_FAIL,
+		                         (uint32_t)(int32_t)(angle_delta * 1000.0f));
+		printf("Calibration failed: invalid encoder displacement %.4f rad\r\n", angle_delta);
+		return;
+	}
+	measured_ppairs = (int)lroundf(2.0f * PI_F / angle_delta);
+	if (measured_ppairs < 1 || measured_ppairs > PPAIRS_MAX) {
+		reset_foc(controller);
+		cal->failed = 1U;
+		cal->done_ordering = 1U;
+		cal->done_cal = 1U;
+		cal->ppairs = 0U;
+		diagnostics_debug_record(DIAG_DEBUG_EVENT_CALIBRATION_FAIL,
+		                         (uint32_t)measured_ppairs);
+		printf("Calibration failed: measured pole pairs %d (delta %.4f rad)\r\n",
+		       measured_ppairs, angle_delta);
+		return;
+	}
+	cal->ppairs = (uint8_t)measured_ppairs;
 
 	if(cal->theta_start < theta_end){
 		cal->phase_order = 0;

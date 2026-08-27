@@ -83,6 +83,7 @@
       <tr><td>M6</td><td>受限闭环控制</td><td>T-090 实现并验证电流、速度、位置闭环保护、故障关闭、看门狗和 MIT CAN 命令。</td><td>T-080</td><td>限流、限速、限位、通信超时、nFAULT、异常路径均可验证关闭功率级。</td><td class="status pending">待开始</td><td>-</td><td>不能从 BRINGUP_INJECT 直接升级。</td></tr>
       <tr><td>M6</td><td>正常固件连续调试</td><td>T-091 固化显式 <code>0xFC</code> 重新使能、MIT 心跳、watchdog 关断与恢复流程。</td><td>T-090</td><td><code>0xFC</code> 后必须发送新 MIT；普通 MIT 不自动重新使能；超时关闭 PWM/DRV 并可由下一次 <code>0xFC</code> 恢复。</td><td class="status active">软件完成，待刷写验证</td><td>2026-08-23</td><td>正常固件已通过 GD32 编译、主机测试和刷写工具自检；硬件尚未刷入本候选。</td></tr>
       <tr><td>M6</td><td>WebUI 连续测试</td><td>T-092 为每个动作增加中性 MIT 反馈前置检查；CAN Trace、受限使能和持续 MIT 使用统一状态边界。</td><td>T-091</td><td>无新反馈时不发送后续动作帧；收到反馈后发送一次 <code>0xFC</code>，再发送新的 MIT；持续会话可停止。</td><td class="status active">软件完成，待硬件验证</td><td>2026-08-23</td><td><code>tools/athena_bench_webui.py</code>；当前 WebUI 服务已重启。</td></tr>
+      <tr><td>M6</td><td>运行期控制诊断</td><td>T-093 新增 ATHENA-DIAG Snapshot 页 82-94，记录 FSM、DRV/PWM 门控、软件电流限幅、期望/实测 q 轴电流、相电流、PWM 和 MIT 设定值。</td><td>T-091, T-092</td><td>MIT 会话期间可读取运行期状态，区分“命令未形成电流”“PWM 未输出”和“功率级未响应”。</td><td class="status active">软件完成，待刷写验证</td><td>2026-08-24</td><td>正常固件编译通过；物理电源限流由台架负责，固件 <code>I_MAX</code> 保持正常 40 A 设计值。</td></tr>
       <tr><td>M7</td><td>验收与集成</td><td>T-100 单电机重复验收、日志/文档、WebUI 集成与发布包。</td><td>T-090</td><td>回归测试、台架验收、版本化工件、可复现实验记录完整。</td><td class="status pending">待开始</td><td>-</td><td>最终交付门。</td></tr>
     </tbody>
   </table>
@@ -105,6 +106,7 @@
       <tr><td>2026-08-19</td><td>CHG-001</td><td>建立基线</td><td>创建本任务账本，将现有软件、刷写、硬件验证状态纳入可追溯工作分解。</td><td>全部</td></tr>
       <tr><td>2026-08-19</td><td>CHG-002</td><td>重规划</td><td>发现 <code>drv-wake</code> 在 CAN ISR 调用 <code>delay_1ms()</code>，因 ISR 优先级阻止 SysTick 而死锁。将原硬件验证路径替换为 T-032 后的候选镜像与 T-050。</td><td>T-031, T-032, T-050</td></tr>
       <tr><td>2026-08-23</td><td>CHG-003</td><td>正常闭环边界</td><td>将正常固件的恢复边界收敛为显式 <code>0xFC</code>；普通 MIT 只更新设定值和 watchdog。WebUI 动作前先发中性 MIT 并等待新反馈，避免控制板已停机时盲发动作帧。</td><td>T-091, T-092, T-100</td></tr>
+      <tr><td>2026-08-24</td><td>CHG-004</td><td>运行期证据</td><td>保留固件正常 <code>I_MAX=40 A</code> 设计，将 Snapshot 页 82-94 用于捕获 MIT 会话中的 FSM、DRV/PWM 门控、期望/实测电流、相电流和设定值，避免用会话结束后的关闭状态推断运行期行为。</td><td>T-093</td></tr>
     </tbody>
   </table>
 

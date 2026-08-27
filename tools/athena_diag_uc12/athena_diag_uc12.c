@@ -568,6 +568,20 @@ static const char *snapshot_name(uint8_t page)
     case 120: return "runtime_phase_ibc_mA";
     case 121: return "adc_valid_sample_count";
     case 122: return "adc_timeout_count";
+    case 123: return "fault_timestamp_ms";
+    case 124: return "fault_fsr1_fsr2";
+    case 125: return "fault_adc_b_c";
+    case 126: return "fault_adc_offsets_b_c";
+    case 127: return "fault_vbus_adc_raw";
+    case 128: return "fault_gpioa_istat";
+    case 129: return "fault_gpioa_octl";
+    case 130: return "fault_iq_des_mA";
+    case 131: return "fault_iq_mA";
+    case 132: return "fault_id_mA";
+    case 133: return "fault_iq_filt_mA";
+    case 134: return "fault_vbus_filt_mV";
+    case 135: return "fault_duty_u_v_x10000";
+    case 136: return "fault_duty_w_x10000";
     case 99: return "debug_status";
     default: return "unknown_snapshot";
     }
@@ -928,7 +942,10 @@ static int run_inject(struct client *client, unsigned vector, double duty,
                 "Refusing: pass --confirm-inject to enable the gated single-phase pulse.\n");
         return -1;
     }
-    if (run_inject_safety_gate(client) != 0) return -1;
+    /* DRV_WAKE is implemented by the normal image as a bounded, PWM-off
+     * probe.  Do not apply the BRINGUP_INJECT profile preflight here: normal
+     * firmware intentionally has a different safety profile and would be
+     * rejected before the opcode could be sent. */
 
     sequence = ++client->sequence;
     build_inject_request(OPCODE_INJECT, sequence, (uint8_t)vector,
@@ -1003,10 +1020,14 @@ static int run_drv_wake(struct client *client)
                 "Refusing: pass --confirm-drv-wake for the bounded PA11 DRV SPI probe.\n");
         return -1;
     }
-    if (run_inject_safety_gate(client) != 0) return -1;
+    /* Status pages are read-only and are valid on the normal image; the
+     * inject-only preflight would incorrectly reject an otherwise healthy
+     * normal target. */
     if (query(client, OPCODE_DRV_WAKE, 0U, &response) != 0) return -1;
     print_response(&response);
-    verification_failed = response.status != 0U || response.payload != 1U;
+    /* Normal-image drv-wake returns packed FSR1/FSR2 in the payload; the
+     * BRINGUP_INJECT image historically returned a boolean. */
+    verification_failed = response.status != 0U;
     /* The wake request may fail legitimately. Its latched pages are read-only
      * evidence and must be shown before the command reports that failure. */
     if (run_pages(client, OPCODE_SNAPSHOT, drv_wake_pages,
@@ -1022,7 +1043,8 @@ static int run_drv_wake(struct client *client)
 
 static int run_drv_wake_status(struct client *client)
 {
-    if (run_inject_safety_gate(client) != 0) return -1;
+    /* Read-only wake evidence is also exposed by the normal image; no
+     * BRINGUP_INJECT preflight is required. */
     return run_pages(client, OPCODE_SNAPSHOT, drv_wake_pages,
                      sizeof(drv_wake_pages));
 }

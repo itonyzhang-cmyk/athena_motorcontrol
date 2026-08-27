@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include "adc.h"
 #include "can.h"
+#include "config_store.h"
 #include "diag_protocol.h"
 #include "drv8323.h"
 #include "gpio.h"
@@ -20,6 +21,123 @@
 #endif
 
 DiagnosticCounters diagnostic_counters;
+static volatile uint8_t drv_wake_pending;
+static volatile uint8_t drv_wake_sequence;
+static volatile uint32_t drv_wake_started_ms;
+
+static volatile DiagnosticDebugEntry debug_log[DIAGNOSTIC_DEBUG_LOG_CAPACITY];
+static volatile uint8_t debug_enabled_flag;
+static volatile uint8_t debug_write_index;
+static volatile uint8_t debug_count;
+static volatile uint32_t debug_dropped;
+
+void diagnostics_debug_clear(void);
+
+void diagnostics_debug_set(uint8_t enabled)
+{
+    debug_enabled_flag = enabled != 0U ? 1U : 0U;
+    if (debug_enabled_flag != 0U) diagnostics_debug_clear();
+}
+
+void diagnostics_debug_clear(void)
+{
+    debug_write_index = 0U;
+    debug_count = 0U;
+    debug_dropped = 0U;
+}
+
+uint8_t diagnostics_debug_enabled(void)
+{
+    return debug_enabled_flag;
+}
+
+uint32_t diagnostics_debug_status(void)
+{
+    return (uint32_t)debug_enabled_flag |
+           ((uint32_t)debug_count << 8) |
+           ((debug_dropped > 0xFFFFU ? 0xFFFFU : debug_dropped) << 16);
+}
+
+void diagnostics_debug_record(uint8_t event, uint32_t payload)
+{
+    uint8_t index;
+    if (debug_enabled_flag == 0U) return;
+    index = debug_write_index;
+    debug_log[index].timestamp_ms = systick_uptime_ms();
+    debug_log[index].event = event;
+    debug_log[index].payload = payload;
+    debug_write_index = (uint8_t)((index + 1U) % DIAGNOSTIC_DEBUG_LOG_CAPACITY);
+    if (debug_count < DIAGNOSTIC_DEBUG_LOG_CAPACITY) debug_count++;
+    else debug_dropped++;
+}
+
+int diagnostics_debug_read(uint8_t index, uint8_t field, uint32_t *payload)
+{
+    uint8_t oldest;
+    uint8_t slot;
+    if (payload == NULL || index >= debug_count || field > 2U) return -1;
+    oldest = (uint8_t)((debug_write_index + DIAGNOSTIC_DEBUG_LOG_CAPACITY - debug_count) %
+                       DIAGNOSTIC_DEBUG_LOG_CAPACITY);
+    slot = (uint8_t)((oldest + index) % DIAGNOSTIC_DEBUG_LOG_CAPACITY);
+    if (field == 0U) *payload = debug_log[slot].timestamp_ms;
+    else if (field == 1U) *payload = debug_log[slot].event;
+    else *payload = debug_log[slot].payload;
+    return 0;
+}
+
+static uint32_t milli_payload(float value)
+{
+    int32_t scaled;
+
+    if (value >= 2147483.0f) return 0x7FFFFFFFU;
+    if (value <= -2147483.0f) return 0x80000000U;
+    scaled = (int32_t)(value * 1000.0f);
+    return (uint32_t)scaled;
+}
+
+static int16_t current_milli16(float value)
+{
+    if (value >= 32.767f) return 32767;
+    if (value <= -32.768f) return -32768;
+    return (int16_t)(value * 1000.0f);
+}
+
+static int16_t adc_delta16(int raw, int offset)
+{
+    int delta = raw - offset;
+    if (delta > 32767) return 32767;
+    if (delta < -32768) return -32768;
+    return (int16_t)delta;
+}
+
+static uint32_t runtime_gate_flags(void)
+{
+    uint32_t flags = 0U;
+
+    flags |= drv_enable_ready() != 0 ? (1U << 0) : 0U;
+    flags |= drv.fault != 0U ? (1U << 1) : 0U;
+    flags |= controller.adc_valid != 0U ? (1U << 2) : 0U;
+    flags |= comm_encoder.valid != 0U ? (1U << 3) : 0U;
+    flags |= gpio_output_bit_get(GPIOA, GPIO_PIN_11) != RESET ? (1U << 4) : 0U;
+    flags |= (TIMER_CCHP(TIMER0) & TIMER_CCHP_POEN) != 0U ? (1U << 5) : 0U;
+    flags |= (TIMER_CHCTL2(TIMER0) & TIMER_CHCTL2_CH0EN) != 0U ? (1U << 6) : 0U;
+    flags |= (TIMER_CHCTL2(TIMER0) & TIMER_CHCTL2_CH1EN) != 0U ? (1U << 7) : 0U;
+    flags |= (TIMER_CHCTL2(TIMER0) & TIMER_CHCTL2_CH2EN) != 0U ? (1U << 8) : 0U;
+    return flags;
+}
+
+/* This checksum is diagnostic evidence only.  It covers the calibration LUT
+ * currently loaded from preferences, without exposing all 128 entries on CAN. */
+static uint32_t encoder_lut_checksum(void)
+{
+    uint32_t checksum = 2166136261U;
+
+    for (uint32_t i = 0U; i < 128U; ++i) {
+        checksum ^= (uint32_t)((const int *)&ENCODER_LUT)[i];
+        checksum *= 16777619U;
+    }
+    return checksum;
+}
 
 static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
 {
@@ -140,6 +258,89 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
         case 79U: return drv_enable_evidence(12U); /* enable GPIOB ISTAT */
         case 80U: return drv_enable_evidence(13U); /* enable SPI STAT */
         case 81U: return drv_enable_evidence(14U); /* nFAULT edge in enable window */
+        /* Runtime control evidence. Milli-unit pages are signed int32 payloads. */
+        case 82U: return (uint32_t)state.state |
+                          ((uint32_t)state.next_state << 8) |
+                          ((uint32_t)state.ready << 16);
+        case 83U: return runtime_gate_flags();
+        case 84U: return milli_payload(I_MAX);
+        case 85U: return milli_payload(controller.i_q_des);
+        case 86U: return milli_payload(controller.i_q_filt);
+        case 87U: return (uint32_t)(uint16_t)current_milli16(controller.i_a) |
+                          ((uint32_t)(uint16_t)current_milli16(controller.i_b) << 16);
+        case 88U: return (TIMER_CH0CV(TIMER0) & 0xFFFFU) |
+                          ((TIMER_CH1CV(TIMER0) & 0xFFFFU) << 16);
+        case 89U: return (TIMER_CH2CV(TIMER0) & 0xFFFFU) |
+                          ((TIMER_CAR(TIMER0) & 0xFFFFU) << 16);
+        case 90U: return milli_payload(controller.p_des);
+        case 91U: return milli_payload(controller.v_des);
+        case 92U: return milli_payload(controller.kp);
+        case 93U: return milli_payload(controller.kd);
+        case 94U: return milli_payload(controller.t_ff);
+        case 95U: return (uint32_t)state.state |
+                          ((uint32_t)state.next_state << 8) |
+                          ((uint32_t)comm_encoder_cal.started << 16) |
+                          ((uint32_t)comm_encoder_cal.done_ordering << 24) |
+                          ((uint32_t)comm_encoder_cal.done_cal << 25) |
+                          ((uint32_t)comm_encoder_cal.failed << 26);
+        case 96U: return (uint32_t)comm_encoder_cal.phase_order |
+                          ((uint32_t)comm_encoder_cal.ppairs << 8) |
+                          ((uint32_t)comm_encoder_cal.sample_count << 16);
+        case 97U: return (uint32_t)comm_encoder_cal.ezero;
+        case 98U: return milli_payload(I_CAL);
+        case 99U: return diagnostics_debug_status();
+		case 100U: return milli_payload(comm_encoder_cal.theta_start);
+		case 101U: return milli_payload(comm_encoder_cal.evidence_theta_end);
+		case 102U: return milli_payload(comm_encoder_cal.evidence_angle_delta);
+		case 103U: return milli_payload(comm_encoder_cal.evidence_i_d_des);
+		case 104U: return milli_payload(comm_encoder_cal.evidence_i_d);
+		case 105U: return milli_payload(comm_encoder_cal.evidence_i_q);
+		case 106U: return milli_payload(comm_encoder_cal.evidence_v_d);
+		case 107U: return milli_payload(comm_encoder_cal.evidence_v_q);
+		case 108U: return (uint32_t)(uint16_t)(comm_encoder_cal.evidence_dtc_u * 10000.0f) |
+					  ((uint32_t)(uint16_t)(comm_encoder_cal.evidence_dtc_v * 10000.0f) << 16);
+		case 109U: return (uint32_t)(uint16_t)(comm_encoder_cal.evidence_dtc_w * 10000.0f);
+		case 110U: return milli_payload(comm_encoder_cal.evidence_theta_ref);
+		/* Persisted configuration as loaded at boot.  Unlike pages 95-110,
+		 * these do not belong to the transient calibration session. */
+		case 111U: return milli_payload(PPAIRS);
+		case 112U: return (uint32_t)PHASE_ORDER |
+		                  ((uint32_t)(uint16_t)comm_encoder.ppairs << 16);
+		case 113U: return (uint32_t)E_ZERO;
+		case 114U: return config_payload_crc32(__int_reg, __float_reg);
+		case 115U: return encoder_lut_checksum();
+		/* ADC/current-chain evidence.  These pages are deliberately read-only and
+		 * expose the exact values used by analog_sample(), not reconstructed values. */
+		case 116U: return (uint32_t)((uint16_t)controller.adc_b_raw) |
+		                  ((uint32_t)(uint16_t)controller.adc_c_raw << 16);
+		case 117U: return (uint32_t)((uint16_t)controller.adc_b_offset) |
+		                  ((uint32_t)(uint16_t)controller.adc_c_offset << 16);
+		case 118U: return (uint32_t)(uint16_t)adc_delta16(controller.adc_b_raw,
+		                                                   controller.adc_b_offset) |
+		                  ((uint32_t)(uint16_t)adc_delta16(controller.adc_c_raw,
+		                                                   controller.adc_c_offset) << 16);
+		case 119U: return (uint32_t)(controller.i_scale * 1000000.0f);
+		case 120U: return (uint32_t)(uint16_t)current_milli16(controller.i_b) |
+		                  ((uint32_t)(uint16_t)current_milli16(controller.i_c) << 16);
+		case 121U: return (uint32_t)controller.adc_valid |
+		                  ((controller.adc_sample_count & 0x00FFFFFFU) << 8);
+		case 122U: return (uint32_t)controller.adc_timeout_count;
+		/* Captured from the active-low nFAULT ISR before EN_GATE is dropped.
+		 * Pages 123-136 retain the last runtime fault until the next fault. */
+		case 123U: return drv_runtime_fault_evidence(0U); /* timestamp_ms */
+		case 124U: return drv_runtime_fault_evidence(1U); /* FSR1 | FSR2 << 16 */
+		case 125U: return drv_runtime_fault_evidence(2U); /* ADC B | ADC C << 16 */
+		case 126U: return drv_runtime_fault_evidence(3U); /* B offset | C offset << 16 */
+		case 127U: return drv_runtime_fault_evidence(4U); /* VBUS ADC raw */
+		case 128U: return drv_runtime_fault_evidence(5U); /* GPIOA ISTAT */
+		case 129U: return drv_runtime_fault_evidence(6U); /* GPIOA OCTL */
+		case 130U: return drv_runtime_fault_evidence(7U); /* i_q_des mA */
+		case 131U: return drv_runtime_fault_evidence(8U); /* i_q mA */
+		case 132U: return drv_runtime_fault_evidence(9U); /* i_d mA */
+		case 133U: return drv_runtime_fault_evidence(10U); /* i_q_filt mA */
+		case 134U: return drv_runtime_fault_evidence(11U); /* vbus_filt mV */
+		case 135U: return drv_runtime_fault_evidence(12U); /* duty U | V << 16 */
+		case 136U: return drv_runtime_fault_evidence(13U); /* duty W */
 #endif
 #ifdef BRINGUP_INJECT
         case 20U: /* fallthrough to shared handler */
@@ -213,12 +414,92 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
     return 0U;
 }
 
+static uint32_t handle_control_request(const DiagRequest *request, uint8_t *status)
+{
+#if defined(SAFE_BRINGUP) || defined(BRINGUP_INJECT)
+    (void)request;
+    *status = DIAG_STATUS_UNSUPPORTED;
+    return 0U;
+#else
+    uint32_t value;
+    /* page is a structured command, not an arbitrary UART byte stream. */
+    switch (request->page) {
+    case 1U: /* ESC */
+        update_fsm(&state, ESC_CMD);
+        return 1U;
+    case 2U: /* MOTOR */
+        update_fsm(&state, MOTOR_CMD);
+        return 2U;
+    case 3U: /* ENCODER read-only mode */
+        update_fsm(&state, ENCODER_CMD);
+        return 3U;
+    case 4U: /* CALIBRATE; argument is current in 0.1 A units */
+        if (request->argument < 1U || request->argument > 20U ||
+            state.state != MENU_MODE || state.next_state != MENU_MODE ||
+            safety_get_faults() != 0U || drv.fault != 0U ||
+            comm_encoder.valid == 0U || controller.adc_valid == 0U ||
+            gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+            *status = DIAG_STATUS_BUSY;
+            return 0U;
+        }
+        I_CAL = (float)request->argument * 0.1f;
+        update_fsm(&state, CAL_CMD);
+        return (uint32_t)request->argument * 100U;
+    case 5U: /* ZERO; explicit CAN command, writes the transactional config */
+        if (state.state != MENU_MODE || state.next_state != MENU_MODE ||
+            safety_get_faults() != 0U || comm_encoder.valid == 0U) {
+            *status = DIAG_STATUS_BUSY;
+            return 0U;
+        }
+        update_fsm(&state, ZERO_CMD);
+        return 1U;
+    case 6U: /* ABORT current state and return to the safe menu */
+        if (state.state == MENU_MODE && state.next_state == MENU_MODE) {
+            *status = DIAG_STATUS_BUSY;
+            return 0U;
+        }
+        update_fsm(&state, ESC_CMD);
+        return 1U;
+    case 7U: /* Enable RAM debug log; enabling also starts a fresh log. */
+        diagnostics_debug_set(1U);
+        return diagnostics_debug_status();
+    case 8U: /* Disable RAM debug log. */
+        diagnostics_debug_set(0U);
+        return diagnostics_debug_status();
+    case 9U: /* Clear RAM debug log, preserving enable state. */
+        diagnostics_debug_clear();
+        return diagnostics_debug_status();
+    case 10U: /* Read timestamp for log index, argument selects entry. */
+        if (diagnostics_debug_read(request->argument, 0U, &value) != 0) {
+            *status = DIAG_STATUS_BAD_PAGE;
+            return 0U;
+        }
+        return value;
+    case 11U: /* Read event code for log index. */
+        if (diagnostics_debug_read(request->argument, 1U, &value) != 0) {
+            *status = DIAG_STATUS_BAD_PAGE;
+            return 0U;
+        }
+        return value;
+    case 12U: /* Read event payload for log index. */
+        if (diagnostics_debug_read(request->argument, 2U, &value) != 0) {
+            *status = DIAG_STATUS_BAD_PAGE;
+            return 0U;
+        }
+        return value;
+    default:
+        *status = DIAG_STATUS_UNSUPPORTED;
+        return 0U;
+    }
+#endif
+}
+
 void diagnostics_handle_can(const can_receive_message_struct *message)
 {
     static uint32_t last_response_ms;
     DiagRequest request;
     can_trasnmit_message_struct response;
-    uint8_t status;
+    uint8_t status = DIAG_STATUS_OK;
     uint32_t payload;
     uint32_t now;
 
@@ -242,7 +523,19 @@ void diagnostics_handle_can(const can_receive_message_struct *message)
     last_response_ms = now;
     diagnostic_counters.rx_valid++;
 
-    payload = diagnostic_payload(&request, &status);
+    if (request.opcode == DIAG_OPCODE_DRV_WAKE) {
+        /* Do not delay or poll SPI in CAN RX. The 30 kHz timer service waits
+         * for the charge pump, then performs the two bounded transfers. */
+        drv_wake_sequence = request.sequence;
+        drv_wake_started_ms = now;
+        drv_wake_pending = 1U;
+        gpio_bit_set(ENABLE_PIN);
+        return;
+    } else {
+        payload = request.opcode == DIAG_OPCODE_CONTROL
+                  ? handle_control_request(&request, &status)
+                  : diagnostic_payload(&request, &status);
+    }
     if (status == DIAG_STATUS_BAD_PAGE || status == DIAG_STATUS_UNSUPPORTED) {
         diagnostic_counters.rx_bad_opcode_page++;
     }
@@ -260,6 +553,41 @@ void diagnostics_handle_can(const can_receive_message_struct *message)
     } else {
         diagnostic_counters.tx_submit++;
     }
+}
+
+void diagnostics_drv_wake_service(void)
+{
+    can_trasnmit_message_struct response;
+    uint16_t fsr1, fsr2;
+    uint8_t sequence;
+    if (drv_wake_pending == 0U ||
+        (uint32_t)(systick_uptime_ms() - drv_wake_started_ms) < 10U) return;
+    sequence = drv_wake_sequence;
+    fsr1 = drv_read_FSR1(drv);
+    fsr2 = drv_read_FSR2(drv);
+    gpio_bit_reset(ENABLE_PIN);
+    drv_wake_pending = 0U;
+    can_struct_para_init(CAN_TX_MESSAGE_STRUCT, &response);
+    response.tx_sfid = DIAG_CAN_RESPONSE_ID;
+    response.tx_ft = CAN_FT_DATA; response.tx_ff = CAN_FF_STANDARD;
+    response.tx_dlen = 8U;
+    {
+        DiagRequest request;
+        request.opcode = DIAG_OPCODE_DRV_WAKE;
+        request.sequence = sequence; request.page = 0U; request.argument = 0U;
+        diag_protocol_response(&request, DIAG_STATUS_OK,
+                                (uint32_t)fsr1 | ((uint32_t)fsr2 << 16),
+                                response.tx_data);
+    }
+    (void)can_message_transmit(CAN0, &response);
+}
+
+uint8_t diagnostics_drv_wake_window_active(void)
+{
+    /* PA11 is asserted only for this bounded, PWM-off diagnostic transaction.
+     * nFAULT must be sampled by the service before normal fault handling drops
+     * EN_GATE; otherwise the read would observe the disabled DRV bus. */
+    return drv_wake_pending;
 }
 
 void diagnostics_uart_report(void)

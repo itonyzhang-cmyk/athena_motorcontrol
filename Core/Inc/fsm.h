@@ -41,6 +41,8 @@ typedef struct{
 	char cmd_buff[8];
 	char bytecount;
 	char cmd_id;
+	uint8_t rearm_pending;
+	uint16_t rearm_wait_cycles;
 }FSMStruct;
 
 void run_fsm(FSMStruct* fsmstate);

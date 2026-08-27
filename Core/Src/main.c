@@ -350,6 +350,8 @@ int main(void)
   state.state = MENU_MODE;
   state.next_state = MENU_MODE;
   state.ready = 1;
+  state.rearm_pending = 0U;
+  state.rearm_wait_cycles = 0U;
 
 
   /* Turn on interrupts */

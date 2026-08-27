@@ -48,6 +48,7 @@ typedef struct{
     uint8_t adc_valid;
     uint32_t adc_sample_count;
     uint32_t adc_timeout_count;
+    uint32_t torque_ramp_cycles;
     } ControllerStruct;
 
 typedef struct{

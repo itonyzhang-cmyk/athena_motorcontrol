@@ -207,13 +207,11 @@ void MX_TIM0_Init(void)
 
     /* Channel output */
     timer_channel_output_struct_para_init(&timer_ocintpara);
-#if defined(SAFE_BRINGUP) || defined(BRINGUP_INJECT)
-    timer_ocintpara.outputstate  = TIMER_CCX_DISABLE;
-#else
-    /* Normal application enables channels only after DRV readback and gate
-     * preflight succeed. Keep all three channels disabled during startup. */
-    timer_ocintpara.outputstate  = TIMER_CCX_DISABLE;
-#endif
+    /* Keep the three timer channels configured/enabled from reset, as in the
+     * reference firmware.  The power stage remains electrically off through
+     * MOE/EN_GATE; asynchronously toggling CCX_U/V/W at wake can create a
+     * one-cycle phase mismatch and trigger a DRV gate fault. */
+    timer_ocintpara.outputstate  = TIMER_CCX_ENABLE;
     timer_ocintpara.outputnstate = TIMER_CCXN_DISABLE;
     timer_ocintpara.ocpolarity   = TIMER_OC_POLARITY_LOW;
     timer_ocintpara.ocnpolarity  = TIMER_OCN_POLARITY_HIGH;

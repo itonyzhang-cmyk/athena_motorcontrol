@@ -15,7 +15,9 @@ typedef enum {
     DIAG_OPCODE_GET_COUNTER = 0x03U,
     DIAG_OPCODE_INJECT = 0x04U,
     DIAG_OPCODE_INJECT_STOP = 0x05U,
-    DIAG_OPCODE_DRV_WAKE = 0x06U
+    DIAG_OPCODE_DRV_WAKE = 0x06U,
+    /* Structured replacement for the legacy UART menu commands. */
+    DIAG_OPCODE_CONTROL = 0x07U
 } DiagOpcode;
 
 #define DIAG_INJECT_VECTOR_COUNT 6U
@@ -34,6 +36,7 @@ typedef struct {
     uint8_t opcode;
     uint8_t sequence;
     uint8_t page;
+    uint8_t argument;
 } DiagRequest;
 
 typedef struct {

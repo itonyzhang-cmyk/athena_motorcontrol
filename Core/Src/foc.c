@@ -184,9 +184,13 @@ void zero_current(ControllerStruct *controller){
     int adc_c_offset = 0;
 #endif
     int n = 1000;
-    controller->dtc_u = 0.f;
-    controller->dtc_v = 0.f;
-    controller->dtc_w = 0.f;
+    /* Sample the CSA bias with all three half-bridges at the electrical
+     * midpoint.  Sampling at 0% is incorrect when INVERT_DTC is enabled: it
+     * drives the complementary output to the rail and changes the shunt
+     * amplifier common-mode level, producing a large fake current at idle. */
+    controller->dtc_u = 0.5f;
+    controller->dtc_v = 0.5f;
+    controller->dtc_w = 0.5f;
     set_dtc(controller);
 
     for (int i = 0; i<n; i++){               // Average n samples
@@ -240,8 +244,13 @@ void reset_foc(ControllerStruct *controller){
 #endif
     controller->i_d_des = 0;
     controller->i_q_des = 0;
+    controller->i_d_des_filt = 0;
+    controller->i_q_des_filt = 0;
     controller->i_d = 0;
     controller->i_q = 0;
+    controller->i_a = 0;
+    controller->i_b = 0;
+    controller->i_c = 0;
     controller->i_q_filt = 0;
     controller->q_int = 0;
     controller->d_int = 0;
@@ -249,6 +258,7 @@ void reset_foc(ControllerStruct *controller){
     controller->v_d = 0;
     controller->fw_int = 0;
     controller->otw_flag = 0;
+    controller->torque_ramp_cycles = 0U;
 
     }
 
@@ -313,6 +323,19 @@ void field_weaken(ControllerStruct *controller)
 
 
 }
+
+static float slew_current_reference(float previous, float target)
+{
+    const float delta = target - previous;
+    if (delta > CURRENT_REF_SLEW_A_PER_CYCLE) {
+        return previous + CURRENT_REF_SLEW_A_PER_CYCLE;
+    }
+    if (delta < -CURRENT_REF_SLEW_A_PER_CYCLE) {
+        return previous - CURRENT_REF_SLEW_A_PER_CYCLE;
+    }
+    return target;
+}
+
 void commutate(ControllerStruct *controller, EncoderStruct *encoder)
 {
 	/* Do Field Oriented Control */
@@ -332,6 +355,18 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
        controller->v_max = OVERMODULATION*controller->v_bus_filt*(DTC_MAX-DTC_MIN)*SQRT1_3;
        controller->i_max = I_MAX; //I_MAX*(!controller->otw_flag) + I_MAX_CONT*controller->otw_flag;
 
+       /* A CAN MIT frame can change t_ff/Kp abruptly.  Slew both current
+        * references before the PI loop so a valid command cannot create a
+        * sub-cycle phase-current spike that trips DRV8323 OCP. */
+       /* Slew from the previous command, not the measured current.  Using
+        * i_d/i_q here makes the limiter chase measurement noise and can
+        * repeatedly pull a valid MIT reference back toward zero. */
+       controller->i_d_des_filt = slew_current_reference(controller->i_d_des_filt,
+                                                         controller->i_d_des);
+       controller->i_q_des_filt = slew_current_reference(controller->i_q_des_filt,
+                                                         controller->i_q_des);
+       controller->i_d_des = controller->i_d_des_filt;
+       controller->i_q_des = controller->i_q_des_filt;
        limit_norm(&controller->i_d_des, &controller->i_q_des, controller->i_max);	// 2.3 us
 
        /// PI Controller ///
@@ -368,10 +403,25 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
 
 
 void torque_control(ControllerStruct *controller){
-
-    float torque_des = controller->kp*(controller->p_des - controller->theta_mech) + controller->t_ff + controller->kd*(controller->v_des - controller->dtheta_mech);
-    controller->i_q_des = fast_fmaxf(fast_fminf(torque_des/(KT*GR), controller->i_max), -controller->i_max);
-    controller->i_d_des = 0.0f;
+	/* MIT position commands can otherwise turn a large position error into an
+	 * instantaneous current step and trip the DRV8323 before the loop has a
+	 * chance to settle.  Follow the target in bounded position increments and
+	 * ramp the current ceiling from the calibration-scale 5 A value. */
+	const float position_error = controller->p_des - controller->theta_mech;
+	const float bounded_error = fast_fmaxf(fast_fminf(position_error, 0.5f), -0.5f);
+	const float startup_current = 5.0f;
+	const uint32_t ramp_cycles = 9000U; /* 300 ms at the 30 kHz control loop */
+	const float ramp = controller->torque_ramp_cycles >= ramp_cycles ? 1.0f :
+		(float)controller->torque_ramp_cycles / (float)ramp_cycles;
+	const float ramped_limit = startup_current +
+		(controller->i_max - startup_current) * ramp;
+	float torque_des = controller->kp * bounded_error + controller->t_ff +
+		controller->kd * (controller->v_des - controller->dtheta_mech);
+	controller->i_q_des = fast_fmaxf(fast_fminf(torque_des/(KT*GR), ramped_limit), -ramped_limit);
+	controller->i_d_des = 0.0f;
+	if (controller->torque_ramp_cycles < ramp_cycles) {
+		controller->torque_ramp_cycles++;
+	}
 
     }
 
@@ -384,4 +434,5 @@ void zero_commands(ControllerStruct * controller){
 	controller->p_des = 0;
 	controller->v_des = 0;
 	controller->i_q_des = 0;
+	controller->torque_ramp_cycles = 0U;
 }

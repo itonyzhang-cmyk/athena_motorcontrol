@@ -243,6 +243,15 @@ void ps_sample(EncoderStruct * encoder, float dt){
 			encoder->invalid_count++;
 			encoder->consecutive_errors++;
 			encoder->valid = 0U;
+			/* Resynchronise the sampling baseline.  Keeping the pre-jump
+			 * last_raw14 makes every subsequent frame fail the same delta check
+			 * forever after a legitimate mechanical step.  The safety fault is
+			 * still latched below, so this only restores observability; a fresh
+			 * 0xFC is still required before the motor can be enabled again. */
+			encoder->last_raw14 = raw14;
+			encoder->raw14 = raw14;
+			encoder->valid_count = 0U;
+			encoder->first_sample = 0U;
 			if (encoder->consecutive_errors >= 3U) {
 				safety_force_outputs_off(SAFETY_FAULT_ENCODER);
 			}
@@ -263,6 +272,9 @@ void ps_sample(EncoderStruct * encoder, float dt){
 #endif
 
 	/* Shift previous position samples only after accepting a valid frame. */
+	/* The counter was incremented when the frame was accepted above.  A value
+	 * of one therefore identifies the first valid sample after a resync. */
+	const uint8_t fresh_sample = encoder->valid_count == 1U ? 1U : 0U;
 	encoder->old_angle = encoder->angle_singleturn;
 	for(int i = N_POS_SAMPLES-1; i>0; i--){encoder->angle_multiturn[i] = encoder->angle_multiturn[i-1];}
 
@@ -279,6 +291,17 @@ void ps_sample(EncoderStruct * encoder, float dt){
 	encoder->angle_singleturn = TWO_PI_F*(encoder->angle_singleturn - (float)int_angle);
 	//encoder->angle_singleturn = TWO_PI_F*fmodf(((float)(encoder->count-M_ZERO))/((float)ENC_CPR), 1.0f);
 	encoder->angle_singleturn = encoder->angle_singleturn<0 ? encoder->angle_singleturn + TWO_PI_F : encoder->angle_singleturn;
+	if (fresh_sample != 0U) {
+		/* A resynchronised encoder must not report a velocity spike from the
+		 * pre-fault history.  Seed the complete position window at the first
+		 * accepted post-jump sample. */
+		encoder->old_angle = encoder->angle_singleturn;
+		for (int i = 0; i < N_POS_SAMPLES; ++i) {
+			encoder->angle_multiturn[i] = encoder->angle_singleturn;
+		}
+		encoder->turns = 0;
+		encoder->first_sample = 1U;
+	}
 
 	encoder->elec_angle = (encoder->ppairs*(float)(encoder->count-E_ZERO))/((float)ENC_CPR);
 	int_angle = (int)encoder->elec_angle;

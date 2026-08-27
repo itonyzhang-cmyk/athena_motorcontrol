@@ -330,6 +330,10 @@ void TIMER0_UP_IRQHandler(void)
         heartbeat_state = (heartbeat_state == RESET) ? SET : RESET;
         gpio_bit_write(GPIOC, GPIO_PIN_13, heartbeat_state);
     }
+    /* Explicit diagnostic only: PA11 was asserted by CAN RX, and this service
+     * performs the post-settle DRV SPI read without blocking CAN or thread
+     * context. PWM remains disabled throughout. */
+    diagnostics_drv_wake_service();
 #endif
 
 #ifdef BRINGUP_INJECT
@@ -413,6 +417,11 @@ void EXTI10_15_IRQHandler(void)
             /* The startup charge-pump transient is recorded by the bounded
              * DRV init gate; do not turn it into a latched app fault here. */
             drv_init_record_nfault_edge();
+            return;
+        }
+        if (diagnostics_drv_wake_window_active()) {
+            /* The bounded PWM-off DRV probe owns the fault sample. Preserve
+             * EN_GATE until it reads FSR1/FSR2 and closes the window. */
             return;
         }
         if (gpio_output_bit_get(GPIOA, GPIO_PIN_11) != RESET) {

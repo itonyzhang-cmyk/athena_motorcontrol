@@ -24,15 +24,21 @@ int main(void)
     const uint8_t info[8] = {0xA5, 0x5A, 0x01, 0x01, 0x02, 0x00, 0x00, 0xD6};
     const uint8_t snap[8] = {0xA5, 0x5A, 0x01, 0x02, 0x03, 0x03, 0x00, 0xB8};
     const uint8_t counter[8] = {0xA5, 0x5A, 0x01, 0x03, 0x04, 0x00, 0x00, 0x87};
+    uint8_t control[8] = {0xA5, 0x5A, 0x01, DIAG_OPCODE_CONTROL, 0x05, 0x04, 0x05, 0};
     uint8_t mutated[8];
     uint8_t response[8];
-    DiagRequest request = {DIAG_OPCODE_GET_SNAPSHOT, 0x42U, 0x09U};
+    DiagRequest request = {DIAG_OPCODE_GET_SNAPSHOT, 0x42U, 0x09U, 0U};
 
     as5047_protocol_tests();
     check_vector(ping, DIAG_OPCODE_PING, 1U, 0U);
     check_vector(info, DIAG_OPCODE_GET_INFO, 2U, 0U);
     check_vector(snap, DIAG_OPCODE_GET_SNAPSHOT, 3U, 3U);
     check_vector(counter, DIAG_OPCODE_GET_COUNTER, 4U, 0U);
+    control[7] = diag_crc8_atm(control, 7U);
+    assert(diag_protocol_parse(control, &request) == 0);
+    assert(request.opcode == DIAG_OPCODE_CONTROL && request.sequence == 5U &&
+           request.page == 4U);
+    assert(request.argument == 5U);
 
     for (uint32_t byte = 0U; byte < 8U; byte++) {
         for (uint32_t bit = 0U; bit < 8U; bit++) {

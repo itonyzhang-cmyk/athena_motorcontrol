@@ -31,11 +31,37 @@ INJECT_IMAGE_SHA256="55e8d6816e087d8308888960a5ba91545a8c5ab521ca3b625bff137268b
 INJECT_IMAGE_SIZE=33764
 INJECT_IMAGE_BASE=0x08000000
 INJECT_ERASE_SIZE=0x8800
-NORMAL_IMAGE_DEFAULT="${REPO_DIR}/artifacts/athena_normal_watchdog_audit_20260823/motorcontrol.bin"
-NORMAL_IMAGE_SHA256="229ddb217655131f9a3ab577932e5061e30d18fef41325805d1b68a4c43bf55c"
-NORMAL_IMAGE_SIZE=55244
+NORMAL_IMAGE_DEFAULT="${REPO_DIR}/artifacts/athena_normal_runtime_diagnostics_20260824/motorcontrol.bin"
+NORMAL_IMAGE_SHA256="813463d0fe59e2fb17d731ca8708d2cec4450a8100a1068a146c3286ce2f49a1"
+NORMAL_IMAGE_SIZE=55836
 NORMAL_IMAGE_BASE=0x08000000
-NORMAL_ERASE_SIZE=0xE000
+# The CAN RAM debug normal image is currently just under 0xE804 bytes. Keep a
+# page-aligned 0xF000 window (60 KiB, 2048-byte pages), still far below the reserved
+# CONFIG base 0x0803C000.
+NORMAL_ERASE_SIZE=0xF000
+
+# Keep the audited normal image selectable without restarting the WebUI. The
+# same JSON is read by athena_bench_webui.py; these defaults remain a safe
+# fallback if the config file is temporarily unavailable.
+NORMAL_CONFIG="${REPO_DIR}/athena_bench_webui.json"
+if [[ -f "${NORMAL_CONFIG}" ]] && command -v python3 >/dev/null 2>&1; then
+    _normal_config_line="$(python3 - "${NORMAL_CONFIG}" <<'PY'
+import json, sys
+from pathlib import Path
+try:
+    data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    print(f'{data["normal_image"]}\t{data["normal_sha"]}')
+except Exception:
+    pass
+PY
+)"
+    IFS=$'\t' read -r _normal_image_rel _normal_image_sha <<< "${_normal_config_line}"
+    if [[ -n "${_normal_image_rel}" && -n "${_normal_image_sha}" ]]; then
+        NORMAL_IMAGE_DEFAULT="${REPO_DIR}/${_normal_image_rel}"
+        NORMAL_IMAGE_SHA256="${_normal_image_sha}"
+        NORMAL_IMAGE_SIZE="$(wc -c < "${NORMAL_IMAGE_DEFAULT}" | tr -d ' ')"
+    fi
+fi
 EVAL_IMAGE_DEFAULT="${REPO_DIR}/artifacts/athena_normal_eval_20260821/motorcontrol.bin"
 EVAL_IMAGE_SHA256="538da9dc8aac7c4e144de6d6b8f126fbc8f7fee348ef1976ed6b9a6e72330afa"
 EVAL_IMAGE_SIZE=52372

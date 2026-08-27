@@ -94,9 +94,9 @@ output, and all three channel-enable bits remain zero.
 ```sh
 make host-test
 make BUILD_DIR=/tmp/athena-safe \
-  GCC_PATH=/tmp/arm-gnu-toolchain-15.3-root/bin -j4
+  GCC_PATH=/Users/choqy/toolchains/arm-gnu-toolchain-15.2/bin -j4
 make BUILD_DIR=/tmp/athena-safe \
-  GCC_PATH=/tmp/arm-gnu-toolchain-15.3-root/bin verify-safe
+  GCC_PATH=/Users/choqy/toolchains/arm-gnu-toolchain-15.2/bin verify-safe
 ```
 
 `verify-safe` rejects images containing known Flash-write, gate-enable, FOC,

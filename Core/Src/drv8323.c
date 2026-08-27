@@ -14,6 +14,7 @@
 #include "safety.h"
 #include "systick.h"
 #include "motor_gate.h"
+#include "foc.h"
 
 #define DRV_ENABLE_SETTLE_MS 10U
 #define DRV_DCR_CONFIG_VALUE 0x00A1U
@@ -22,6 +23,7 @@
 static volatile uint8_t drv_enable_pending;
 static volatile uint8_t drv_enable_verified;
 static volatile uint8_t drv_fault_clear_attempted;
+static volatile uint8_t drv_pwm_settle_pending;
 static uint32_t drv_enable_started_ms;
 static int drv_verify_configuration(DRVStruct *drv);
 static uint32_t drv_capture_fsr_pair(DRVStruct *drv);
@@ -35,6 +37,7 @@ static volatile uint32_t drv_init_dcr_csacr_value;
 static volatile uint32_t drv_init_ocpcr_value;
 static volatile uint16_t drv_init_spi_rx_value[6];
 static volatile uint32_t drv_enable_evidence_value[15];
+static volatile uint32_t drv_runtime_fault_evidence_value[14];
 static volatile uint8_t drv_enable_window;
 static volatile uint32_t drv_enable_grace_until_ms;
 
@@ -57,6 +60,10 @@ uint32_t drv_enable_evidence(uint8_t page)
 {
 	return page < 15U ? drv_enable_evidence_value[page] : 0U;
 }
+uint32_t drv_runtime_fault_evidence(uint8_t page)
+{
+	return page < 14U ? drv_runtime_fault_evidence_value[page] : 0U;
+}
 int drv_enable_window_active(void) { return drv_enable_window != 0U; }
 void drv_enable_record_nfault_edge(void) { drv_enable_evidence_value[14] = 1U; }
 
@@ -65,8 +72,33 @@ void drv_capture_runtime_fault(DRVStruct *drv)
 #ifndef STM32F446
 	/* This is called from the short EXTI fault path while EN_GATE is still
 	 * asserted.  Preserve the pair before safety shutdown drops the DRV bank. */
-	if (drv != NULL)
+	drv_runtime_fault_evidence_value[0] = systick_uptime_ms();
+	drv_runtime_fault_evidence_value[2] =
+		(uint32_t)(uint16_t)controller.adc_b_raw |
+		((uint32_t)(uint16_t)controller.adc_c_raw << 16);
+	drv_runtime_fault_evidence_value[3] =
+		(uint32_t)(uint16_t)controller.adc_b_offset |
+		((uint32_t)(uint16_t)controller.adc_c_offset << 16);
+	drv_runtime_fault_evidence_value[4] = (uint32_t)(uint16_t)controller.adc_vbus_raw;
+	drv_runtime_fault_evidence_value[5] = GPIO_ISTAT(GPIOA);
+	drv_runtime_fault_evidence_value[6] = GPIO_OCTL(GPIOA);
+	/* Retain the quantities actually used by the current loop before the
+	 * shutdown path resets PWM/output state. These are intentionally direct
+	 * controller values, not KT/GR-derived torque estimates. */
+	drv_runtime_fault_evidence_value[7] = (uint32_t)(int32_t)(controller.i_q_des * 1000.0f);
+	drv_runtime_fault_evidence_value[8] = (uint32_t)(int32_t)(controller.i_q * 1000.0f);
+	drv_runtime_fault_evidence_value[9] = (uint32_t)(int32_t)(controller.i_d * 1000.0f);
+	drv_runtime_fault_evidence_value[10] = (uint32_t)(int32_t)(controller.i_q_filt * 1000.0f);
+	drv_runtime_fault_evidence_value[11] = (uint32_t)(int32_t)(controller.v_bus_filt * 1000.0f);
+	drv_runtime_fault_evidence_value[12] =
+		(uint32_t)(uint16_t)(controller.dtc_u * 10000.0f) |
+		((uint32_t)(uint16_t)(controller.dtc_v * 10000.0f) << 16);
+	drv_runtime_fault_evidence_value[13] =
+		(uint32_t)(uint16_t)(controller.dtc_w * 10000.0f);
+	if (drv != NULL) {
 		drv_enable_evidence_value[1] = drv_capture_fsr_pair(drv);
+		drv_runtime_fault_evidence_value[1] = drv_enable_evidence_value[1];
+	}
 #else
 	(void)drv;
 #endif
@@ -161,6 +193,7 @@ void drv_enable_gd(DRVStruct drv){
 	drv_enable_pending = 1U;
 	drv_enable_verified = 0U;
 	drv_fault_clear_attempted = 0U;
+	drv_pwm_settle_pending = 0U;
 #else
 	uint16_t val = (drv_read_register(drv, DCR)) & (~(0x1<<2));
 	drv_write_register(drv, DCR, val);
@@ -178,15 +211,49 @@ void drv_service_enable(DRVStruct drv)
 	 * transaction has completed; this must run before the pending guard. */
 	if (drv_enable_verified != 0U && drv_enable_window != 0U) {
 		if ((int32_t)(systick_uptime_ms() - drv_enable_grace_until_ms) >= 0) {
-			drv_enable_window = 0U;
+			if (drv_pwm_settle_pending != 0U) {
+				/* Finalise the short PWM-on observation interval. A low nFAULT
+				 * here is a real runtime fault; an earlier edge was retained only
+				 * as startup evidence while all three outputs were neutral. */
+				drv_enable_window = 0U;
+				if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+					drv_enable_evidence_value[0] = 0U;
+					drv_enable_evidence_value[1] = drv_capture_fsr_pair(&drv);
+					safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
+					drv.fault = 1U;
+					drv_disable_gd(drv);
+				}
+				return;
+			}
+
+#ifdef DRV_GATE_ONLY_DIAGNOSTIC
+			/* Keep PWM/POEN off after verified EN_GATE. This isolates an
+			 * EN_GATE/charge-pump/nFAULT issue from a fault caused by PWM. */
+			return;
+#else
 			/* Only expose PWM after the DRV charge-pump/nFAULT settling
 			 * interval.  Enabling POEN in the same cycle as the final SPI
 			 * readback can turn a harmless startup edge into a latched gate
-			 * fault before the first MIT command arrives. */
+			 * fault before the first MIT command arrives.
+			 *
+			 * drv_disable_gd() deliberately clears all three channel-enable
+			 * bits, not just POEN, so every stop reaches a real electrical idle
+			 * state.  Re-arm must therefore restore the channels before POEN.
+			 * Otherwise the driver can pass SPI/nFAULT verification while the
+			 * TIMER has no phase outputs, producing a healthy-looking but
+			 * torque-free MIT session.  reset_foc() must occur here, before
+			 * CH/POEN, rather than later in fsm_enter_state(): comparator values
+			 * from an interrupted prior session are not a safe first PWM vector. */
+			reset_foc(&controller);
 			timer_channel_output_state_config(TIM_PWM, TIM_CH_U, TIMER_CCX_ENABLE);
 			timer_channel_output_state_config(TIM_PWM, TIM_CH_V, TIMER_CCX_ENABLE);
 			timer_channel_output_state_config(TIM_PWM, TIM_CH_W, TIMER_CCX_ENABLE);
 			timer_primary_output_config(TIM_PWM, ENABLE);
+			/* Keep EXTI in the bounded evidence window for the first PWM edges.
+			 * The next service pass samples nFAULT after this transient is over. */
+			drv_pwm_settle_pending = 1U;
+			drv_enable_grace_until_ms = systick_uptime_ms() + 5U;
+#endif
 		}
 		return;
 	}
@@ -299,6 +366,7 @@ void drv_disable_gd(DRVStruct drv){
 	drv_enable_pending = 0U;
 	drv_enable_verified = 0U;
 	drv_enable_window = 0U;
+	drv_pwm_settle_pending = 0U;
 #else
 	__HAL_TIM_MOE_DISABLE(&TIM_PWM);
 	HAL_GPIO_WritePin(ENABLE_PIN, GPIO_PIN_RESET);
@@ -391,8 +459,12 @@ static uint32_t drv_capture_fsr_pair(DRVStruct *drv)
 	int s2 = drv_spi_transfer(drv, (uint16_t)(0x8000U | (FSR2 << 11)), &rx2);
 	(void)rx0;
 	if (s0 != SPI_TRANSFER_OK || s1 != SPI_TRANSFER_OK ||
-	    s2 != SPI_TRANSFER_OK)
+	    s2 != SPI_TRANSFER_OK) {
 		drv_init_reason_value |= DRV_INIT_REASON_SPI;
+		/* A failed transaction used to leave the zero-initialized receive words
+		 * indistinguishable from a genuine clear FSR pair. */
+		return 0xFFFFFFFFU;
+	}
 	return (uint32_t)rx1 | ((uint32_t)rx2 << 16);
 }
 
@@ -492,10 +564,12 @@ int drv_init_config(DRVStruct drv)
 	drv_disable_gd(drv);
 	drv_init_window = 0U;
 	safety_outputs_off();
-	/* The CSA common-mode level changes when the gate driver is taken back to
-	 * Hi-Z.  Re-sample in the same disabled state used by the idle control loop;
-	 * retaining the pre-disable offset creates a persistent false phase current. */
-	zero_current(&controller);
+	/* Keep the offsets measured with EN_GATE asserted and the CSA configured.
+	 * With the DRV disabled the shunt amplifiers are no longer in the same
+	 * common-mode state as a live three-PWM bridge.  Re-sampling in Hi-Z was
+	 * observed as a stable fictitious approximately +4 A/-2 A phase current;
+	 * the first live current-control cycle then commanded a compensating vector
+	 * before the requested MIT torque could take effect. */
 	return 0;
 #endif
 }
