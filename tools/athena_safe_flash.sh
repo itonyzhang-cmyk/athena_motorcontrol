@@ -38,7 +38,9 @@ NORMAL_IMAGE_BASE=0x08000000
 # The CAN RAM debug normal image is currently just under 0xE804 bytes. Keep a
 # page-aligned 0xF000 window (60 KiB, 2048-byte pages), still far below the reserved
 # CONFIG base 0x0803C000.
-NORMAL_ERASE_SIZE=0xF000
+# Normal application may grow up to the reserved-config boundary.  Keep the
+# erase range page aligned and never erase CONFIG_BASE or the A/B preferences.
+NORMAL_ERASE_SIZE=0x3C000
 
 # Keep the audited normal image selectable without restarting the WebUI. The
 # same JSON is read by athena_bench_webui.py; these defaults remain a safe
