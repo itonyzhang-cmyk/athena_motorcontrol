@@ -53,6 +53,7 @@ void enter_menu_state(void);
 void enter_setup_state(void);
 void enter_motor_mode(void);
 void process_user_input(FSMStruct * fsmstate);
+int fsm_save_preferences(void);
 
 #ifdef __cplusplus
 }

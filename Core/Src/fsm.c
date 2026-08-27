@@ -102,7 +102,7 @@ void enter_motor_mode(void)
 
 #else
 
-static int save_preferences(void)
+int fsm_save_preferences(void)
 {
 	if (!preference_writer_open(&prefs)) {
 		return -1;
@@ -229,7 +229,7 @@ static MotorGateResult motor_gate_preflight(void)
 				 memcpy(&comm_encoder.offset_lut, comm_encoder_cal.lut_arr, sizeof(comm_encoder.offset_lut));
 				 memcpy(&ENCODER_LUT, comm_encoder_cal.lut_arr, sizeof(comm_encoder_cal.lut_arr));
 				 //for(int i = 0; i<128; i++){printf("%d\r\n", ENCODER_LUT[i]);}
-				 if (save_preferences() != 0) {
+				 if (fsm_save_preferences() != 0) {
 					 printf("Configuration save rejected; previous data preserved.\r\n");
 				 }
 				 update_fsm(fsmstate, ESC_CMD);
@@ -464,7 +464,7 @@ static MotorGateResult motor_gate_preflight(void)
 					ps_sample(&comm_encoder, DT);
 					int zero_count = comm_encoder.count;
 					M_ZERO = zero_count;
-					if (save_preferences() != 0) {
+					if (fsm_save_preferences() != 0) {
 						printf("Zero save rejected; previous data preserved.\r\n");
 					}
 					printf("\n\r  Saved new zero position:  %d\n\r\n\r", M_ZERO);
@@ -610,7 +610,7 @@ static MotorGateResult motor_gate_preflight(void)
 
 	 /* Write new settings to flash */
 
-	 if (save_preferences() != 0) {
+	 if (fsm_save_preferences() != 0) {
 		 printf("Configuration save rejected; previous data preserved.\r\n");
 	 }
 

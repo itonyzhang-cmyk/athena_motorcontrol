@@ -3,11 +3,13 @@
 #ifndef STM32F446
 
 #include <stdio.h>
+#include <string.h>
 #include "adc.h"
 #include "can.h"
 #include "config_store.h"
 #include "diag_protocol.h"
 #include "drv8323.h"
+#include "fsm.h"
 #include "gpio.h"
 #include "hw_config.h"
 #include "safety.h"
@@ -30,6 +32,107 @@ static volatile uint8_t debug_enabled_flag;
 static volatile uint8_t debug_write_index;
 static volatile uint8_t debug_count;
 static volatile uint32_t debug_dropped;
+
+/* CAN configuration transactions use four byte little-endian chunks.  The
+ * wire protocol only has an 8-bit argument, so writes are staged in RAM and
+ * committed atomically after the complete value set passes config validation. */
+static int config_stage_int[CONFIG_INT_WORDS];
+static float config_stage_float[CONFIG_FLOAT_WORDS];
+static uint8_t config_stage_ready;
+static uint8_t config_stage_dirty;
+
+static void config_stage_begin(void)
+{
+    if (config_stage_ready == 0U) {
+        memcpy(config_stage_int, __int_reg, sizeof(config_stage_int));
+        memcpy(config_stage_float, __float_reg, sizeof(config_stage_float));
+        config_stage_ready = 1U;
+    }
+}
+
+static uint8_t *config_stage_field(uint8_t field, uint32_t *size)
+{
+    config_stage_begin();
+    if (field <= 5U) {
+        *size = sizeof(int);
+        return (uint8_t *)&config_stage_int[field];
+    }
+    if (field <= 24U) {
+        *size = sizeof(float);
+        return (uint8_t *)&config_stage_float[field];
+    }
+    *size = 0U;
+    return NULL;
+}
+
+static uint32_t config_control_request(const DiagRequest *request, uint8_t *status)
+{
+    uint8_t field;
+    uint8_t offset;
+    uint32_t size;
+    uint8_t *bytes;
+
+    *status = DIAG_STATUS_OK;
+    if (request->page >= 0x20U && request->page < 0x84U) {
+        uint8_t relative = (uint8_t)(request->page - 0x20U);
+        field = (uint8_t)(relative / 4U);
+        offset = (uint8_t)(relative % 4U);
+        bytes = config_stage_field(field, &size);
+        if (bytes == NULL || offset >= size) {
+            *status = DIAG_STATUS_BAD_PAGE;
+            return 0U;
+        }
+        bytes[offset] = request->argument;
+        config_stage_dirty = 1U;
+        return ((uint32_t)field << 8) | offset;
+    }
+    if (request->page >= 0x90U && request->page < 0xF4U) {
+        uint8_t relative = (uint8_t)(request->page - 0x90U);
+        field = (uint8_t)(relative / 4U);
+        offset = (uint8_t)(relative % 4U);
+        bytes = config_stage_field(field, &size);
+        if (bytes == NULL || offset >= size) {
+            *status = DIAG_STATUS_BAD_PAGE;
+            return 0U;
+        }
+        return bytes[offset];
+    }
+    if (request->page == 0xF8U) {
+        config_stage_begin();
+        if (!config_payload_valid(config_stage_int, config_stage_float)) {
+            *status = DIAG_STATUS_BAD_PAGE;
+            return 0U;
+        }
+        return config_payload_crc32(config_stage_int, config_stage_float);
+    }
+    if (request->page == 0xF9U) {
+        if (state.state != MENU_MODE || state.next_state != MENU_MODE ||
+            safety_get_faults() != 0U || drv.fault != 0U || config_stage_dirty == 0U) {
+            *status = DIAG_STATUS_BUSY;
+            return 0U;
+        }
+        config_stage_begin();
+        if (!config_payload_valid(config_stage_int, config_stage_float)) {
+            *status = DIAG_STATUS_BAD_PAGE;
+            return 0U;
+        }
+        memcpy(__int_reg, config_stage_int, sizeof(config_stage_int));
+        memcpy(__float_reg, config_stage_float, sizeof(config_stage_float));
+        if (fsm_save_preferences() != 0) {
+            *status = DIAG_STATUS_UNAVAILABLE;
+            return 0U;
+        }
+        config_stage_dirty = 0U;
+        return 1U;
+    }
+    if (request->page == 0xFAU) {
+        config_stage_ready = 0U;
+        config_stage_dirty = 0U;
+        return 1U;
+    }
+    *status = DIAG_STATUS_BAD_PAGE;
+    return 0U;
+}
 
 void diagnostics_debug_clear(void);
 
@@ -423,6 +526,11 @@ static uint32_t handle_control_request(const DiagRequest *request, uint8_t *stat
 #else
     uint32_t value;
     /* page is a structured command, not an arbitrary UART byte stream. */
+    if ((request->page >= 0x20U && request->page < 0x84U) ||
+        (request->page >= 0x90U && request->page < 0xF4U) ||
+        request->page >= 0xF8U) {
+        return config_control_request(request, status);
+    }
     switch (request->page) {
     case 1U: /* ESC */
         update_fsm(&state, ESC_CMD);
