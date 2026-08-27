@@ -41,6 +41,38 @@ static float config_stage_float[CONFIG_FLOAT_WORDS];
 static uint8_t config_stage_ready;
 static uint8_t config_stage_dirty;
 
+typedef struct {
+    uint8_t is_float;
+    uint8_t index;
+} ConfigField;
+
+/* Stable CAN field IDs.  Do not derive these IDs from the backing array
+ * indexes: the legacy preference layout has unused/reserved slots. */
+static const ConfigField config_fields[] = {
+    {0U, 0U}, /* 0 PHASE_ORDER */
+    {0U, 1U}, /* 1 CAN_ID */
+    {0U, 2U}, /* 2 CAN_MASTER */
+    {0U, 3U}, /* 3 CAN_TIMEOUT */
+    {0U, 4U}, /* 4 M_ZERO */
+    {0U, 5U}, /* 5 E_ZERO */
+    {1U, 2U}, /* 6 I_BW */
+    {1U, 3U}, /* 7 I_MAX */
+    {1U, 9U}, /* 8 I_MAX_CONT */
+    {1U, 6U}, /* 9 I_FW_MAX */
+    {1U, 18U}, /* 10 I_CAL */
+    {1U, 10U}, /* 11 PPAIRS */
+    {1U, 14U}, /* 12 KT */
+    {1U, 17U}, /* 13 GR */
+    {1U, 19U}, /* 14 P_MIN */
+    {1U, 20U}, /* 15 P_MAX */
+    {1U, 21U}, /* 16 V_MIN */
+    {1U, 22U}, /* 17 V_MAX */
+    {1U, 23U}, /* 18 KP_MAX */
+    {1U, 24U}, /* 19 KD_MAX */
+    {1U, 8U}  /* 20 TEMP_MAX */
+};
+#define CONFIG_FIELD_COUNT ((uint8_t)(sizeof(config_fields) / sizeof(config_fields[0])))
+
 static void config_stage_begin(void)
 {
     if (config_stage_ready == 0U) {
@@ -53,16 +85,16 @@ static void config_stage_begin(void)
 static uint8_t *config_stage_field(uint8_t field, uint32_t *size)
 {
     config_stage_begin();
-    if (field <= 5U) {
-        *size = sizeof(int);
-        return (uint8_t *)&config_stage_int[field];
+    if (field >= CONFIG_FIELD_COUNT) {
+        *size = 0U;
+        return NULL;
     }
-    if (field <= 24U) {
+    if (config_fields[field].is_float != 0U) {
         *size = sizeof(float);
-        return (uint8_t *)&config_stage_float[field];
+        return (uint8_t *)&config_stage_float[config_fields[field].index];
     }
-    *size = 0U;
-    return NULL;
+    *size = sizeof(int);
+    return (uint8_t *)&config_stage_int[config_fields[field].index];
 }
 
 static uint32_t config_control_request(const DiagRequest *request, uint8_t *status)
@@ -73,7 +105,8 @@ static uint32_t config_control_request(const DiagRequest *request, uint8_t *stat
     uint8_t *bytes;
 
     *status = DIAG_STATUS_OK;
-    if (request->page >= 0x20U && request->page < 0x84U) {
+    if (request->page >= 0x20U &&
+        request->page < (uint8_t)(0x20U + CONFIG_FIELD_COUNT * 4U)) {
         uint8_t relative = (uint8_t)(request->page - 0x20U);
         field = (uint8_t)(relative / 4U);
         offset = (uint8_t)(relative % 4U);
@@ -86,7 +119,8 @@ static uint32_t config_control_request(const DiagRequest *request, uint8_t *stat
         config_stage_dirty = 1U;
         return ((uint32_t)field << 8) | offset;
     }
-    if (request->page >= 0x90U && request->page < 0xF4U) {
+    if (request->page >= 0x90U &&
+        request->page < (uint8_t)(0x90U + CONFIG_FIELD_COUNT * 4U)) {
         uint8_t relative = (uint8_t)(request->page - 0x90U);
         field = (uint8_t)(relative / 4U);
         offset = (uint8_t)(relative % 4U);
@@ -526,8 +560,10 @@ static uint32_t handle_control_request(const DiagRequest *request, uint8_t *stat
 #else
     uint32_t value;
     /* page is a structured command, not an arbitrary UART byte stream. */
-    if ((request->page >= 0x20U && request->page < 0x84U) ||
-        (request->page >= 0x90U && request->page < 0xF4U) ||
+    if ((request->page >= 0x20U &&
+         request->page < (uint8_t)(0x20U + CONFIG_FIELD_COUNT * 4U)) ||
+        (request->page >= 0x90U &&
+         request->page < (uint8_t)(0x90U + CONFIG_FIELD_COUNT * 4U)) ||
         request->page >= 0xF8U) {
         return config_control_request(request, status);
     }

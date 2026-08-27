@@ -1073,3 +1073,17 @@ Do not record secrets, access tokens, or private credentials here.
   Host tests, normal symbol audit, and flash-tool self-test passed. No
   controller Flash write, boot, CAN motor command, or motor movement was
   performed for this correction.
+
+### 2026-08-27 - CAN configuration migration
+
+- Commit `63fd1de` exposes transactional `fsm_save_preferences()` shared by
+  UART Setup and CAN configuration.
+- CAN diagnostic opcode `0x07` on ID `0x701` stages fields in RAM: writes use
+  `0x20 + field*4 + byte`, reads use `0x90 + field*4 + byte`; `0xF8` validates,
+  `0xF9` commits, and `0xFA` aborts. Commit requires menu state and no fault.
+- Stable field IDs 0..20 cover phase/CAN/zero settings and all current,
+  motor, position, velocity, gain, and temperature settings.
+- CLI supports `config get`, `config set FIELD VALUE [--commit]`, `config commit`,
+  and `config abort`; WebUI exposes the CAN path while retaining UART Setup.
+  Candidate build uses the project-local Arm GNU 15.3 toolchain and is not
+  flashed.

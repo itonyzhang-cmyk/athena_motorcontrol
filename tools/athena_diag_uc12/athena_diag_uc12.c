@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <getopt.h>
+#include <limits.h>
 #include <libusb.h>
 #include <math.h>
 #include <signal.h>
@@ -103,6 +104,7 @@ static const uint8_t drv_wake_pages[] = {
 static const uint8_t normal_drv_status_pages[] = {2, 3, 24, 25, 26, 27, 28, 29, 30, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122};
 
 static void print_response(const struct response *response);
+static const char *status_name(uint8_t status);
 
 static void on_signal(int signal_number)
 {
@@ -435,6 +437,97 @@ static int control(struct client *client, uint8_t page, uint8_t argument,
     uint8_t sequence = ++client->sequence;
     build_control_request(sequence, page, argument, request);
     return query_raw(client, request, OPCODE_CONTROL, page, response);
+}
+
+struct config_field_info {
+    const char *name;
+    int is_float;
+};
+
+static const struct config_field_info config_field_info[] = {
+    {"phase_order", 0}, {"can_id", 0}, {"can_master", 0},
+    {"can_timeout", 0}, {"m_zero", 0}, {"e_zero", 0},
+    {"i_bw", 1}, {"i_max", 1}, {"i_max_cont", 1}, {"i_fw_max", 1},
+    {"i_cal", 1}, {"ppairs", 1}, {"kt", 1}, {"gr", 1},
+    {"p_min", 1}, {"p_max", 1}, {"v_min", 1}, {"v_max", 1},
+    {"kp_max", 1}, {"kd_max", 1}, {"temp_max", 1}
+};
+#define CONFIG_FIELD_COUNT ((unsigned)(sizeof(config_field_info) / sizeof(config_field_info[0])))
+
+static int config_field_id(const char *name)
+{
+    unsigned i;
+    for (i = 0U; i < CONFIG_FIELD_COUNT; ++i)
+        if (!strcmp(name, config_field_info[i].name)) return (int)i;
+    return -1;
+}
+
+static int run_config_get(struct client *client)
+{
+    unsigned field, offset;
+    uint8_t bytes[CONFIG_FIELD_COUNT][4] = {{0}};
+    struct response response;
+    for (field = 0U; field < CONFIG_FIELD_COUNT; ++field) {
+        for (offset = 0U; offset < 4U; ++offset) {
+            if (control(client, (uint8_t)(0x90U + field * 4U + offset), 0U,
+                        &response) != 0 || response.status != 0U) return -1;
+            bytes[field][offset] = (uint8_t)response.payload;
+            sleep_ms(client->options.interval_ms);
+        }
+        if (config_field_info[field].is_float) {
+            float value;
+            uint32_t word = read_le32(bytes[field]);
+            memcpy(&value, &word, sizeof(value));
+            printf("config %-12s = %.9g\n", config_field_info[field].name, value);
+        } else {
+            printf("config %-12s = %d\n", config_field_info[field].name,
+                   (int32_t)read_le32(bytes[field]));
+        }
+    }
+    return 0;
+}
+
+static int run_config_write(struct client *client, const char *name,
+                            const char *text, int commit)
+{
+    int field = config_field_id(name);
+    uint8_t bytes[4];
+    struct response response;
+    unsigned offset;
+    char *end;
+    uint32_t word;
+    if (field < 0) {
+        fprintf(stderr, "Unknown config field '%s'.\n", name);
+        return -1;
+    }
+    if (config_field_info[field].is_float) {
+        float value = strtof(text, &end);
+        if (*text == '\0' || *end != '\0' || !isfinite(value)) return -1;
+        memcpy(&word, &value, sizeof(word));
+    } else {
+        long value = strtol(text, &end, 0);
+        if (*text == '\0' || *end != '\0' || value < INT32_MIN || value > INT32_MAX) return -1;
+        word = (uint32_t)(int32_t)value;
+    }
+    write_le32(bytes, word);
+    for (offset = 0U; offset < 4U; ++offset) {
+        if (control(client, (uint8_t)(0x20U + (unsigned)field * 4U + offset),
+                    bytes[offset], &response) != 0 || response.status != 0U) return -1;
+        sleep_ms(client->options.interval_ms);
+    }
+    if (control(client, 0xF8U, 0U, &response) != 0 || response.status != 0U) {
+        fprintf(stderr, "Staged configuration rejected (status=%s).\n", status_name(response.status));
+        return -1;
+    }
+    printf("staged config CRC32=0x%08X\n", response.payload);
+    if (commit) {
+        if (control(client, 0xF9U, 0U, &response) != 0 || response.status != 0U) {
+            fprintf(stderr, "Configuration commit rejected (status=%s).\n", status_name(response.status));
+            return -1;
+        }
+        puts("configuration committed; reboot may be required for peripheral settings");
+    }
+    return 0;
 }
 
 static const char *status_name(uint8_t status)
@@ -1271,6 +1364,7 @@ static void usage(const char *program)
             "          drv-wake-status\n"
             "          drv-status, control esc|motor|encoder|zero|abort|debug-on|debug-off|debug-clear|debug-status\n"
             "          control calibrate CURRENT_A, control debug-log INDEX\n"
+            "          config get | config set FIELD VALUE [--commit] | config commit | config abort\n"
             "Options:\n"
             "  --channel 0|1              UC12 CAN channel (default 0)\n"
             "  --timeout-ms N             response timeout (default 1000)\n"
@@ -1386,7 +1480,8 @@ int main(int argc, char **argv)
     if (do_self_test) return self_test();
     if (optind + 1 != argc &&
         !(optind + 4 == argc && !strcmp(argv[optind], "inject")) &&
-        !(optind + 2 <= argc && optind + 3 >= argc && !strcmp(argv[optind], "control"))) {
+        !(optind + 2 <= argc && optind + 3 >= argc && !strcmp(argv[optind], "control")) &&
+        !(optind + 2 <= argc && optind + 4 >= argc && !strcmp(argv[optind], "config"))) {
         usage(argv[0]);
         return 2;
     }
@@ -1396,7 +1491,8 @@ int main(int argc, char **argv)
         strcmp(command, "export") && strcmp(command, "inject") &&
         strcmp(command, "stop") && strcmp(command, "drv") &&
         strcmp(command, "drv-wake") && strcmp(command, "drv-wake-status") &&
-        strcmp(command, "drv-status") && strcmp(command, "control")) {
+        strcmp(command, "drv-status") && strcmp(command, "control") &&
+        strcmp(command, "config")) {
         usage(argv[0]);
         return 2;
     }
@@ -1419,6 +1515,13 @@ int main(int argc, char **argv)
             if (optind + 2 >= argc || parse_double_value(argv[optind + 2], &control_value) != 0) return 2;
             have_control_value = 1;
         }
+    } else if (!strcmp(command, "config")) {
+        if (optind + 1 >= argc) return 2;
+        if (!strcmp(argv[optind + 1], "set")) {
+            if (optind + 3 >= argc || optind + 5 < argc) return 2;
+        } else if (strcmp(argv[optind + 1], "get") &&
+                   strcmp(argv[optind + 1], "commit") &&
+                   strcmp(argv[optind + 1], "abort")) return 2;
     }
 
     signal(SIGINT, on_signal);
@@ -1451,6 +1554,19 @@ int main(int argc, char **argv)
         result = run_normal_drv_status(&client);
     else if (result == 0 && !strcmp(command, "control"))
         result = run_control(&client, control_name, control_value, have_control_value);
+    else if (result == 0 && !strcmp(command, "config")) {
+        const char *subcommand = argv[optind + 1];
+        if (!strcmp(subcommand, "get")) result = run_config_get(&client);
+        else if (!strcmp(subcommand, "set")) {
+            int commit = (optind + 4 < argc && !strcmp(argv[optind + 4], "--commit"));
+            result = run_config_write(&client, argv[optind + 2], argv[optind + 3], commit);
+        } else {
+            struct response response;
+            uint8_t page = !strcmp(subcommand, "commit") ? 0xF9U : 0xFAU;
+            result = (control(&client, page, 0U, &response) == 0 && response.status == 0U) ? 0 : -1;
+            print_response(&response);
+        }
+    }
     close_client(&client);
     return result == 0 ? 0 : 1;
 }

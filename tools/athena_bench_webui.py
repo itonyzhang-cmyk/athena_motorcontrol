@@ -214,6 +214,27 @@ class Runner:
             time.sleep(0.025)
         return True, f"已通过桥接请求 RAM 调试日志 #{index} 的时间戳、事件和 payload"
 
+    def send_config_set(self, field: int, value: float | int, commit: bool) -> tuple[bool, str]:
+        fields = ((0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1),
+                  (1, 2), (1, 3), (1, 9), (1, 6), (1, 18), (1, 10),
+                  (1, 14), (1, 17), (1, 19), (1, 20), (1, 21), (1, 22),
+                  (1, 23), (1, 24), (1, 8))
+        if not 0 <= field < len(fields): return False, "配置字段编号无效"
+        import struct
+        word = struct.unpack('<I', struct.pack('<f', float(value)))[0] if fields[field][0] else int(value) & 0xffffffff
+        for offset in range(4):
+            ok, msg = self.send_diag(0x07, 0x20 + field * 4 + offset, (word >> (8 * offset)) & 0xff)
+            if not ok: return False, msg
+            time.sleep(0.025)
+        ok, msg = self.send_diag(0x07, 0xF8)
+        if not ok: return False, msg
+        if commit:
+            time.sleep(0.025)
+            ok, msg = self.send_diag(0x07, 0xF9)
+            if not ok: return False, msg
+            return True, "配置已提交；涉及 CAN/外设初始化的参数需重启生效"
+        return True, "配置已暂存并请求校验；点击提交后才写入 Flash"
+
     def send_diag_action(self, name: str) -> tuple[bool, str]:
         if name == "ping":
             requests = [(0x00, 0, 0)]
@@ -1126,6 +1147,15 @@ class Handler(BaseHTTPRequestHandler):
             ok, message = RUNNER.send_debug_log(index)
             self._json(HTTPStatus.OK if ok else HTTPStatus.CONFLICT, {"ok": ok, "message": message})
             return
+        if parsed.path == "/api/config/set":
+            try:
+                field = int(body.get("field")); value = float(body.get("value")); commit = bool(body.get("commit"))
+            except (TypeError, ValueError):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "配置字段和值无效"})
+                return
+            ok, message = RUNNER.send_config_set(field, value, commit)
+            self._json(HTTPStatus.OK if ok else HTTPStatus.CONFLICT, {"ok": ok, "message": message})
+            return
         if parsed.path == "/api/bridge/start":
             ok, message = RUNNER.start_bridge()
         elif parsed.path == "/api/bridge/stop":
@@ -1281,7 +1311,6 @@ PAGE = PAGE.replace(
     '除单次受限使能外，MIT 测试会以 10 ms 周期持续发送控制帧并保持反馈，1 秒后自动停止。',
 ).replace(
     '</section><p class="panel">',
-    '<article class="panel tab-panel" data-tab="mit"><h2>自定义 MIT 持续会话</h2><p>p 位置目标（rad，-12.5..12.5）；v 速度目标（rad/s，-65..65）；Kp 位置刚度（0..500）；Kd 速度阻尼（0..5）；t 前馈力矩（Nm，-40..40）。持续时间默认 10 秒，最多 300 秒；可随时点击停止。</p><p><input id="mitP" type="number" step="0.001" placeholder="p 位置 rad"><input id="mitV" type="number" step="0.001" placeholder="v 速度 rad/s"><input id="mitKp" type="number" step="0.1" placeholder="Kp"><input id="mitKd" type="number" step="0.01" placeholder="Kd"><input id="mitT" type="number" step="0.01" placeholder="t 前馈力矩 Nm"><input id="mitDuration" type="number" min="0.1" max="300" step="0.1" value="10" placeholder="持续时间 s"></p><button id="mitCustom">开始 MIT 持续会话</button> <button class="danger" id="mitStop">停止 MIT 会话</button></article></section><p class="panel">',
 ).replace(
     "document.querySelectorAll('[data-action]').forEach",
     "document.querySelector('#mitCustom').onclick=()=>api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:document.querySelector('#mitP').value,velocity:document.querySelector('#mitV').value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,torque:document.querySelector('#mitT').value,duration:document.querySelector('#mitDuration').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#mitStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelectorAll('[data-action]').forEach",
@@ -1311,7 +1340,7 @@ PAGE = PAGE.replace(
 )
 PAGE = PAGE.replace(
     '</article></section><p class="panel">',
-    '</article>' + _trajectory_panel + '</section><p class="panel">',
+    '</article>' + _trajectory_panel + '<article class="panel tab-panel" data-tab="readonly"><h2>CAN 配置（兼容 UART Setup）</h2><p class="muted">配置通过 CAN 暂存；勾选提交后写入 Flash。UART Setup 仍可用，两者共用同一校验和事务保存。</p><p><select id="configField"><option value="6">I_BW</option><option value="7">I_MAX</option><option value="8">I_MAX_CONT</option><option value="9">I_FW_MAX</option><option value="10">I_CAL</option><option value="11">PPAIRS</option><option value="12">KT</option><option value="13">GR</option><option value="14">P_MIN</option><option value="15">P_MAX</option><option value="16">V_MIN</option><option value="17">V_MAX</option><option value="18">KP_MAX</option><option value="19">KD_MAX</option><option value="20">TEMP_MAX</option><option value="0">PHASE_ORDER</option><option value="1">CAN_ID</option><option value="2">CAN_MASTER</option><option value="3">CAN_TIMEOUT</option><option value="4">M_ZERO</option><option value="5">E_ZERO</option></select><input id="configValue" type="number" step="any" placeholder="配置值"><label class="check"><input id="configCommit" type="checkbox">提交到 Flash</label><button id="configSet">通过 CAN 写入配置</button></p></article></section><p class="panel">',
     1,
 )
 # The MIT markup is inserted by an earlier chained replacement; tolerate
@@ -1341,6 +1370,7 @@ const syncTrajectoryMode=()=>{const position=trajectoryMode.value==='position';d
 trajectoryMode.onchange=syncTrajectoryMode;syncTrajectoryMode();
 document.querySelector('#trajectoryStart').onclick=()=>api('/api/bridge/trajectory',{physical_ready:document.querySelector('#enableReady').checked,mode:trajectoryMode.value,target:document.querySelector('#trajectoryTarget').value,speed_limit:document.querySelector('#trajectorySpeedLimit').value,velocity:document.querySelector('#trajectoryVelocity').value,duration:document.querySelector('#trajectoryDuration').value,hold:document.querySelector('#trajectoryHold').value,kp:document.querySelector('#trajectoryKp').value,kd:document.querySelector('#trajectoryKd').value,torque:document.querySelector('#trajectoryTorque').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
 document.querySelector('#trajectoryStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
+document.querySelector('#configSet').onclick=()=>api('/api/config/set',{field:document.querySelector('#configField').value,value:document.querySelector('#configValue').value,commit:document.querySelector('#configCommit').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
 </script></body></html>''',
     1,
 )
