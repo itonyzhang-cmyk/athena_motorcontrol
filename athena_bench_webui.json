@@ -1,4 +1,4 @@
 {
-  "normal_sha": "18d4e83941d75c257799fad664cfd2b83eca7db55575dc4591dd27b73ffe2fd4",
-  "normal_image": "artifacts/athena_vbus_fault_evidence_20260827/motorcontrol.bin"
+  "normal_sha": "92d0e125a27715c034da19667ea8eb728ffd01fdc8910d65526d14a283acbe60",
+  "normal_image": "artifacts/athena_host_trajectory_control_20260827/motorcontrol.bin"
 }

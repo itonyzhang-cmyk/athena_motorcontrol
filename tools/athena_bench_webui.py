@@ -57,6 +57,7 @@ MIT_KEEPALIVE_INTERVAL_S = 0.01  # must stay below the firmware CAN watchdog (~3
 PTY_WRITE_TIMEOUT_S = 0.25
 MIT_DEFAULT_DURATION_S = 10.0
 MIT_MAX_DURATION_S = 300.0
+TRAJECTORY_MAX_SPEED_RAD_S = 20.0
 FEEDBACK_RE = re.compile(r"TRACE CAN RX t000#([0-9A-Fa-f]{12})")
 TX_RE = re.compile(r"TRACE CAN TX t001#([0-9A-Fa-f]{16})")
 
@@ -281,6 +282,124 @@ class Runner:
             ok, message = self.mit_custom_once(values)
             self.log(message)
         finally:
+            with self.lock:
+                self.enable_active = False
+                self.mit_thread = None
+
+    def start_trajectory_session(self, values: dict[str, Any]) -> tuple[bool, str]:
+        """Start the host-owned trajectory producer after a successful preflight."""
+        try:
+            mode = str(values.get("mode", "position"))
+            kp = float(values.get("kp"))
+            kd = float(values.get("kd"))
+            torque = float(values.get("torque", 0.0))
+            duration = float(values.get("duration"))
+            hold = float(values.get("hold", 0.0))
+        except (TypeError, ValueError):
+            return False, "轨迹参数必须填写数字"
+        if mode not in ("position", "velocity"):
+            return False, "未知轨迹模式"
+        for name, value, low, high in (
+                ("Kp", kp, 0.0, 500.0), ("Kd", kd, 0.0, 5.0),
+                ("前馈力矩", torque, -40.0, 40.0),
+                ("执行时间", duration, 0.1, MIT_MAX_DURATION_S),
+                ("保持时间", hold, 0.0, MIT_MAX_DURATION_S)):
+            if not math.isfinite(value) or not low <= value <= high:
+                return False, f"{name} 超出允许范围 {low:g}..{high:g}"
+        try:
+            if mode == "position":
+                target = float(values.get("target"))
+                speed_limit = float(values.get("speed_limit"))
+                if not -12.5 <= target <= 12.5 or not math.isfinite(target):
+                    return False, "目标位置超出 MIT 协议范围 -12.5..12.5 rad"
+                if not 0.05 <= speed_limit <= TRAJECTORY_MAX_SPEED_RAD_S or not math.isfinite(speed_limit):
+                    return False, f"速度上限必须在 0.05..{TRAJECTORY_MAX_SPEED_RAD_S:g} rad/s"
+            else:
+                velocity = float(values.get("velocity"))
+                if not 0.05 <= abs(velocity) <= TRAJECTORY_MAX_SPEED_RAD_S or not math.isfinite(velocity):
+                    return False, f"速度必须在 +/-0.05..{TRAJECTORY_MAX_SPEED_RAD_S:g} rad/s"
+        except (TypeError, ValueError):
+            return False, "轨迹目标或速度必须填写数字"
+        with self.lock:
+            tty = self.bridge_tty
+            live = self.bridge is not None and self.bridge.poll() is None
+            start = self.last_feedback_position_rad
+            if self.enable_active or self.mit_check_active:
+                return False, "已有 CAN/MIT 动作运行中"
+            if not live or not tty:
+                return False, "请先启动 CAN0 trace"
+            if start is None:
+                return False, "未取得当前位置；请重新执行动作前置检查"
+            if mode == "position":
+                minimum_duration = 1.5 * abs(target - start) / speed_limit
+                if duration < minimum_duration:
+                    return False, (f"执行时间过短：该 S 曲线至少需要 {minimum_duration:.3f} 秒，"
+                                   f"才能不超过 {speed_limit:g} rad/s")
+            else:
+                target = start + velocity * duration
+                if not -12.5 <= target <= 12.5:
+                    return False, "恒速轨迹终点将超出 MIT 位置范围 -12.5..12.5 rad"
+            self.enable_active = True
+            self.mit_stop_event.clear()
+            self.mit_session_frames = 0
+            request = {"mode": mode, "kp": kp, "kd": kd, "torque": torque,
+                       "duration": duration, "hold": hold, "start": start,
+                       "target": target}
+            if mode == "position":
+                request["speed_limit"] = speed_limit
+            else:
+                request["velocity"] = velocity
+            self.mit_thread = threading.Thread(
+                target=self._trajectory_session_worker, args=(request,), daemon=True)
+            self.mit_thread.start()
+        return True, "上位机轨迹会话已启动"
+
+    def _trajectory_session_worker(self, request: dict[str, float | str]) -> None:
+        mode = str(request["mode"])
+        start = float(request["start"])
+        target = float(request["target"])
+        duration = float(request["duration"])
+        hold = float(request["hold"])
+        kp, kd, torque = (float(request[name]) for name in ("kp", "kd", "torque"))
+        with self.lock:
+            tty = self.bridge_tty
+        try:
+            if not tty:
+                self.log("轨迹会话取消：CAN0 Trace 已停止")
+                return
+            with self._open_serial(tty) as serial_port:
+                serial_port.write(ENABLE_FRAME)
+                self.log("S 曲线轨迹: " if mode == "position" else "恒速轨迹: ")
+                self.log(f"起点={start:.4f} rad, 终点={target:.4f} rad, 执行={duration:g} s, "
+                         f"Kp={kp:g}, Kd={kd:g}, t_ff={torque:g}")
+                started = time.monotonic()
+                while not self.mit_stop_event.is_set():
+                    elapsed = time.monotonic() - started
+                    if elapsed >= duration:
+                        break
+                    if mode == "position":
+                        u = max(0.0, min(1.0, elapsed / duration))
+                        blend = u * u * (3.0 - 2.0 * u)
+                        position = start + (target - start) * blend
+                        velocity = (target - start) * 6.0 * u * (1.0 - u) / duration
+                    else:
+                        velocity = float(request["velocity"])
+                        position = start + velocity * elapsed
+                    serial_port.write(format_slcan(1, encode_command(position, velocity, kp, kd, torque)))
+                    self.mit_session_frames += 1
+                    time.sleep(MIT_KEEPALIVE_INTERVAL_S)
+                hold_deadline = time.monotonic() + hold
+                while time.monotonic() < hold_deadline and not self.mit_stop_event.is_set():
+                    serial_port.write(format_slcan(1, encode_command(target, 0.0, kp, kd, torque)))
+                    self.mit_session_frames += 1
+                    time.sleep(MIT_KEEPALIVE_INTERVAL_S)
+                serial_port.write(STOP_FRAME)
+                self.log("轨迹会话已发送停止帧（0xFD）")
+        except (OSError, TimeoutError, ValueError) as exc:
+            self.log(f"轨迹会话写入失败: {exc}")
+        finally:
+            stopped = self.mit_stop_event.is_set()
+            self.log("轨迹会话结束；" + ("用户已停止" if stopped else "达到设定执行/保持时间"))
             with self.lock:
                 self.enable_active = False
                 self.mit_thread = None
@@ -965,7 +1084,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/bridge/feedforward-low", "/api/bridge/feedforward-medium",
             "/api/bridge/feedforward-high", "/api/bridge/position-step",
             "/api/bridge/position-step-stiff", "/api/bridge/position-step-custom",
-            "/api/bridge/mit-custom",
+            "/api/bridge/mit-custom", "/api/bridge/trajectory",
         }
         if parsed.path in control_paths and body.get("physical_ready"):
             ready, check_message = RUNNER.preflight_control()
@@ -1070,6 +1189,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "请确认机械运动空间、限流和断电路径均已就绪"})
                 return
             ok, message = RUNNER.start_mit_session(body)
+        elif parsed.path == "/api/bridge/trajectory":
+            if not body.get("physical_ready"):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "请确认机械运动空间、限流和断电路径均已就绪"})
+                return
+            ok, message = RUNNER.start_trajectory_session(body)
         elif parsed.path == "/api/logs/clear":
             RUNNER.clear_logs()
             self._json(HTTPStatus.OK, {"ok": True, "message": "已清除当前实时日志"})
@@ -1174,6 +1298,52 @@ PAGE = PAGE.replace(
 # panel and click binding from the rendered page.
 PAGE = re.sub(r'<p class="panel"><label>Kp（位置阶跃，0-100）：.*?</p>', '', PAGE, flags=re.S)
 PAGE = re.sub(r"document\.querySelector\('#positionStepCustom'\)\.onclick=.*?;\n", '', PAGE)
+
+# Upper-layer motion planning is deliberately separate from the raw five
+# parameter MIT panel.  The raw panel remains useful for protocol/FOC checks;
+# this panel owns the time-varying position and velocity references needed for
+# repeatable motion tests.
+_trajectory_panel = r'''<article class="panel tab-panel" data-tab="trajectory"><h2>上位机轨迹控制</h2><p>位置模式在上位机以 10 ms 周期生成三次 S 曲线的 p(t)/v(t)；恒速模式以给定速度推进位置参考。两种模式都在到达后用 v=0 保持目标，直到保持时间结束或点击停止。固件不再夹紧位置误差。</p><p><select id="trajectoryMode" aria-label="轨迹模式"><option value="position">S 曲线到目标位置</option><option value="velocity">恒速前进</option></select></p><p id="trajectoryPositionInputs"><input id="trajectoryTarget" type="number" step="0.001" placeholder="目标位置 rad (-12.5..12.5)"><input id="trajectorySpeedLimit" type="number" min="0.05" max="20" step="0.05" value="2" placeholder="最大速度 rad/s"></p><p id="trajectoryVelocityInputs" hidden><input id="trajectoryVelocity" type="number" min="-20" max="20" step="0.05" value="1" placeholder="速度 rad/s（正负决定方向）"></p><p><input id="trajectoryDuration" type="number" min="0.1" max="300" step="0.1" value="2" placeholder="执行时间 s"><input id="trajectoryHold" type="number" min="0" max="300" step="0.1" value="2" placeholder="到达后保持 s（0 为不保持）"><input id="trajectoryKp" type="number" min="0" max="500" step="0.1" value="20" placeholder="Kp"><input id="trajectoryKd" type="number" min="0" max="5" step="0.01" value="1" placeholder="Kd"><input id="trajectoryTorque" type="number" min="-40" max="40" step="0.01" value="0" placeholder="前馈力矩 Nm"></p><p class="muted">S 曲线自动检查峰值速度：最短执行时间 = 1.5 × 位移 / 速度上限。当前位置由动作前置检查实时取得。</p><button id="trajectoryStart">开始轨迹</button> <button class="danger" id="trajectoryStop">停止轨迹</button></article>'''
+PAGE = PAGE.replace(
+    '<button class="tab" data-tab-select="mit">自定义 MIT</button>',
+    '<button class="tab" data-tab-select="mit">自定义 MIT</button><button class="tab" data-tab-select="trajectory">轨迹控制</button>',
+    1,
+)
+PAGE = PAGE.replace(
+    '</article></section><p class="panel">',
+    '</article>' + _trajectory_panel + '</section><p class="panel">',
+    1,
+)
+# The MIT markup is inserted by an earlier chained replacement; tolerate
+# either surrounding shape and ensure the trajectory panel is present exactly
+# once in the final rendered page.
+if '上位机轨迹控制' not in PAGE:
+    PAGE = PAGE.replace(
+        '</article></section><div class="log-head">',
+        _trajectory_panel + '</article></section><div class="log-head">',
+        1,
+    )
+PAGE = PAGE.replace(
+    'input{width:100%;',
+    'input,select{width:100%;',
+    1,
+)
+PAGE = PAGE.replace(
+    "'positionStepStiff','positionStepCustom','mitCustom']",
+    "'positionStepStiff','positionStepCustom','mitCustom','trajectoryStart']",
+    1,
+)
+PAGE = PAGE.replace(
+    '</body></html>',
+    r'''<script>
+const trajectoryMode=document.querySelector('#trajectoryMode');
+const syncTrajectoryMode=()=>{const position=trajectoryMode.value==='position';document.querySelector('#trajectoryPositionInputs').hidden=!position;document.querySelector('#trajectoryVelocityInputs').hidden=position};
+trajectoryMode.onchange=syncTrajectoryMode;syncTrajectoryMode();
+document.querySelector('#trajectoryStart').onclick=()=>api('/api/bridge/trajectory',{physical_ready:document.querySelector('#enableReady').checked,mode:trajectoryMode.value,target:document.querySelector('#trajectoryTarget').value,speed_limit:document.querySelector('#trajectorySpeedLimit').value,velocity:document.querySelector('#trajectoryVelocity').value,duration:document.querySelector('#trajectoryDuration').value,hold:document.querySelector('#trajectoryHold').value,kp:document.querySelector('#trajectoryKp').value,kd:document.querySelector('#trajectoryKd').value,torque:document.querySelector('#trajectoryTorque').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
+document.querySelector('#trajectoryStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
+</script></body></html>''',
+    1,
+)
 
 # Diagnostics are sent through the bridge-owned USB session; keep the rendered
 # command hints consistent with that single-owner architecture.
