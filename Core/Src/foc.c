@@ -403,20 +403,18 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
 
 
 void torque_control(ControllerStruct *controller){
-	/* MIT position commands can otherwise turn a large position error into an
-	 * instantaneous current step and trip the DRV8323 before the loop has a
-	 * chance to settle.  Follow the target in bounded position increments and
-	 * ramp the current ceiling from the calibration-scale 5 A value. */
+	/* The host owns position trajectory generation and sends the instantaneous
+	 * p/v target. Do not clamp position error here: doing so silently turns a
+	 * large commanded move into a fixed low-torque mode. Current-reference slew
+	 * and I_MAX remain the firmware safety boundaries. */
 	const float position_error = controller->p_des - controller->theta_mech;
-	const float bounded_error = fast_fmaxf(fast_fminf(position_error,
-		POSITION_ERROR_LIMIT_RAD), -POSITION_ERROR_LIMIT_RAD);
 	const float startup_current = 5.0f;
 	const uint32_t ramp_cycles = 9000U; /* 300 ms at the 30 kHz control loop */
 	const float ramp = controller->torque_ramp_cycles >= ramp_cycles ? 1.0f :
 		(float)controller->torque_ramp_cycles / (float)ramp_cycles;
 	const float ramped_limit = startup_current +
 		(controller->i_max - startup_current) * ramp;
-	float torque_des = controller->kp * bounded_error + controller->t_ff +
+	float torque_des = controller->kp * position_error + controller->t_ff +
 		controller->kd * (controller->v_des - controller->dtheta_mech);
 	controller->i_q_des = fast_fmaxf(fast_fminf(torque_des/(KT*GR), ramped_limit), -ramped_limit);
 	controller->i_d_des = 0.0f;
