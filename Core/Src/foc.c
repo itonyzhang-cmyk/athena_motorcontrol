@@ -408,7 +408,8 @@ void torque_control(ControllerStruct *controller){
 	 * chance to settle.  Follow the target in bounded position increments and
 	 * ramp the current ceiling from the calibration-scale 5 A value. */
 	const float position_error = controller->p_des - controller->theta_mech;
-	const float bounded_error = fast_fmaxf(fast_fminf(position_error, 0.5f), -0.5f);
+	const float bounded_error = fast_fmaxf(fast_fminf(position_error,
+		POSITION_ERROR_LIMIT_RAD), -POSITION_ERROR_LIMIT_RAD);
 	const float startup_current = 5.0f;
 	const uint32_t ramp_cycles = 9000U; /* 300 ms at the 30 kHz control loop */
 	const float ramp = controller->torque_ramp_cycles >= ramp_cycles ? 1.0f :

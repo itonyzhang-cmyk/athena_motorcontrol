@@ -62,6 +62,9 @@
 #define CURRENT_FILT_ALPHA	.1f	// 1st order d/q current filter (not used in control)
 #define VBUS_FILT_ALPHA		.1f		// 1st order bus voltage filter
 #define CURRENT_REF_SLEW_A_PER_CYCLE 0.01f // Limit d/q reference steps seen by DRV8323
+/* Normal MIT position-error contribution is limited to 0.5 degree per
+ * control update.  This is an angle, not the former 0.5 rad startup guard. */
+#define POSITION_ERROR_LIMIT_RAD 0.00872664626f
 
 #define D_INT_LIM V_BUS/(K_D*KI_D)  // Amps*samples
 #define Q_INT_LIM V_BUS/(K_Q*KI_Q)  // Amps*samples
@@ -127,6 +130,9 @@
 #define CURRENT_FILT_ALPHA	.1f	    // 1st order d/q current filter (not used in control)
 #define VBUS_FILT_ALPHA		.1f		// 1st order bus voltage filter
 #define CURRENT_REF_SLEW_A_PER_CYCLE 0.01f // Limit d/q reference steps seen by DRV8323
+/* Normal MIT position-error contribution is limited to 0.5 degree per
+ * control update.  This is an angle, not the former 0.5 rad startup guard. */
+#define POSITION_ERROR_LIMIT_RAD 0.00872664626f
 
 #define D_INT_LIM V_BUS/(K_D*KI_D)  // Amps*samples
 #define Q_INT_LIM V_BUS/(K_Q*KI_Q)  // Amps*samples
