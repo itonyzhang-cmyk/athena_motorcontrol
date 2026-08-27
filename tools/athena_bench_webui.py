@@ -1320,7 +1320,7 @@ PAGE = PAGE.replace(
 if '上位机轨迹控制' not in PAGE:
     PAGE = PAGE.replace(
         '</article></section><div class="log-head">',
-        _trajectory_panel + '</article></section><div class="log-head">',
+        '</article>' + _trajectory_panel + '</section><div class="log-head">',
         1,
     )
 PAGE = PAGE.replace(
