@@ -29,6 +29,13 @@ FWDGT_SELFTEST ?= 0
 # diagnostic CRC parsing to prove the RX interrupt and TX path independently.
 CAN_PROBE ?= 0
 
+ifeq ($(FWDGT_SELFTEST), 1)
+# The watchdog acceptance image is intentionally a normal-profile derivative
+# that stops before application startup; it cannot share SAFE or inject paths.
+SAFE_BRINGUP := 0
+BRINGUP_INJECT := 0
+endif
+
 ifeq ($(BRINGUP_INJECT), 1)
 override SAFE_BRINGUP := 0
 override BUILD_PROFILE := inject
@@ -231,6 +238,9 @@ endif
 ifeq ($(BRINGUP_INJECT), 1)
 all: verify-inject
 endif
+ifeq ($(FWDGT_SELFTEST), 1)
+all: verify-fwdgt
+endif
 
 host-test:
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -ICore/Inc \
@@ -276,7 +286,10 @@ verify-safe: $(OUTPUT_DIR)/$(TARGET).elf
 verify-inject: $(OUTPUT_DIR)/$(TARGET).elf
 	sh tools/verify_inject_image.sh $(NM) $<
 
-.PHONY: all host-test host-inject-test host-tools-test host-app-test host-mit-test host-can-topology-test verify-safe verify-inject verify-normal clean
+verify-fwdgt: $(OUTPUT_DIR)/$(TARGET).elf
+	sh tools/verify_fwdgt_selftest_image.sh $(NM) $<
+
+.PHONY: all host-test host-inject-test host-tools-test host-app-test host-mit-test host-can-topology-test verify-safe verify-inject verify-normal verify-fwdgt clean
 
 
 #######################################

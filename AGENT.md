@@ -167,6 +167,37 @@ Do not record secrets, access tokens, or private credentials here.
 
 ## Session Log
 
+### 2026-08-29 - FWDGT self-test isolation correction and motion checks
+
+- Review found that the original `FWDGT_SELFTEST` branch was entered after
+  USART, TIMER0, CAN0, both SPI units, both ADC units, and EXTI initialization.
+  Those calls did not enter FOC/FSM or send a CAN frame, but violated the
+  intended minimal-isolation boundary. The branch now runs immediately after
+  RCU and board-safe GPIO initialization, before all of those peripherals.
+- Added `verify-fwdgt` / `tools/verify_fwdgt_selftest_image.sh`. It requires
+  only `MX_RCU_Init`, `MX_GPIO_Init`, and `runtime_watchdog_init` in `main()`
+  and rejects UART, timer, CAN, SPI, ADC, EXTI, DRV, and FSM startup calls.
+  `make FWDGT_SELFTEST=1 ... all` and the full host regression suite pass.
+  Corrected self-test image SHA-256:
+  `1983291343cd27cfa9ebf3b6b40688764f7f97eaa632c36daf4800b760b0cd34`.
+  This corrected image is build/audit-verified but has not yet replaced the
+  already hardware-proven earlier self-test image.
+- On the remotely running audited normal image
+  `86e4705c191c5c735881b74e8e1a9cb2f34a8ce44d72087a24d8730366539789`, a
+  `-0.10 rad/s`, 3 s velocity session sent 151 frames with a 29.9 ms maximum
+  frame gap and sent `0xFD` on completion. A 3 s S-curve position session
+  from 3.7430 to 4.0000 rad (`Kp=3`, `Kd=0.5`) ended at host logical position
+  3.9941 rad. A 10 s `-0.05 rad/s` session was manually stopped after 2 s;
+  the host recorded `0xFD`, 103 frames, a 29.9 ms maximum gap, and an idle
+  (`enable_active=false`) state afterward.
+- Post-motion read-only diagnostics show zero DRV fault status and the known
+  DCR/CSACR/OCPCR values. Read-only configuration reports `GR=1` and
+  `CAN_TIMEOUT=1000`; this board is therefore currently configured in
+  motor-side, not 9:1 output-side, units. The velocity feedback/host logical
+  displacement was inconsistent with the low requested speeds, so do not use
+  these sessions as output-axis velocity acceptance until the gear-ratio
+  configuration and velocity-scale evidence are reconciled.
+
 ### 2026-08-29 - GD32F303 FWDGT hardware reset verification
 
 - Target controller UID: `39305137-14303434-47457A29`. The FWDGT-only

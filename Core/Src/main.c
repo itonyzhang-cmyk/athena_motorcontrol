@@ -182,6 +182,16 @@ int main(void)
 
   MX_RCU_Init();
   MX_GPIO_Init();
+#if defined(FWDGT_SELFTEST)
+  /* FWDGT acceptance needs only clocks and the board-safe GPIO state. Keep
+   * every peripheral capable of bus activity or power-stage setup unstarted.
+   * No foreground heartbeat is issued and no motor path is entered. */
+  if (runtime_watchdog_init() != 0) {
+    safety_force_outputs_off(SAFETY_FAULT_WATCHDOG_CONFIG);
+  }
+  while (1) {
+  }
+#endif
   MX_USART1_Init();
   MX_TIM0_Init();
   MX_CAN0_Init();
@@ -194,16 +204,6 @@ int main(void)
   inject_init();
 #elif defined(SAFE_BRINGUP)
   safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
-#endif
-#if defined(FWDGT_SELFTEST)
-  /* FWDGT hardware acceptance starts immediately after the board-safe GPIO
-   * setup, before any encoder, ADC, DRV, CAN, or FSM startup can delay the
-   * test. No foreground heartbeat is issued and no motor path is entered. */
-  if (runtime_watchdog_init() != 0) {
-    safety_force_outputs_off(SAFETY_FAULT_WATCHDOG_CONFIG);
-  }
-  while (1) {
-  }
 #endif
 #endif
   /* USER CODE BEGIN 2 */
