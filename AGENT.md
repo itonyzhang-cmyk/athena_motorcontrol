@@ -167,6 +167,31 @@ Do not record secrets, access tokens, or private credentials here.
 
 ## Session Log
 
+### 2026-08-29 - GD32F303 FWDGT hardware reset verification
+
+- Target controller UID: `39305137-14303434-47457A29`. The FWDGT-only
+  acceptance image was written with page-by-page verification and a full-image
+  readback match; image SHA-256:
+  `c2647455a9d273d49a5e2cf2ce4e990dc2b6d1227a6029b8c6f5c7080d2ae0c7`.
+- This image arms FWDGT immediately after safe GPIO initialization, before
+  ADC, encoder, DRV, CAN, FSM, or any motor-control path. It sends no CAN
+  frames, enters no motion path, and deliberately does not issue a foreground
+  watchdog heartbeat.
+- An `init; halt` attachment 0.5 s after start observed `FWDGT_PSC=0x00000006`,
+  `FWDGT_RLD=0x000001FF`, and `FWDGT_STAT=0x00000000`. After a fresh run for
+  8 s, a non-resetting attachment observed `RCU_RSTSCK=0x3C000000` with
+  `FWDGTRSTF=1`. Therefore the front-end-stall to GD32 hardware-reset path is
+  verified on this board.
+- Restoration of the audited normal bench image
+  `86e4705c191c5c735881b74e8e1a9cb2f34a8ce44d72087a24d8730366539789` was
+  restored remotely using the hash-locked `flash-normal` procedure. Its full
+  readback completed with `PASS: audited normal application programmed and
+  read back exactly.` The image was then started with `boot-normal`.
+- A read-only WebUI status check confirmed the same `normal_sha`,
+  `mit_active=false`, and `enable_active=false`. No motion command was sent
+  after the restore. The bridge's historical trajectory log is not evidence of
+  a post-restore motion command.
+
 ### 2026-08-28 - audited unflashed live-CSA candidate
 
 - Rebuilt the normal candidate after synchronizing the default and `-1` fallback
