@@ -61,6 +61,7 @@ override OUTPUT_DIR := $(BUILD_DIR)/$(BUILD_PROFILE)
 C_SOURCES =  \
 Core/Src/main.c \
 Core/Src/safety.c \
+Core/Src/ivt_protection.c \
 Core/Src/gpio.c \
 Core/Src/adc.c \
 Core/Src/can.c \
@@ -84,6 +85,7 @@ Core/Src/motor_gate.c \
 Core/Src/syscalls.c \
 Core/Src/sysmem.c \
 Core/Src/systick.c \
+Core/Src/runtime_watchdog.c \
 Core/Src/gd32f30x_it.c \
 Firmware/GD32F30x_standard_peripheral/Source/gd32f30x_adc.c \
 Firmware/GD32F30x_standard_peripheral/Source/gd32f30x_bkp.c \
@@ -243,14 +245,21 @@ host-tools-test:
 
 host-app-test:
 	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -ICore/Inc \
-		Core/Src/motor_gate.c Core/Src/config_store.c Core/Src/normal_can_protocol.c \
+		Core/Src/motor_gate.c Core/Src/config_store.c Core/Src/ivt_protection.c Core/Src/normal_can_protocol.c \
 		Core/Src/diag_protocol.c \
-		tests/motor_gate_test.c tests/config_store_test.c tests/normal_can_protocol_test.c \
+		tests/motor_gate_test.c tests/config_store_test.c tests/ivt_protection_test.c tests/normal_can_protocol_test.c \
 		-o /tmp/athena_motor_gate_test
 	/tmp/athena_motor_gate_test
+	$(HOST_CC) -std=c11 -Wall -Wextra -Werror -ICore/Inc \
+		Core/Src/runtime_watchdog.c tests/runtime_watchdog_test.c \
+		-o /tmp/athena_runtime_watchdog_test
+	/tmp/athena_runtime_watchdog_test
 
 host-mit-test:
 	PYTHONPATH=. python3 -m unittest -v tests/mit_codec_test.py
+
+host-can-topology-test:
+	PYTHONPATH=. python3 -m unittest -v tests/can_topology_test.py
 
 verify-normal: $(OUTPUT_DIR)/$(TARGET).elf
 	sh tools/verify_normal_image.sh $(NM) $<
@@ -261,7 +270,7 @@ verify-safe: $(OUTPUT_DIR)/$(TARGET).elf
 verify-inject: $(OUTPUT_DIR)/$(TARGET).elf
 	sh tools/verify_inject_image.sh $(NM) $<
 
-.PHONY: all host-test host-inject-test host-tools-test host-app-test verify-safe verify-inject verify-normal clean
+.PHONY: all host-test host-inject-test host-tools-test host-app-test host-mit-test host-can-topology-test verify-safe verify-inject verify-normal clean
 
 
 #######################################

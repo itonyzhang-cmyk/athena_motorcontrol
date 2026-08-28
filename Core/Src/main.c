@@ -60,6 +60,7 @@
 #include "calibration.h"
 #include "safety.h"
 #include "diagnostics.h"
+#include "runtime_watchdog.h"
 #ifdef BRINGUP_INJECT
 #include "inject.h"
 #endif
@@ -350,6 +351,7 @@ int main(void)
   state.state = MENU_MODE;
   state.next_state = MENU_MODE;
   state.ready = 1;
+
   state.rearm_pending = 0U;
   state.rearm_wait_cycles = 0U;
 
@@ -413,11 +415,22 @@ int main(void)
   state.next_state = MENU_MODE;
   state.ready = 1;
 
+  /* TIMER0 is now enabled and its NVIC line is live.  Arm the independent
+   * watchdog only at this final startup boundary: its reload path is gated by
+   * progress made by the foreground loop and serviced from TIMER0.  Starting
+   * it earlier would make long peripheral/calibration startup work look like a
+   * failed runtime loop. */
+  if (runtime_watchdog_init() != 0) {
+    safety_force_outputs_off(SAFETY_FAULT_WATCHDOG_CONFIG);
+    info(">> FWDGT configuration failed; motor mode remains locked <<\r\n");
+  }
+
 #if !defined(SAFE_BRINGUP) && !defined(BRINGUP_INJECT)
   uint32_t loop_count = 0;
 #endif
   while (1)
   {
+    runtime_watchdog_main_heartbeat();
 #if defined(BRINGUP_INJECT)
     static uint32_t inject_last_report_ms;
     inject_service();

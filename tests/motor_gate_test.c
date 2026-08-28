@@ -4,6 +4,7 @@
 #include "motor_gate.h"
 
 void config_store_tests(void);
+void ivt_protection_tests(void);
 void normal_can_protocol_tests(void);
 
 static void expect(MotorGateResult expected, uint32_t faults, uint16_t drv_fault,
@@ -15,6 +16,7 @@ static void expect(MotorGateResult expected, uint32_t faults, uint16_t drv_fault
 int main(void)
 {
     config_store_tests();
+    ivt_protection_tests();
     normal_can_protocol_tests();
     expect(MOTOR_GATE_OK, 0U, 0U, 1U, 1U, 1U);
     expect(MOTOR_GATE_SAFETY_FAULT, 1U, 0U, 1U, 1U, 1U);

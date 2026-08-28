@@ -69,7 +69,12 @@ static const ConfigField config_fields[] = {
     {1U, 22U}, /* 17 V_MAX */
     {1U, 23U}, /* 18 KP_MAX */
     {1U, 24U}, /* 19 KD_MAX */
-    {1U, 8U}  /* 20 TEMP_MAX */
+    {1U, 8U}, /* 20 TEMP_MAX */
+    {0U, 7U}, /* 21 IVT_PROTECT_ENABLE */
+    {1U, 25U}, /* 22 I_TRIP */
+    {1U, 26U}, /* 23 VBUS_MIN */
+    {1U, 27U}, /* 24 VBUS_MAX */
+    {1U, 28U}  /* 25 TEMP_TRIP */
 };
 #define CONFIG_FIELD_COUNT ((uint8_t)(sizeof(config_fields) / sizeof(config_fields[0])))
 
@@ -478,6 +483,16 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
 		case 134U: return drv_runtime_fault_evidence(11U); /* vbus_filt mV */
 		case 135U: return drv_runtime_fault_evidence(12U); /* duty U | V << 16 */
 		case 136U: return drv_runtime_fault_evidence(13U); /* duty W */
+		/* I/V/T protection configuration and uncalibrated-source status.  These
+		 * pages let the host refuse to enable a threshold before it has captured
+		 * the raw ADC evidence needed to calibrate it. */
+		case 137U: return (uint32_t)IVT_PROTECT_ENABLE;
+		case 138U: return milli_payload(I_TRIP);
+		case 139U: return milli_payload(VBUS_MIN);
+		case 140U: return milli_payload(VBUS_MAX);
+		case 141U: return milli_payload(TEMP_TRIP);
+		case 142U: return (uint32_t)(uint16_t)controller.adc_vbus_raw |
+		                  ((uint32_t)controller.adc_valid << 16);
 #endif
 #ifdef BRINGUP_INJECT
         case 20U: /* fallthrough to shared handler */

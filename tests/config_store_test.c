@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "config_store.h"
+#include "diag_protocol.h"
 
 static int int_regs[CONFIG_INT_WORDS];
 static float float_regs[CONFIG_FLOAT_WORDS];
@@ -17,6 +18,11 @@ void config_store_tests(void)
     assert(int_regs[1] == 1);
     assert(int_regs[2] == 0);
     assert(int_regs[3] == 3000);
+    assert(int_regs[7] == 0);
+    assert(float_regs[25] == 0.0f);
+    assert(float_regs[26] == 0.0f);
+    assert(float_regs[27] == 0.0f);
+    assert(float_regs[28] == 0.0f);
 
     crc = config_payload_crc32(int_regs, float_regs);
     assert(config_metadata_valid(CONFIG_METADATA_MAGIC,
@@ -48,6 +54,40 @@ void config_store_tests(void)
     config_apply_defaults(int_regs, float_regs);
     int_regs[3] = 0;
     assert(!config_payload_valid(int_regs, float_regs));
+
+    config_apply_defaults(int_regs, float_regs);
+    int_regs[1] = 0x7FF;
+    int_regs[2] = 0x101;
+    assert(config_payload_valid(int_regs, float_regs));
+    int_regs[1] = 0x800;
+    assert(!config_payload_valid(int_regs, float_regs));
+
+    config_apply_defaults(int_regs, float_regs);
+    int_regs[1] = DIAG_CAN_REQUEST_ID;
+    assert(!config_payload_valid(int_regs, float_regs));
+    config_apply_defaults(int_regs, float_regs);
+    int_regs[1] = DIAG_CAN_RESPONSE_ID;
+    assert(!config_payload_valid(int_regs, float_regs));
+    config_apply_defaults(int_regs, float_regs);
+    int_regs[2] = DIAG_CAN_REQUEST_ID;
+    assert(!config_payload_valid(int_regs, float_regs));
+    config_apply_defaults(int_regs, float_regs);
+    int_regs[2] = DIAG_CAN_RESPONSE_ID;
+    assert(!config_payload_valid(int_regs, float_regs));
+    config_apply_defaults(int_regs, float_regs);
+    int_regs[7] = 1;
+    assert(!config_payload_valid(int_regs, float_regs));
+    float_regs[25] = 20.0f;
+    assert(config_payload_valid(int_regs, float_regs));
+    int_regs[7] = 2;
+    assert(!config_payload_valid(int_regs, float_regs));
+    float_regs[26] = 18.0f;
+    float_regs[27] = 30.0f;
+    assert(config_payload_valid(int_regs, float_regs));
+    int_regs[7] = 4;
+    assert(!config_payload_valid(int_regs, float_regs));
+    float_regs[28] = 80.0f;
+    assert(config_payload_valid(int_regs, float_regs));
 
     puts("config store tests: PASS");
 }

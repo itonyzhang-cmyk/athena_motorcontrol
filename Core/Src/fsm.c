@@ -148,6 +148,9 @@ static MotorGateResult motor_gate_preflight(void)
 			 safety_clear_faults(SAFETY_FAULT_GATE_DRIVER |
 				 SAFETY_FAULT_ENCODER | SAFETY_FAULT_SPI_TIMEOUT |
 				 SAFETY_FAULT_ADC_TIMEOUT);
+			 /* I/V/T faults are intentionally not part of the automatic enable
+			  * re-arm set.  A stale unsafe measurement must never be cleared and
+			  * followed by even one commutation cycle; power/reset is required. */
 			 fsmstate->rearm_pending = 0U;
 			 fsmstate->rearm_wait_cycles = 0U;
 			 /* update_fsm(MOTOR_CMD) deliberately held the transition until

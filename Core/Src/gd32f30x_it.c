@@ -54,6 +54,7 @@ OF SUCH DAMAGE.
 #include "diagnostics.h"
 #include "diag_protocol.h"
 #include "normal_can_protocol.h"
+#include "runtime_watchdog.h"
 #ifdef BRINGUP_INJECT
 #include "inject.h"
 #endif
@@ -316,6 +317,7 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
 void TIMER0_UP_IRQHandler(void)
 {
     timer_interrupt_flag_clear(TIMER0, TIMER_INT_FLAG_UP);
+    runtime_watchdog_timer_service();
 
 #if !defined(SAFE_BRINGUP) && !defined(BRINGUP_INJECT)
     /* TIMER0 updates at 30 kHz (SVPWM_PERIOD=2000 on the 120 MHz clock).

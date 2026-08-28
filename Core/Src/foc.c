@@ -13,6 +13,7 @@
 #include "hw_config.h"
 #include "user_config.h"
 #include "safety.h"
+#include "ivt_protection.h"
 
 #ifndef STM32F446
 #define ADC_EOIC_POLL_LIMIT 2048U
@@ -28,6 +29,34 @@ static int adc_wait_for_eoic(uint32_t adc_periph)
 	return 0;
 }
 #endif
+
+static void evaluate_i_v_t_protection(ControllerStruct *controller)
+{
+    const IvtProtectionConfig config = {
+        .enabled = (uint32_t)IVT_PROTECT_ENABLE,
+        .current_trip_a = I_TRIP,
+        .vbus_min_v = VBUS_MIN,
+        .vbus_max_v = VBUS_MAX,
+        .temperature_trip_c = TEMP_TRIP
+    };
+    const IvtProtectionSample sample = {
+        .i_a = controller->i_a,
+        .i_b = controller->i_b,
+        .i_c = controller->i_c,
+        .vbus_v = controller->v_bus,
+        /* The only existing thermal observer is commented out and no physical
+         * thermistor conversion has been characterized.  Temperature shutdown
+         * is therefore fail-closed if somebody explicitly enables it. */
+        .temperature_c = 0.0f,
+        .current_valid = controller->adc_valid,
+        .vbus_valid = controller->adc_valid,
+        .temperature_valid = 0U
+    };
+    const uint32_t faults = ivt_protection_evaluate(&config, &sample);
+    if (faults != SAFETY_FAULT_NONE) {
+        safety_force_outputs_off(faults);
+    }
+}
 
 void set_dtc(ControllerStruct *controller){
 
@@ -130,6 +159,8 @@ void analog_sample (ControllerStruct *controller){
     controller->adc_valid = 1U;
     controller->adc_sample_count++;
 #endif
+
+    evaluate_i_v_t_protection(controller);
 
 }
 

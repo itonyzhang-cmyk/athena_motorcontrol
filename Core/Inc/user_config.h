@@ -31,14 +31,21 @@ extern "C" {
 #define V_MAX					__float_reg[22]									// Velocity setpoint upper bound (rad/s)
 #define KP_MAX					__float_reg[23]									// Max position gain (N-m/rad)
 #define KD_MAX					__float_reg[24]									// Max velocity gain (N-m/rad/s)
+/* I/V/T shutdown remains disabled until its hardware measurement path is
+ * characterized.  See ivt_protection.h for enable bits. */
+#define I_TRIP					__float_reg[25]
+#define VBUS_MIN				__float_reg[26]
+#define VBUS_MAX				__float_reg[27]
+#define TEMP_TRIP				__float_reg[28]
 
 
 #define PHASE_ORDER             __int_reg[0]                                    // Phase swapping during calibration
-#define CAN_ID                  __int_reg[1]                                    // CAN bus ID
-#define CAN_MASTER              __int_reg[2]                                    // CAN bus "master" ID
+#define CAN_ID                  __int_reg[1]                                    // 11-bit MIT command CAN ID
+#define CAN_MASTER              __int_reg[2]                                    // 11-bit MIT feedback CAN ID (legacy name)
 #define CAN_TIMEOUT             __int_reg[3]                                    // CAN bus timeout period
 #define M_ZERO					__int_reg[4]
 #define E_ZERO					__int_reg[5]
+#define IVT_PROTECT_ENABLE		__int_reg[7]
 #define ENCODER_LUT             __int_reg[6]                                    // Encoder offset LUT - 128 elements long
 
 

@@ -1113,3 +1113,35 @@ Do not record secrets, access tokens, or private credentials here.
   and `config abort`; WebUI exposes the CAN path while retaining UART Setup.
   Candidate build uses the project-local Arm GNU 15.3 toolchain and is not
   flashed.
+
+### 2026-08-28 - multi-node CAN / upgrade design preflight
+
+- Audited the normal MIT route: `CAN_ID` is the receive ID and legacy-named
+  `CAN_MASTER` is the feedback transmit ID. The persisted validation now
+  accepts the full standard 11-bit range and rejects fixed ATHENA-DIAG
+  `0x701/0x781` collisions; no configuration was written to hardware.
+- Added the read-only/offline `tools/athena_can_topology.py` preflight and
+  unit tests. It catches ID ownership collisions before connecting multiple
+  controllers. `docs/MULTI_NODE_AND_UPDATE_PLAN.md` records the staged
+  multi-node acceptance test and A/B application-upgrade design.
+- Verified locally with `make host-app-test host-can-topology-test` and a
+  normal-image `verify-normal` build using the pinned Arm GNU 15.3 toolchain.
+  No controller Flash write, boot, CAN transmission, second controller, or
+  motor movement was performed.
+
+### 2026-08-28 - independent runtime watchdog and opt-in I/V/T trip paths
+
+- Added a GD32 FWDGT runtime backend after TIMER0/NVIC startup.  TIMER0 reloads
+  it only after observing foreground-loop progress, so a stalled foreground
+  loop, control ISR, or permanently executing higher-priority ISR leads to a
+  reset rather than a continuing heartbeat.  A configuration failure latches
+  a fault and prevents motor entry.  The roughly 3.3-second nominal timeout
+  has not yet been measured on hardware or verified through reset-cause data.
+- Added opt-in, host-tested current, bus-voltage, and temperature trip logic.
+  Defaults remain disabled: the installed board's current/bus scales are not
+  yet characterized, and the application has no validated physical
+  temperature source.  Once explicitly enabled, invalid source data or a
+  threshold trip disables outputs and remains latched until reset.
+- Full host tests plus normal/safe/inject image verification completed using
+  the pinned Arm GNU 15.3 toolchain.  No candidate image was flashed, booted,
+  or sent any CAN command in this work.
