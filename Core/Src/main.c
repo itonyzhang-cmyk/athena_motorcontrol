@@ -195,6 +195,16 @@ int main(void)
 #elif defined(SAFE_BRINGUP)
   safety_force_outputs_off(SAFETY_FAULT_SAFE_BRINGUP);
 #endif
+#if defined(FWDGT_SELFTEST)
+  /* FWDGT hardware acceptance starts immediately after the board-safe GPIO
+   * setup, before any encoder, ADC, DRV, CAN, or FSM startup can delay the
+   * test. No foreground heartbeat is issued and no motor path is entered. */
+  if (runtime_watchdog_init() != 0) {
+    safety_force_outputs_off(SAFETY_FAULT_WATCHDOG_CONFIG);
+  }
+  while (1) {
+  }
+#endif
 #endif
   /* USER CODE BEGIN 2 */
 

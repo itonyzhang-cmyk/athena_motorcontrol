@@ -25,6 +25,9 @@ int runtime_watchdog_init(void)
     observed_progress = 0U;
     watchdog_active = 0U;
 #if defined(GD32F30X_HD)
+    /* FWDGT uses its dedicated internal low-speed oscillator. It must not be
+     * gated on RCU's separately reported IRC40K status, which is not a valid
+     * FWDGT readiness test on this GD32F303 board. */
     if (fwdgt_config(RUNTIME_WATCHDOG_RELOAD, FWDGT_PSC_DIV256) != SUCCESS) {
         return -1;
     }

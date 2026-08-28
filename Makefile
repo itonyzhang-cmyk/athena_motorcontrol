@@ -22,6 +22,9 @@ SAFE_BRINGUP ?= 1
 # Low-current single-phase injection bring-up. Implies SAFE_BRINGUP=0 but adds
 # its own gated profile, banner, symbol audit and fixed limits.
 BRINGUP_INJECT ?= 0
+# Hardware acceptance image only: deliberately loses foreground progress after
+# arming FWDGT. It is never a normal-operation profile.
+FWDGT_SELFTEST ?= 0
 # CAN-only path probe: leaves SAFE_BRINGUP protections enabled and bypasses
 # diagnostic CRC parsing to prove the RX interrupt and TX path independently.
 CAN_PROBE ?= 0
@@ -174,6 +177,9 @@ C_DEFS += -DBRINGUP_INJECT=1
 endif
 ifeq ($(CAN_PROBE), 1)
 C_DEFS += -DCAN_PROBE=1
+endif
+ifeq ($(FWDGT_SELFTEST), 1)
+C_DEFS += -DFWDGT_SELFTEST=1
 endif
 
 
