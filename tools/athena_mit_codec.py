@@ -81,6 +81,22 @@ def decode_feedback(data: bytes, ranges: MitRanges = DEFAULT_RANGES) -> dict[str
             "torque": _dequantize(t, -ranges.torque_max, ranges.torque_max, 12)}
 
 
+def feedback_position_delta(previous: float, current: float,
+                            ranges: MitRanges = DEFAULT_RANGES) -> float:
+    """Return the shortest continuous delta between two finite MIT positions."""
+    if not math.isfinite(previous) or not math.isfinite(current):
+        raise ValueError("MIT feedback positions must be finite")
+    span = ranges.position_max - ranges.position_min
+    if not math.isfinite(span) or span <= 0.0:
+        raise ValueError("invalid MIT position range")
+    delta = current - previous
+    if delta > span / 2.0:
+        delta -= span
+    elif delta < -span / 2.0:
+        delta += span
+    return delta
+
+
 def special_command(code: int) -> bytes:
     """Return the explicit command frame (0xFC/FD/FE) used by the firmware."""
     if code not in (0xFC, 0xFD, 0xFE):

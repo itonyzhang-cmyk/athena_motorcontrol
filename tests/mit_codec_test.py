@@ -4,6 +4,7 @@ from tools.athena_mit_codec import (
     DEFAULT_RANGES,
     decode_feedback,
     encode_command,
+    feedback_position_delta,
     format_slcan,
     parse_slcan,
     special_command,
@@ -34,6 +35,11 @@ class MitCodecTest(unittest.TestCase):
     def test_slcan_rejects_dlc_mismatch(self):
         with self.assertRaises(ValueError):
             parse_slcan("t00187FFF7F")
+
+    def test_feedback_position_delta_unwraps_both_endpoints(self):
+        self.assertAlmostEqual(feedback_position_delta(12.4, -12.4), 0.2)
+        self.assertAlmostEqual(feedback_position_delta(-12.4, 12.4), -0.2)
+        self.assertAlmostEqual(feedback_position_delta(1.0, 1.2), 0.2)
 
 
 if __name__ == "__main__":

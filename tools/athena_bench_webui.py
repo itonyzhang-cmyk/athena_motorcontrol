@@ -27,7 +27,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from athena_mit_codec import DEFAULT_RANGES, decode_feedback, encode_command, format_slcan
+from athena_mit_codec import (
+    DEFAULT_RANGES,
+    decode_feedback,
+    encode_command,
+    feedback_position_delta,
+    format_slcan,
+)
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -148,7 +154,7 @@ class Runner:
         self.last_feedback_position_rad: float | None = None
         self.last_feedback_velocity_rad_s: float | None = None
         self.logical_position_rad: float | None = None
-        self._logical_feedback_time: float | None = None
+        self._logical_feedback_position_rad: float | None = None
         self._logical_tracking_active = False
         self.feedback_generation = 0
         self.diag_sequence = 0
@@ -385,7 +391,7 @@ class Runner:
                 # feedback remains meaningful after it reaches an endpoint.
                 # Rebase the host-owned multi-turn coordinate at each session.
                 self.logical_position_rad = start
-                self._logical_feedback_time = time.monotonic()
+                self._logical_feedback_position_rad = start
                 self._logical_tracking_active = True
             request = {"mode": mode, "kp": kp, "kd": kd, "torque": torque,
                        "duration": duration, "hold": hold, "start": start,
@@ -561,17 +567,19 @@ class Runner:
                 payload = bytes.fromhex(match.group(1))
                 if len(payload) == 6:
                     decoded = decode_feedback(payload)
-                    now = time.monotonic()
                     with self.lock:
                         self.last_feedback_position = payload[1:3].hex().upper()
                         self.last_feedback_position_rad = float(decoded["position"])
                         self.last_feedback_velocity_rad_s = float(decoded["velocity"])
                         if self.logical_position_rad is None:
                             self.logical_position_rad = self.last_feedback_position_rad
-                        elif self._logical_tracking_active and self._logical_feedback_time is not None:
-                            dt = min(0.25, max(0.0, now - self._logical_feedback_time))
-                            self.logical_position_rad += self.last_feedback_velocity_rad_s * dt
-                        self._logical_feedback_time = now
+                        elif (self._logical_tracking_active and
+                              self._logical_feedback_position_rad is not None):
+                            self.logical_position_rad += feedback_position_delta(
+                                self._logical_feedback_position_rad,
+                                self.last_feedback_position_rad,
+                            )
+                        self._logical_feedback_position_rad = self.last_feedback_position_rad
                         self.feedback_generation += 1
             if clean.startswith("Serial Port: "):
                 self.bridge_tty = clean.removeprefix("Serial Port: ").strip()
