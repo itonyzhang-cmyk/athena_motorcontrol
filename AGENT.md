@@ -223,6 +223,29 @@ Do not record secrets, access tokens, or private credentials here.
   common-mode mismatch rather than physical winding current. Diagnostics now
   state that boundary explicitly.
 
+### 2026-08-29 - MIT range mismatch correction and output-axis retest
+
+- Root cause of the multi-turn position command was an on-wire MIT range
+  mismatch. The controller had persisted `P_MIN=-100`, `P_MAX=100` and
+  `GR=9`, while the WebUI still encoded and decoded the same 16-bit field as
+  `-12.5..12.5`. Thus a WebUI target of 4 rad decoded in firmware as about
+  32 rad, while a real 31.58 rad feedback decoded in the WebUI as about 3.9
+  rad. The latter is approximately 5.03 output turns and agrees with the
+  observed flange motion.
+- The WebUI now owns a persisted MIT position-range record alongside its
+  hash-locked normal-image record. Every trajectory, custom MIT command,
+  feedback decode, semantic trace, multi-turn unwrap, and 1-degree shortcut
+  uses that one range. A committed CAN `P_MIN` or `P_MAX` update also updates
+  the local WebUI record only after the controller commit succeeds.
+- A no-enable feedback check on the restored `86e470...` normal image decoded
+  position `31.5816 rad` with the shared `-100..100` range. No controller
+  Flash write occurred. A 3 s output-velocity test at -0.20 rad/s and Kd=5,
+  and a nearby 0.20 rad position S-curve at Kp=3, did not move the flange;
+  each sent 151/161 frames with a 30.0 ms maximum gap and an explicit `0xFD`.
+  This is now attributed to output-axis gain/static-torque calibration, not
+  position decoding or CAN timing. Do not restore the old incorrect range to
+  obtain motion.
+
 ### 2026-08-29 - GD32F303 FWDGT hardware reset verification
 
 - Target controller UID: `39305137-14303434-47457A29`. The FWDGT-only

@@ -2,6 +2,7 @@ import unittest
 
 from tools.athena_mit_codec import (
     DEFAULT_RANGES,
+    MitRanges,
     decode_feedback,
     encode_command,
     feedback_position_delta,
@@ -40,6 +41,12 @@ class MitCodecTest(unittest.TestCase):
         self.assertAlmostEqual(feedback_position_delta(12.4, -12.4), 0.2)
         self.assertAlmostEqual(feedback_position_delta(-12.4, 12.4), -0.2)
         self.assertAlmostEqual(feedback_position_delta(1.0, 1.2), 0.2)
+
+    def test_custom_position_range_round_trip(self):
+        ranges = MitRanges(position_min=-100.0, position_max=100.0)
+        command = encode_command(4.0, 0.0, 0.0, 0.0, 0.0, ranges)
+        feedback = bytes((1, command[0], command[1], 0x7F, 0xF0, 0x00))
+        self.assertAlmostEqual(decode_feedback(feedback, ranges)["position"], 4.0, delta=0.01)
 
 
 if __name__ == "__main__":

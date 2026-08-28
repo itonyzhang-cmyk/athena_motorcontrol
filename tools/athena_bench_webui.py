@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 
 from athena_mit_codec import (
     DEFAULT_RANGES,
+    MitRanges,
     decode_feedback,
     encode_command,
     feedback_position_delta,
@@ -91,7 +92,39 @@ def normal_firmware_config() -> tuple[str, Path]:
         raise RuntimeError("正常固件镜像路径无效")
     return sha, image
 
-def _semantic_can_line(clean: str) -> str | None:
+
+def configured_mit_ranges() -> MitRanges:
+    """Load the exact position codec range configured for the normal image.
+
+    The MIT position field is an integer, so its range must match the live
+    firmware P_MIN/P_MAX values bit-for-bit.  A host-side default is unsafe
+    once the controller range is made configurable.
+    """
+    try:
+        data = json.loads(NORMAL_CONFIG.read_text(encoding="utf-8"))
+        minimum = float(data.get("mit_position_min", DEFAULT_RANGES.position_min))
+        maximum = float(data.get("mit_position_max", DEFAULT_RANGES.position_max))
+    except (OSError, ValueError, TypeError):
+        return DEFAULT_RANGES
+    if not (math.isfinite(minimum) and math.isfinite(maximum) and minimum < 0.0 < maximum):
+        return DEFAULT_RANGES
+    return MitRanges(position_min=minimum, position_max=maximum,
+                     velocity_min=DEFAULT_RANGES.velocity_min,
+                     velocity_max=DEFAULT_RANGES.velocity_max,
+                     kp_max=DEFAULT_RANGES.kp_max, kd_max=DEFAULT_RANGES.kd_max,
+                     torque_max=DEFAULT_RANGES.torque_max)
+
+
+def persist_mit_ranges(ranges: MitRanges) -> None:
+    """Persist a controller-confirmed P_MIN/P_MAX update for the next restart."""
+    data = json.loads(NORMAL_CONFIG.read_text(encoding="utf-8"))
+    data["mit_position_min"] = ranges.position_min
+    data["mit_position_max"] = ranges.position_max
+    temporary = NORMAL_CONFIG.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(NORMAL_CONFIG)
+
+def _semantic_can_line(clean: str, ranges: MitRanges) -> str | None:
     tx = TX_RE.search(clean)
     if tx:
         data = bytes.fromhex(tx.group(1))
@@ -110,14 +143,14 @@ def _semantic_can_line(clean: str) -> str | None:
                 torque = 0.0
             return ("CAN 语义 TX: MIT p={:.4f} rad, v={:.3f} rad/s, "
                     "Kp={:.2f}, Kd={:.3f}, t_ff={:.3f} Nm".format(
-                        p * 25.0 / 65535.0 - 12.5,
+                        p * (ranges.position_max - ranges.position_min) / 65535.0 + ranges.position_min,
                         v * 130.0 / 4095.0 - 65.0,
                         kp * 500.0 / 4095.0,
                         kd * 5.0 / 4095.0,
                         torque))
     rx = FEEDBACK_RE.search(clean)
     if rx:
-        decoded = decode_feedback(bytes.fromhex(rx.group(1)))
+        decoded = decode_feedback(bytes.fromhex(rx.group(1)), ranges)
         torque = float(decoded["torque"])
         if abs(torque) <= 0.01:
             torque = 0.0
@@ -140,6 +173,7 @@ def _diag_crc8(data: bytes) -> int:
 class Runner:
     def __init__(self) -> None:
         self.lock = threading.Lock()
+        self.mit_ranges = configured_mit_ranges()
         self.active: dict[str, Any] | None = None
         self.logs: deque[str] = deque(maxlen=1600)
         self.last_result: dict[str, Any] = {"state": "idle", "exit_code": None}
@@ -239,6 +273,17 @@ class Runner:
                   (1, 14), (1, 17), (1, 19), (1, 20), (1, 21), (1, 22),
                   (1, 23), (1, 24), (1, 8))
         if not 0 <= field < len(fields): return False, "配置字段编号无效"
+        with self.lock:
+            ranges = self.mit_ranges
+        if field in (14, 15):
+            ranges = MitRanges(
+                position_min=float(value) if field == 14 else ranges.position_min,
+                position_max=float(value) if field == 15 else ranges.position_max,
+                velocity_min=ranges.velocity_min, velocity_max=ranges.velocity_max,
+                kp_max=ranges.kp_max, kd_max=ranges.kd_max, torque_max=ranges.torque_max)
+            if not (math.isfinite(ranges.position_min) and math.isfinite(ranges.position_max) and
+                    ranges.position_min < 0.0 < ranges.position_max):
+                return False, "P_MIN/P_MAX 必须满足 P_MIN < 0 < P_MAX"
         import struct
         word = struct.unpack('<I', struct.pack('<f', float(value)))[0] if fields[field][0] else int(value) & 0xffffffff
         for offset in range(4):
@@ -251,6 +296,15 @@ class Runner:
             time.sleep(0.025)
             ok, msg = self.send_diag(0x07, 0xF9)
             if not ok: return False, msg
+            if field in (14, 15):
+                try:
+                    persist_mit_ranges(ranges)
+                except (OSError, ValueError, TypeError) as exc:
+                    return False, f"固件已提交，但 WebUI MIT 范围未能持久化: {exc}"
+                with self.lock:
+                    self.mit_ranges = ranges
+                return True, ("P_MIN/P_MAX 已在固件和 WebUI 同步提交；"
+                              f"当前 MIT 位置范围 {ranges.position_min:g}..{ranges.position_max:g} rad")
             return True, "配置已提交；涉及 CAN/外设初始化的参数需重启生效"
         return True, "配置已暂存并请求校验；点击提交后才写入 Flash"
 
@@ -328,6 +382,8 @@ class Runner:
 
     def start_trajectory_session(self, values: dict[str, Any]) -> tuple[bool, str]:
         """Start the host-owned trajectory producer after a successful preflight."""
+        with self.lock:
+            ranges = self.mit_ranges
         try:
             mode = str(values.get("mode", "position"))
             kp = float(values.get("kp"))
@@ -350,9 +406,9 @@ class Runner:
             if mode == "position":
                 target = float(values.get("target"))
                 speed_limit = float(values.get("speed_limit"))
-                if not DEFAULT_RANGES.position_min <= target <= DEFAULT_RANGES.position_max or not math.isfinite(target):
+                if not ranges.position_min <= target <= ranges.position_max or not math.isfinite(target):
                     return False, ("目标位置超出当前 MIT 位置范围 "
-                                   f"{DEFAULT_RANGES.position_min:g}..{DEFAULT_RANGES.position_max:g} rad")
+                                   f"{ranges.position_min:g}..{ranges.position_max:g} rad")
                 if not 0.05 <= speed_limit <= TRAJECTORY_MAX_SPEED_RAD_S or not math.isfinite(speed_limit):
                     return False, f"速度上限必须在 0.05..{TRAJECTORY_MAX_SPEED_RAD_S:g} rad/s"
             else:
@@ -395,7 +451,7 @@ class Runner:
                 self._logical_tracking_active = True
             request = {"mode": mode, "kp": kp, "kd": kd, "torque": torque,
                        "duration": duration, "hold": hold, "start": start,
-                       "target": target}
+                       "target": target, "ranges": ranges}
             if mode == "position":
                 request["speed_limit"] = speed_limit
             else:
@@ -405,7 +461,7 @@ class Runner:
             self.mit_thread.start()
         return True, "上位机轨迹会话已启动"
 
-    def _trajectory_session_worker(self, request: dict[str, float | str]) -> None:
+    def _trajectory_session_worker(self, request: dict[str, Any]) -> None:
         mode = str(request["mode"])
         start = float(request["start"])
         target = float(request["target"])
@@ -414,6 +470,10 @@ class Runner:
         kp, kd, torque = (float(request[name]) for name in ("kp", "kd", "torque"))
         with self.lock:
             tty = self.bridge_tty
+        ranges = request["ranges"]
+        if not isinstance(ranges, MitRanges):
+            self.log("轨迹会话取消：MIT 范围无效")
+            return
         try:
             if not tty:
                 self.log("轨迹会话取消：CAN0 Trace 已停止")
@@ -443,13 +503,12 @@ class Runner:
                         # Kp is deliberately zero in continuous velocity mode;
                         # p_des is a bounded transport placeholder only.
                         position = start if feedback_position is None else feedback_position
-                        position = min(DEFAULT_RANGES.position_max,
-                                       max(DEFAULT_RANGES.position_min, position))
+                        position = min(ranges.position_max, max(ranges.position_min, position))
                     now = time.monotonic()
                     if now < next_send:
                         time.sleep(next_send - now)
                     now = time.monotonic()
-                    serial_port.write(format_slcan(1, encode_command(position, velocity, kp, kd, torque)))
+                    serial_port.write(format_slcan(1, encode_command(position, velocity, kp, kd, torque, ranges)))
                     if last_send is not None:
                         max_gap = max(max_gap, now - last_send)
                     last_send = now
@@ -469,9 +528,8 @@ class Runner:
                         with self.lock:
                             hold_position = (target if self.last_feedback_position_rad is None
                                              else self.last_feedback_position_rad)
-                        hold_position = min(DEFAULT_RANGES.position_max,
-                                            max(DEFAULT_RANGES.position_min, hold_position))
-                    serial_port.write(format_slcan(1, encode_command(hold_position, 0.0, kp, kd, torque)))
+                        hold_position = min(ranges.position_max, max(ranges.position_min, hold_position))
+                    serial_port.write(format_slcan(1, encode_command(hold_position, 0.0, kp, kd, torque, ranges)))
                     self.mit_session_frames += 1
                     next_send += MIT_KEEPALIVE_INTERVAL_S
                     if next_send < now:
@@ -559,14 +617,16 @@ class Runner:
                 continue
             if not (QUIET_TRACE and clean.startswith("TRACE CAN RX ")):
                 self.log("BRIDGE " + clean)
-            semantic = _semantic_can_line(clean)
+            with self.lock:
+                ranges = self.mit_ranges
+            semantic = _semantic_can_line(clean, ranges)
             if semantic and not QUIET_TRACE:
                 self.log("BRIDGE " + semantic)
             match = FEEDBACK_RE.search(clean)
             if match:
                 payload = bytes.fromhex(match.group(1))
                 if len(payload) == 6:
-                    decoded = decode_feedback(payload)
+                    decoded = decode_feedback(payload, ranges)
                     with self.lock:
                         self.last_feedback_position = payload[1:3].hex().upper()
                         self.last_feedback_position_rad = float(decoded["position"])
@@ -578,6 +638,7 @@ class Runner:
                             self.logical_position_rad += feedback_position_delta(
                                 self._logical_feedback_position_rad,
                                 self.last_feedback_position_rad,
+                                ranges,
                             )
                         self._logical_feedback_position_rad = self.last_feedback_position_rad
                         self.feedback_generation += 1
@@ -910,6 +971,7 @@ class Runner:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
             position = self.last_feedback_position
+            ranges = self.mit_ranges
             if self.mit_check_active or self.enable_active:
                 return False, "已有 CAN 测试或使能动作运行中"
             if not live or not tty:
@@ -918,7 +980,9 @@ class Runner:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
         current = int(position, 16)
-        target = (current + 46) & 0xFFFF  # ~1 degree over the +/-12.5 rad range
+        step_counts = max(1, round((math.pi / 180.0) * 65535.0 /
+                                   (ranges.position_max - ranges.position_min)))
+        target = (current + step_counts) & 0xFFFF
         target_hex = f"{target:04X}"
         # v=0, Kp ~= 5/500 full scale, Kd=0, feed-forward torque=0.
         position_frame = f"t0018{target_hex}7FF0{0x29:02X}0007FF\r"
@@ -944,6 +1008,7 @@ class Runner:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
             position = self.last_feedback_position
+            ranges = self.mit_ranges
             if self.mit_check_active or self.enable_active:
                 return False, "已有 CAN 测试或使能动作运行中"
             if not live or not tty:
@@ -952,7 +1017,9 @@ class Runner:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
         current = int(position, 16)
-        target_hex = f"{(current + 46) & 0xFFFF:04X}"
+        step_counts = max(1, round((math.pi / 180.0) * 65535.0 /
+                                   (ranges.position_max - ranges.position_min)))
+        target_hex = f"{(current + step_counts) & 0xFFFF:04X}"
         # v=0, Kp ~= 20/500 full scale (0xA4), Kd=0, torque=0.
         position_frame = f"t0018{target_hex}7FF0A40007FF\r"
         try:
@@ -982,6 +1049,7 @@ class Runner:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
             position = self.last_feedback_position
+            ranges = self.mit_ranges
             if self.mit_check_active or self.enable_active:
                 return False, "已有 CAN 测试或使能动作运行中"
             if not live or not tty:
@@ -989,7 +1057,9 @@ class Runner:
             if len(position) != 4:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
-        target_hex = f"{(int(position, 16) + 46) & 0xFFFF:04X}"
+        step_counts = max(1, round((math.pi / 180.0) * 65535.0 /
+                                   (ranges.position_max - ranges.position_min)))
+        target_hex = f"{(int(position, 16) + step_counts) & 0xFFFF:04X}"
         kp_raw = min(4095, max(0, int(round(kp * 4095.0 / 500.0))))
         position_frame = f"t0018{target_hex}7FF0{(kp_raw >> 8) & 0x0F:02X}{kp_raw & 0xFF:02X}07FF\r"
         try:
@@ -1011,7 +1081,11 @@ class Runner:
     def mit_custom_once(self, values: dict[str, Any]) -> tuple[bool, str]:
         """Send an explicitly entered MIT command for a bounded session."""
         names = ("position", "velocity", "kp", "kd", "torque")
-        limits = ((-12.5, 12.5), (-65.0, 65.0), (0.0, 500.0), (0.0, 5.0), (-40.0, 40.0))
+        with self.lock:
+            ranges = self.mit_ranges
+        limits = ((ranges.position_min, ranges.position_max),
+                  (ranges.velocity_min, ranges.velocity_max), (0.0, ranges.kp_max),
+                  (0.0, ranges.kd_max), (-ranges.torque_max, ranges.torque_max))
         try:
             parsed = [float(values.get(name)) for name in names]
         except (TypeError, ValueError):
@@ -1033,7 +1107,7 @@ class Runner:
             if not live or not tty:
                 return False, "请先启动 CAN0 trace"
             # start_mit_session owns the session flag; this method is the worker.
-        data = encode_command(*parsed)
+        data = encode_command(*parsed, ranges)
         frame = format_slcan(1, data)
         try:
             with self._open_serial(tty) as serial_port:
@@ -1090,6 +1164,8 @@ class Runner:
             "last_feedback_velocity_rad_s": self.last_feedback_velocity_rad_s,
             "logical_position_rad": self.logical_position_rad,
             "logical_turns": None if self.logical_position_rad is None else self.logical_position_rad / (2.0 * math.pi),
+            "mit_position_min": self.mit_ranges.position_min,
+            "mit_position_max": self.mit_ranges.position_max,
             "normal_sha": normal_firmware_config()[0],
             "normal_image": str(normal_firmware_config()[1]),
             "logs": list(self.logs),

@@ -1,4 +1,6 @@
 {
-  "normal_sha": "f9cfd8e4bfa1d753bee9d496b81c636b851679443b547e75f62be657fe78679c",
-  "normal_image": "artifacts/athena_adc_live_offset_rearm_20260828/motorcontrol.bin"
+  "normal_sha": "86e4705c191c5c735881b74e8e1a9cb2f34a8ce44d72087a24d8730366539789",
+  "normal_image": "artifacts/athena_watchdog_3000_20260828/motorcontrol.bin",
+  "mit_position_min": -100.0,
+  "mit_position_max": 100.0
 }
