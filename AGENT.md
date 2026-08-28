@@ -167,6 +167,32 @@ Do not record secrets, access tokens, or private credentials here.
 
 ## Session Log
 
+### 2026-08-28 - audited unflashed live-CSA candidate
+
+- Rebuilt the normal candidate after synchronizing the default and `-1` fallback
+  `CAN_TIMEOUT` to 3000 cycles. `verify-normal` and all host tests pass.
+- Candidate artifact: `artifacts/athena_adc_live_offset_rearm_20260828/motorcontrol.bin`,
+  SHA-256 `f9cfd8e4bfa1d753bee9d496b81c636b851679443b547e75f62be657fe78679c`.
+  It has not been flashed. Do not confuse it with the remotely deployed
+  watchdog bench image, whose SHA must be read from the live WebUI before any
+  flash or boot operation.
+
+### 2026-08-28 - remote angle and constant-velocity test
+
+- Remote host `192.168.31.20`; WebUI restarted with `~/athena_runtime/.venv/bin/python`; normal image SHA-256 `537cc5e3ee20b835293303c104664f10fc9cfcf517593828d3322a0697519406`.
+- CAN trace started and three fixed non-enable MIT checks completed with feedback and no enable action.
+- Ran constant velocity `-0.2 rad/s` for `20 s`, `Kp=20`, `Kd=1`, `t_ff=0`, hold `0 s`. Negative direction was required because start angle `11.6470 rad` plus positive 20 s would exceed the `+12.5 rad` protocol limit.
+- Angle moved to `7.6568 rad` (`-3.9902 rad` measured vs `-4.0 rad` expected); about `1380` frames; session ended with `enable_active=false`.
+- Post-test diagnostics: `safety_fault_latched=0`; DRV FSR1/FSR2 `0x0000`, DCR/CSACR `0x02C000A0`, OCPCR `0x00000415`; `drv_enable_verify_ok=1`, `drv_enable_fsr1_fsr2=0`, `drv_enable_nfault_edge=1`.
+- Critical finding: trajectory log reported maximum frame interval `74.1 ms`, above the firmware watchdog threshold of about `33 ms`. This is not a scheduler-pass result and does not justify higher current or wider motion.
+- Next gate: fix or isolate remote USB-CAN scheduling jitter, repeat until max frame interval is stably below `33 ms`, keeping current firmware and limits unchanged.
+
+### 2026-08-28 - Python/USB-CAN scheduling A/B test
+
+- Added `ATHENA_MIT_INTERVAL_S` environment override to `tools/athena_bench_webui.py`; default remains `0.005 s`.
+- On the same remote host/image and bounded constant-velocity test, measured max gaps: `5 ms -> 74.1 ms`, `10 ms -> 52.8 ms`, `20 ms -> 30.0 ms`.
+- The `20 ms` run sent `1001` frames and completed with the bridge stopped afterward. This confirms synchronous PTY -> C bridge -> USB CAN TX/ACK backpressure as the primary timing failure; 5/10 ms are too aggressive for the current bridge, while 20 ms passes the approximately `33 ms` watchdog threshold with limited margin.
+
 ### 2026-08-20 - encoder-startup image bench result
 
 - Flashed `artifacts/athena_inject_encoder_startup_20260820/motorcontrol.bin`

@@ -48,7 +48,7 @@ void config_apply_defaults(int int_regs[CONFIG_INT_WORDS],
     int_regs[CONFIG_PHASE_ORDER] = 0;
     int_regs[CONFIG_CAN_ID] = 1;
     int_regs[CONFIG_CAN_MASTER] = 0;
-    int_regs[CONFIG_CAN_TIMEOUT] = 1000;
+    int_regs[CONFIG_CAN_TIMEOUT] = 3000;
     int_regs[CONFIG_M_ZERO] = 0;
     int_regs[CONFIG_E_ZERO] = 0;
 

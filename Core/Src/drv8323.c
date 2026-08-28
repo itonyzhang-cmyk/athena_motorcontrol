@@ -215,14 +215,21 @@ void drv_service_enable(DRVStruct drv)
 				/* Finalise the short PWM-on observation interval. A low nFAULT
 				 * here is a real runtime fault; an earlier edge was retained only
 				 * as startup evidence while all three outputs were neutral. */
-				drv_enable_window = 0U;
+				/* The first live PWM conversions can still belong to the previous
+				 * all-off state. Rebuild the CSA offset in this exact electrical
+				 * state before exposing the control loop. */
 				if (gpio_input_bit_get(GPIOA, GPIO_PIN_12) == RESET) {
+					drv_enable_window = 0U;
 					drv_enable_evidence_value[0] = 0U;
 					drv_enable_evidence_value[1] = drv_capture_fsr_pair(&drv);
 					safety_force_outputs_off(SAFETY_FAULT_GATE_DRIVER);
 					drv.fault = 1U;
 					drv_disable_gd(drv);
+				} else {
+					zero_current_live(&controller);
+					drv_enable_window = 0U;
 				}
+				drv_pwm_settle_pending = 0U;
 				return;
 			}
 

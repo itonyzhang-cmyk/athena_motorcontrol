@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+import os
 
 
 @dataclass(frozen=True)
@@ -23,7 +24,18 @@ class MitRanges:
     torque_max: float = 40.0
 
 
-DEFAULT_RANGES = MitRanges()
+def _position_range_from_environment() -> MitRanges:
+    try:
+        minimum = float(os.environ.get("ATHENA_MIT_POSITION_MIN", "-12.5"))
+        maximum = float(os.environ.get("ATHENA_MIT_POSITION_MAX", "12.5"))
+    except ValueError:
+        return MitRanges()
+    if not math.isfinite(minimum) or not math.isfinite(maximum) or minimum >= 0.0 or maximum <= 0.0:
+        return MitRanges()
+    return MitRanges(position_min=minimum, position_max=maximum)
+
+
+DEFAULT_RANGES = _position_range_from_environment()
 
 
 def _quantize(value: float, minimum: float, maximum: float, bits: int) -> int:

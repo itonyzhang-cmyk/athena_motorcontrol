@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from athena_mit_codec import decode_feedback, encode_command, format_slcan
+from athena_mit_codec import DEFAULT_RANGES, decode_feedback, encode_command, format_slcan
 
 
 REPO = Path(__file__).resolve().parent.parent
@@ -53,13 +53,22 @@ FLASH = REPO / "tools/athena_safe_flash.sh"
 MIT_CHECK_FRAME = "t00187FFF7FF0000007FF\r"
 ENABLE_FRAME = "t0018FFFFFFFFFFFFFFFC\r"
 STOP_FRAME = "t0018FFFFFFFFFFFFFFFD\r"
-MIT_KEEPALIVE_INTERVAL_S = 0.01  # must stay below the firmware CAN watchdog (~33 ms)
+# USB-CAN/PTY scheduling can occasionally stall for several milliseconds. Keep
+# a 5 ms nominal period and schedule against absolute deadlines so a slow write
+# does not add delay to every subsequent frame (the firmware watchdog is ~33 ms).
+try:
+    MIT_KEEPALIVE_INTERVAL_S = float(os.environ.get("ATHENA_MIT_INTERVAL_S", "0.005"))
+except ValueError:
+    MIT_KEEPALIVE_INTERVAL_S = 0.005
+if not 0.002 <= MIT_KEEPALIVE_INTERVAL_S <= 0.1:
+    MIT_KEEPALIVE_INTERVAL_S = 0.005
 PTY_WRITE_TIMEOUT_S = 0.25
 MIT_DEFAULT_DURATION_S = 10.0
 MIT_MAX_DURATION_S = 300.0
 TRAJECTORY_MAX_SPEED_RAD_S = 20.0
 FEEDBACK_RE = re.compile(r"TRACE CAN RX t000#([0-9A-Fa-f]{12})")
 TX_RE = re.compile(r"TRACE CAN TX t001#([0-9A-Fa-f]{16})")
+QUIET_TRACE = os.environ.get("ATHENA_QUIET_TRACE", "0") == "1"
 
 
 def normal_firmware_config() -> tuple[str, Path]:
@@ -137,6 +146,10 @@ class Runner:
         self.mit_session_frames = 0
         self.last_feedback_position = ""
         self.last_feedback_position_rad: float | None = None
+        self.last_feedback_velocity_rad_s: float | None = None
+        self.logical_position_rad: float | None = None
+        self._logical_feedback_time: float | None = None
+        self._logical_tracking_active = False
         self.feedback_generation = 0
         self.diag_sequence = 0
 
@@ -331,14 +344,17 @@ class Runner:
             if mode == "position":
                 target = float(values.get("target"))
                 speed_limit = float(values.get("speed_limit"))
-                if not -12.5 <= target <= 12.5 or not math.isfinite(target):
-                    return False, "目标位置超出 MIT 协议范围 -12.5..12.5 rad"
+                if not DEFAULT_RANGES.position_min <= target <= DEFAULT_RANGES.position_max or not math.isfinite(target):
+                    return False, ("目标位置超出当前 MIT 位置范围 "
+                                   f"{DEFAULT_RANGES.position_min:g}..{DEFAULT_RANGES.position_max:g} rad")
                 if not 0.05 <= speed_limit <= TRAJECTORY_MAX_SPEED_RAD_S or not math.isfinite(speed_limit):
                     return False, f"速度上限必须在 0.05..{TRAJECTORY_MAX_SPEED_RAD_S:g} rad/s"
             else:
                 velocity = float(values.get("velocity"))
                 if not 0.05 <= abs(velocity) <= TRAJECTORY_MAX_SPEED_RAD_S or not math.isfinite(velocity):
                     return False, f"速度必须在 +/-0.05..{TRAJECTORY_MAX_SPEED_RAD_S:g} rad/s"
+                if kp != 0.0:
+                    return False, "恒速模式固定使用 Kp=0；位置环不能参与连续旋转"
         except (TypeError, ValueError):
             return False, "轨迹目标或速度必须填写数字"
         with self.lock:
@@ -357,12 +373,20 @@ class Runner:
                     return False, (f"执行时间过短：该 S 曲线至少需要 {minimum_duration:.3f} 秒，"
                                    f"才能不超过 {speed_limit:g} rad/s")
             else:
-                target = start + velocity * duration
-                if not -12.5 <= target <= 12.5:
-                    return False, "恒速轨迹终点将超出 MIT 位置范围 -12.5..12.5 rad"
+                # Velocity mode is continuous.  The encoded MIT position is
+                # rebased around live feedback on every frame; logical multi-
+                # turn position is tracked independently on the host.
+                target = start
             self.enable_active = True
             self.mit_stop_event.clear()
             self.mit_session_frames = 0
+            if mode == "velocity":
+                # The MIT feedback position is finite, while the velocity
+                # feedback remains meaningful after it reaches an endpoint.
+                # Rebase the host-owned multi-turn coordinate at each session.
+                self.logical_position_rad = start
+                self._logical_feedback_time = time.monotonic()
+                self._logical_tracking_active = True
             request = {"mode": mode, "kp": kp, "kd": kd, "torque": torque,
                        "duration": duration, "hold": hold, "start": start,
                        "target": target}
@@ -394,6 +418,9 @@ class Runner:
                 self.log(f"起点={start:.4f} rad, 终点={target:.4f} rad, 执行={duration:g} s, "
                          f"Kp={kp:g}, Kd={kd:g}, t_ff={torque:g}")
                 started = time.monotonic()
+                next_send = started
+                last_send = None
+                max_gap = 0.0
                 while not self.mit_stop_event.is_set():
                     elapsed = time.monotonic() - started
                     if elapsed >= duration:
@@ -405,17 +432,47 @@ class Runner:
                         velocity = (target - start) * 6.0 * u * (1.0 - u) / duration
                     else:
                         velocity = float(request["velocity"])
-                        position = start + velocity * elapsed
+                        with self.lock:
+                            feedback_position = self.last_feedback_position_rad
+                        # Kp is deliberately zero in continuous velocity mode;
+                        # p_des is a bounded transport placeholder only.
+                        position = start if feedback_position is None else feedback_position
+                        position = min(DEFAULT_RANGES.position_max,
+                                       max(DEFAULT_RANGES.position_min, position))
+                    now = time.monotonic()
+                    if now < next_send:
+                        time.sleep(next_send - now)
+                    now = time.monotonic()
                     serial_port.write(format_slcan(1, encode_command(position, velocity, kp, kd, torque)))
+                    if last_send is not None:
+                        max_gap = max(max_gap, now - last_send)
+                    last_send = now
                     self.mit_session_frames += 1
-                    time.sleep(MIT_KEEPALIVE_INTERVAL_S)
+                    next_send += MIT_KEEPALIVE_INTERVAL_S
+                    if next_send < now:
+                        next_send = now + MIT_KEEPALIVE_INTERVAL_S
                 hold_deadline = time.monotonic() + hold
+                next_send = time.monotonic()
                 while time.monotonic() < hold_deadline and not self.mit_stop_event.is_set():
-                    serial_port.write(format_slcan(1, encode_command(target, 0.0, kp, kd, torque)))
+                    now = time.monotonic()
+                    if now < next_send:
+                        time.sleep(next_send - now)
+                    now = time.monotonic()
+                    hold_position = target
+                    if mode == "velocity":
+                        with self.lock:
+                            hold_position = (target if self.last_feedback_position_rad is None
+                                             else self.last_feedback_position_rad)
+                        hold_position = min(DEFAULT_RANGES.position_max,
+                                            max(DEFAULT_RANGES.position_min, hold_position))
+                    serial_port.write(format_slcan(1, encode_command(hold_position, 0.0, kp, kd, torque)))
                     self.mit_session_frames += 1
-                    time.sleep(MIT_KEEPALIVE_INTERVAL_S)
+                    next_send += MIT_KEEPALIVE_INTERVAL_S
+                    if next_send < now:
+                        next_send = now + MIT_KEEPALIVE_INTERVAL_S
                 serial_port.write(STOP_FRAME)
                 self.log("轨迹会话已发送停止帧（0xFD）")
+                self.log(f"轨迹发送统计：{self.mit_session_frames} 帧，最大帧间隔 {max_gap * 1000:.1f} ms")
         except (OSError, TimeoutError, ValueError) as exc:
             self.log(f"轨迹会话写入失败: {exc}")
         finally:
@@ -424,6 +481,7 @@ class Runner:
             with self.lock:
                 self.enable_active = False
                 self.mit_thread = None
+                self._logical_tracking_active = False
 
     def start_action(self, name: str, command: list[str]) -> tuple[bool, str]:
         with self.lock:
@@ -472,7 +530,7 @@ class Runner:
         with self.lock:
             self.bridge_tty = ""
             self.bridge = subprocess.Popen(
-                [str(BRIDGE), "--channel", "0", "--unsafe-tx", "--trace"],
+                [str(BRIDGE), "--channel", "0", "--unsafe-tx", "--trace", "--quiet-tx"],
                 cwd=WORKSPACE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, bufsize=1,
             )
@@ -481,7 +539,7 @@ class Runner:
         # Runtime diagnostics share the UC12 CAN queue with MIT traffic. They
         # remain available through send_diag_action(), but must be requested
         # explicitly instead of continuously competing with motion control.
-        self.log("$ " + shlex.join([str(BRIDGE), "--channel", "0", "--unsafe-tx", "--trace"]))
+        self.log("$ " + shlex.join([str(BRIDGE), "--channel", "0", "--unsafe-tx", "--trace", "--quiet-tx"]))
         return True, "CAN0 trace 桥接已启动，等待伪串口路径"
 
     def _read_bridge(self) -> None:
@@ -489,17 +547,31 @@ class Runner:
         process = self.bridge
         for line in process.stdout:
             clean = line.rstrip("\n")
-            self.log("BRIDGE " + clean)
+            # During motion, retain only feedback position updates. Parsing
+            # and formatting every trace line competes with the TX thread.
+            if QUIET_TRACE and clean.startswith("TRACE ") and "TRACE CAN RX " not in clean:
+                continue
+            if not (QUIET_TRACE and clean.startswith("TRACE CAN RX ")):
+                self.log("BRIDGE " + clean)
             semantic = _semantic_can_line(clean)
-            if semantic:
+            if semantic and not QUIET_TRACE:
                 self.log("BRIDGE " + semantic)
             match = FEEDBACK_RE.search(clean)
             if match:
                 payload = bytes.fromhex(match.group(1))
                 if len(payload) == 6:
+                    decoded = decode_feedback(payload)
+                    now = time.monotonic()
                     with self.lock:
                         self.last_feedback_position = payload[1:3].hex().upper()
-                        self.last_feedback_position_rad = float(decode_feedback(payload)["position"])
+                        self.last_feedback_position_rad = float(decoded["position"])
+                        self.last_feedback_velocity_rad_s = float(decoded["velocity"])
+                        if self.logical_position_rad is None:
+                            self.logical_position_rad = self.last_feedback_position_rad
+                        elif self._logical_tracking_active and self._logical_feedback_time is not None:
+                            dt = min(0.25, max(0.0, now - self._logical_feedback_time))
+                            self.logical_position_rad += self.last_feedback_velocity_rad_s * dt
+                        self._logical_feedback_time = now
                         self.feedback_generation += 1
             if clean.startswith("Serial Port: "):
                 self.bridge_tty = clean.removeprefix("Serial Port: ").strip()
@@ -960,16 +1032,29 @@ class Runner:
                 serial_port.write(ENABLE_FRAME)
                 self.log(f"自定义 MIT: p={parsed[0]:g} rad, v={parsed[1]:g} rad/s, Kp={parsed[2]:g}, Kd={parsed[3]:g}, t={parsed[4]:g} Nm")
                 deadline = time.monotonic() + duration
+                next_send = time.monotonic()
+                last_send = None
+                max_gap = 0.0
                 while time.monotonic() < deadline and not self.mit_stop_event.is_set():
+                    now = time.monotonic()
+                    if now < next_send:
+                        time.sleep(next_send - now)
+                    now = time.monotonic()
                     serial_port.write(frame)
+                    if last_send is not None:
+                        max_gap = max(max_gap, now - last_send)
+                    last_send = now
                     self.mit_session_frames += 1
-                    time.sleep(MIT_KEEPALIVE_INTERVAL_S)
+                    next_send += MIT_KEEPALIVE_INTERVAL_S
+                    if next_send < now:
+                        next_send = now + MIT_KEEPALIVE_INTERVAL_S
                 # End every bounded session explicitly.  Letting the stream
                 # go silent makes the firmware watchdog perform the normal
                 # stop, but leaves the next enable racing a stale DRV/encoder
                 # fault.  0xFD follows the firmware's clean ESC path.
                 serial_port.write(STOP_FRAME)
                 self.log("自定义 MIT 会话已发送停止帧（0xFD）")
+                self.log(f"MIT 发送统计：{self.mit_session_frames} 帧，最大帧间隔 {max_gap * 1000:.1f} ms")
         except OSError as exc:
             return False, f"无法写入桥接伪串口 {tty}: {exc}"
         finally:
@@ -994,6 +1079,9 @@ class Runner:
             "enable_active": enable_active,
             "mit_session_frames": self.mit_session_frames,
             "last_feedback_position_rad": self.last_feedback_position_rad,
+            "last_feedback_velocity_rad_s": self.last_feedback_velocity_rad_s,
+            "logical_position_rad": self.logical_position_rad,
+            "logical_turns": None if self.logical_position_rad is None else self.logical_position_rad / (2.0 * math.pi),
             "normal_sha": normal_firmware_config()[0],
             "normal_image": str(normal_firmware_config()[1]),
             "logs": list(self.logs),
@@ -1224,6 +1312,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "请确认机械运动空间、限流和断电路径均已就绪"})
                 return
             ok, message = RUNNER.start_trajectory_session(body)
+            if not ok:
+                RUNNER.log(f"轨迹请求被拒绝: {message}")
         elif parsed.path == "/api/logs/clear":
             RUNNER.clear_logs()
             self._json(HTTPStatus.OK, {"ok": True, "message": "已清除当前实时日志"})
@@ -1240,7 +1330,7 @@ PAGE = r'''<!doctype html>
 <style>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#111827;color:#e5e7eb}body{margin:0}.wrap{max-width:1180px;margin:auto;padding:14px 18px}header{display:flex;gap:20px;justify-content:space-between;align-items:end;border-bottom:1px solid #374151;padding-bottom:12px}h1{font-size:22px;margin:0}h2{font-size:15px;margin:0 0 8px}.muted{color:#9ca3af;font-size:12px}.summary{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0;color:#cbd5e1;font-size:12px}.summary code{background:#0b1220;border:1px solid #374151;border-radius:4px;padding:4px 6px;color:#93c5fd}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px;margin:10px 0}.panel{border:1px solid #374151;border-radius:6px;padding:11px;background:#172033}.panel p{font-size:12px;line-height:1.35;color:#cbd5e1;margin:6px 0}.command{background:#0b1220;padding:7px;border-radius:4px;font:11px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}button{border:1px solid #64748b;border-radius:4px;background:#1e3a5f;color:white;padding:7px 9px;font-size:13px;cursor:pointer}button.danger{background:#7f1d1d;border-color:#ef4444}button.secondary{background:#263449}button:disabled{opacity:.5;cursor:not-allowed}input{width:100%;box-sizing:border-box;background:#0b1220;border:1px solid #475569;color:#e5e7eb;border-radius:4px;padding:7px;margin:5px 0}.check{display:flex;gap:8px;align-items:start;font-size:12px;margin:7px 0}.check input{width:auto;margin:2px 0}#notice{min-height:18px;color:#fcd34d;font-size:13px}.log-head{display:flex;justify-content:space-between;align-items:start;gap:12px}.log-head h2{margin-top:8px}pre{height:330px;overflow:auto;margin:0;background:#050a14;border:1px solid #374151;border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-word;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.state{color:#93c5fd;font-size:12px}@media(max-width:550px){header{display:block}.wrap{padding:12px}pre{height:280px}}
 </style><body><main class="wrap"><header><div><h1>Athena 电机控制台架</h1><div class="muted">固定动作面板。无任意 Shell/CAN 命令入口。</div></div><div id="state" class="state">等待连接</div></header>
-<p id="notice"></p><div class="summary"><span>当前正常固件 SHA-256</span><code id="shaTop">加载中…</code><span>最近反馈位置</span><code id="positionRad">暂无</code><span>推荐顺序：刷写 → 启动 → PING → Snapshot → DRV 状态 → CAN Trace</span></div><section class="grid">
+<p id="notice"></p><div class="summary"><span>当前正常固件 SHA-256</span><code id="shaTop">加载中…</code><span>最近反馈位置</span><code id="positionRad">暂无</code><span>逻辑多圈位置</span><code id="logicalPosition">暂无</code><span>圈数</span><code id="logicalTurns">暂无</code><span>推荐顺序：刷写 → 启动 → PING → Snapshot → DRV 状态 → CAN Trace</span></div><section class="grid">
 <article class="panel"><h2>离线验证</h2><p>构建前或代码修改后执行。不会访问控制板。</p><div class="command">make host-test host-app-test host-tools-test</div><p><button data-action="offline-tests">执行离线主机测试</button></p><div class="command">make SAFE_BRINGUP=0 BRINGUP_INJECT=0 BUILD_DIR=build/webui-normal GCC_PATH=&lt;持久化 Arm GNU Toolchain&gt; -j4</div><p><button data-action="build-normal">重新构建正常固件</button></p></article>
 <article class="panel"><h2>刷写与启动</h2><p>刷写使用逐页擦写、写入、读回校验，并保留 CPU halted。启动前不发送任何运动命令。</p><div class="command">tools/athena_safe_flash.sh flash-normal --confirm-normal-sha <span id="sha"></span> --i-understand-this-writes-main-flash</div><input id="shaInput" aria-label="SHA-256" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="可手动粘贴完整 SHA-256"><p><button class="secondary" id="fillSha" type="button">填入当前 SHA</button></p><label class="check"><input id="physical" type="checkbox">我已确认控制板、ST-LINK、限流电源、机械固定和可断电路径均已就绪。</label><button class="danger" id="flash">刷入正常固件</button><hr><div class="command">tools/athena_safe_flash.sh boot-normal</div><label class="check"><input id="bootReady" type="checkbox">我已确认物理台架可安全启动。</label><button id="boot">启动正常固件</button></article>
 <article class="panel"><h2>正常固件只读验证</h2><p>PING、Snapshot 和 DRV 状态均为只读，不会启用电机。</p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 ping</div><p><button data-action="diag-ping">执行 PING</button></p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 snapshot</div><p><button data-action="diag-snapshot">执行 Snapshot</button></p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 drv-status</div><p><button data-action="diag-drv-status">读取 DRV 状态</button> <button class="secondary" data-action="diag-drv-fault-snapshot">读取故障瞬间快照</button></p><hr><h2>RAM 调试日志</h2><p>默认关闭；开启后只记录运行期关键事件，重启会清空。读取前请停止 CAN0 Trace。</p><p><button data-action="diag-debug-on">开启记录</button> <button class="secondary" data-action="diag-debug-status">读取状态</button> <button class="secondary" data-action="diag-debug-off">关闭记录</button></p><div style="display:flex;gap:6px;align-items:center"><input id="debugLogIndex" type="number" min="0" max="31" step="1" value="0" aria-label="RAM 调试日志索引"><button id="debugLogRead" class="secondary">读取该条日志</button></div></article>
@@ -1251,7 +1341,7 @@ const note=t=>document.querySelector('#notice').textContent=t;const api=async(pa
 async function action(name,extra={}){try{let j=await api('/api/action',{action:name,...extra});note(j.message)}catch(e){note('失败: '+e.message)}}
 document.querySelector('#positionStepCustom').onclick=()=>api('/api/bridge/position-step-custom',{physical_ready:document.querySelector('#enableReady').checked,kp:document.querySelector('#customKp').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#debugLogRead').onclick=()=>api('/api/debug/log',{index:document.querySelector('#debugLogIndex').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
 document.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>action(b.dataset.action));document.querySelector('#fillSha').onclick=()=>{document.querySelector('#shaInput').value=document.querySelector('#sha').textContent;note('已填入当前镜像 SHA-256')};document.querySelector('#flash').onclick=()=>action('flash-normal',{physical_ready:document.querySelector('#physical').checked,sha:document.querySelector('#shaInput').value.trim()});document.querySelector('#boot').onclick=()=>action('boot-normal',{physical_ready:document.querySelector('#bootReady').checked});document.querySelector('#bridgeStart').onclick=()=>api('/api/bridge/start').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#bridgeStop').onclick=()=>api('/api/bridge/stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#mitCheck').onclick=()=>api('/api/bridge/mit-check').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#enableOnce').onclick=()=>api('/api/bridge/enable-once',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#holdZero').onclick=()=>api('/api/bridge/hold-zero',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#holdTinyKp').onclick=()=>api('/api/bridge/hold-tiny-kp',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#feedforwardMin').onclick=()=>api('/api/bridge/feedforward-min',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#feedforwardLow').onclick=()=>api('/api/bridge/feedforward-low',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#feedforwardMedium').onclick=()=>api('/api/bridge/feedforward-medium',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#feedforwardHigh').onclick=()=>api('/api/bridge/feedforward-high',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#positionStep').onclick=()=>api('/api/bridge/position-step',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#positionStepStiff').onclick=()=>api('/api/bridge/position-step-stiff',{physical_ready:document.querySelector('#enableReady').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#clearLogs').onclick=()=>api('/api/logs/clear').then(x=>{document.querySelector('#log').textContent='';note(x.message)}).catch(e=>note('失败: '+e.message));
-async function refresh(){try{let r=await fetch('/api/status',{headers:{'X-Bench-Token':token}});if(!r.ok)throw Error('令牌无效');let s=await r.json();document.querySelector('#sha').textContent=s.normal_sha;document.querySelector('#shaTop').textContent=s.normal_sha;document.querySelector('#positionRad').textContent=s.last_feedback_position_rad===null?'暂无':Number(s.last_feedback_position_rad).toFixed(5)+' rad';let busy=s.mit_active||s.enable_active;document.querySelector('#state').textContent=s.active?'正在执行: '+s.active.name:(busy?'CAN 动作运行中':(s.bridge_running?'CAN0 Trace 运行中 '+s.bridge_tty:'空闲'));['mitCheck','enableOnce','holdZero','holdTinyKp','feedforwardMin','feedforwardLow','feedforwardMedium','feedforwardHigh','positionStep','positionStepStiff','positionStepCustom','mitCustom'].forEach(id=>{let e=document.querySelector('#'+id);if(e)e.disabled=busy});let log=document.querySelector('#log'),nearEnd=log.scrollHeight-log.scrollTop-log.clientHeight<40;log.textContent=s.logs.join('\n');if(nearEnd)log.scrollTop=log.scrollHeight}catch(e){note('无法读取状态: '+e.message)}}refresh();setInterval(refresh,1200);
+async function refresh(){try{let r=await fetch('/api/status',{headers:{'X-Bench-Token':token}});if(!r.ok)throw Error('令牌无效');let s=await r.json();document.querySelector('#sha').textContent=s.normal_sha;document.querySelector('#shaTop').textContent=s.normal_sha;document.querySelector('#positionRad').textContent=s.last_feedback_position_rad===null?'暂无':Number(s.last_feedback_position_rad).toFixed(5)+' rad';let lp=document.querySelector('#logicalPosition'),lt=document.querySelector('#logicalTurns');if(lp)lp.textContent=s.logical_position_rad===null?'暂无':Number(s.logical_position_rad).toFixed(5)+' rad';if(lt)lt.textContent=s.logical_turns===null?'暂无':Number(s.logical_turns).toFixed(4);let busy=s.mit_active||s.enable_active;document.querySelector('#state').textContent=s.active?'正在执行: '+s.active.name:(busy?'CAN 动作运行中':(s.bridge_running?'CAN0 Trace 运行中 '+s.bridge_tty:'空闲'));['mitCheck','enableOnce','holdZero','holdTinyKp','feedforwardMin','feedforwardLow','feedforwardMedium','feedforwardHigh','positionStep','positionStepStiff','positionStepCustom','mitCustom'].forEach(id=>{let e=document.querySelector('#'+id);if(e)e.disabled=busy});let log=document.querySelector('#log'),nearEnd=log.scrollHeight-log.scrollTop-log.clientHeight<40;log.textContent=s.logs.join('\n');if(nearEnd)log.scrollTop=log.scrollHeight}catch(e){note('无法读取状态: '+e.message)}}refresh();setInterval(refresh,1200);
 </script></body></html>'''
 
 
@@ -1310,16 +1400,19 @@ PAGE = PAGE.replace(
     '力矩测试持续 1 秒自动停止。',
     '除单次受限使能外，MIT 测试会以 10 ms 周期持续发送控制帧并保持反馈，1 秒后自动停止。',
 ).replace(
-    '</section><p class="panel">',
-).replace(
     "document.querySelectorAll('[data-action]').forEach",
     "document.querySelector('#mitCustom').onclick=()=>api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:document.querySelector('#mitP').value,velocity:document.querySelector('#mitV').value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,torque:document.querySelector('#mitT').value,duration:document.querySelector('#mitDuration').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#mitStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelectorAll('[data-action]').forEach",
 ).replace(
     '<span>当前正常固件 SHA-256</span>',
-    '<span>当前正常固件 SHA-256</span><span>最近反馈位置</span><code id="positionRad">暂无</code>',
+    '<span>当前正常固件 SHA-256</span>',
 ).replace(
     "document.querySelector('#shaTop').textContent=s.normal_sha;",
-    "document.querySelector('#shaTop').textContent=s.normal_sha;document.querySelector('#positionRad').textContent=s.last_feedback_position_rad===null?'暂无':Number(s.last_feedback_position_rad).toFixed(5)+' rad';",
+    "document.querySelector('#shaTop').textContent=s.normal_sha;",
+)
+PAGE = PAGE.replace(
+    "document.querySelector('#mitCustom').onclick=()=>api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:document.querySelector('#mitP').value,velocity:document.querySelector('#mitV').value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,torque:document.querySelector('#mitT').value,duration:document.querySelector('#mitDuration').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#mitStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));",
+    "const mitCustomButton=document.querySelector('#mitCustom'),mitStopButton=document.querySelector('#mitStop');if(mitCustomButton)mitCustomButton.onclick=()=>api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:document.querySelector('#mitP').value,velocity:document.querySelector('#mitV').value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,torque:document.querySelector('#mitT').value,duration:document.querySelector('#mitDuration').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));if(mitStopButton)mitStopButton.onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));",
+    1,
 )
 
 # The fixed Kp position-step control is intentionally no longer exposed in the UI.
@@ -1332,7 +1425,11 @@ PAGE = re.sub(r"document\.querySelector\('#positionStepCustom'\)\.onclick=.*?;\n
 # parameter MIT panel.  The raw panel remains useful for protocol/FOC checks;
 # this panel owns the time-varying position and velocity references needed for
 # repeatable motion tests.
-_trajectory_panel = r'''<article class="panel tab-panel" data-tab="trajectory"><h2>上位机轨迹控制</h2><p>位置模式在上位机以 10 ms 周期生成三次 S 曲线的 p(t)/v(t)；恒速模式以给定速度推进位置参考。两种模式都在到达后用 v=0 保持目标，直到保持时间结束或点击停止。固件不再夹紧位置误差。</p><p><select id="trajectoryMode" aria-label="轨迹模式"><option value="position">S 曲线到目标位置</option><option value="velocity">恒速前进</option></select></p><p id="trajectoryPositionInputs"><input id="trajectoryTarget" type="number" step="0.001" placeholder="目标位置 rad (-12.5..12.5)"><input id="trajectorySpeedLimit" type="number" min="0.05" max="20" step="0.05" value="2" placeholder="最大速度 rad/s"></p><p id="trajectoryVelocityInputs" hidden><input id="trajectoryVelocity" type="number" min="-20" max="20" step="0.05" value="1" placeholder="速度 rad/s（正负决定方向）"></p><p><input id="trajectoryDuration" type="number" min="0.1" max="300" step="0.1" value="2" placeholder="执行时间 s"><input id="trajectoryHold" type="number" min="0" max="300" step="0.1" value="2" placeholder="到达后保持 s（0 为不保持）"><input id="trajectoryKp" type="number" min="0" max="500" step="0.1" value="20" placeholder="Kp"><input id="trajectoryKd" type="number" min="0" max="5" step="0.01" value="1" placeholder="Kd"><input id="trajectoryTorque" type="number" min="-40" max="40" step="0.01" value="0" placeholder="前馈力矩 Nm"></p><p class="muted">S 曲线自动检查峰值速度：最短执行时间 = 1.5 × 位移 / 速度上限。当前位置由动作前置检查实时取得。</p><button id="trajectoryStart">开始轨迹</button> <button class="danger" id="trajectoryStop">停止轨迹</button></article>'''
+_trajectory_panel = r'''<article class="panel tab-panel" data-tab="trajectory"><h2>上位机轨迹控制</h2><p>位置模式以 20 ms 周期生成三次 S 曲线的 p(t)/v(t)。恒速模式固定 Kp=0，只用 Kd 速度环；MIT 位置字段保持在可编码范围内，主机按反馈速度记录逻辑多圈位置与圈数。</p><p><select id="trajectoryMode" aria-label="轨迹模式"><option value="position">S 曲线到目标位置</option><option value="velocity">恒速前进</option></select></p><p id="trajectoryPositionInputs"><input id="trajectoryTarget" type="number" step="0.001" placeholder="目标位置 rad (-100..100)"><input id="trajectorySpeedLimit" type="number" min="0.05" max="20" step="0.05" value="2" placeholder="最大速度 rad/s"></p><p id="trajectoryVelocityInputs" hidden><input id="trajectoryVelocity" type="number" min="-20" max="20" step="0.05" value="0.2" placeholder="速度 rad/s（正负决定方向）"></p><p><input id="trajectoryDuration" type="number" min="0.1" max="300" step="0.1" value="2" placeholder="执行时间 s"><input id="trajectoryHold" type="number" min="0" max="300" step="0.1" value="2" placeholder="到达后保持 s（0 为不保持）"><input id="trajectoryKp" type="number" min="0" max="500" step="0.1" value="20" placeholder="Kp"><input id="trajectoryKd" type="number" min="0" max="5" step="0.01" value="1" placeholder="Kd"><input id="trajectoryTorque" type="number" min="-40" max="40" step="0.01" value="0" placeholder="前馈力矩 Nm"></p><p class="muted">位置模式受当前 P_MIN/P_MAX 限制。恒速模式开始时以最新反馈重置逻辑位置，随后由反馈速度积分；停止后不保持转动。</p><button id="trajectoryStart">开始轨迹</button> <button class="danger" id="trajectoryStop">停止轨迹</button></article>'''
+PAGE = PAGE.replace(
+    'id="trajectoryVelocity" type="number" min="-20" max="20" step="0.05" value="1"',
+    'id="trajectoryVelocity" type="number" min="-20" max="20" step="0.05" value="0.2"',
+)
 PAGE = PAGE.replace(
     '<button class="tab" data-tab-select="mit">自定义 MIT</button>',
     '<button class="tab" data-tab-select="mit">自定义 MIT</button><button class="tab" data-tab-select="trajectory">轨迹控制</button>',
@@ -1352,6 +1449,19 @@ if '上位机轨迹控制' not in PAGE:
         '</article>' + _trajectory_panel + '</section><div class="log-head">',
         1,
     )
+if '上位机轨迹控制' not in PAGE:
+    PAGE = PAGE.replace(
+        '</section><div class="log-head">',
+        _trajectory_panel + '</section><div class="log-head">',
+        1,
+    )
+if 'id="configSet"' not in PAGE:
+    _config_panel = r'''<article class="panel tab-panel" data-tab="readonly"><h2>CAN 配置</h2><p><select id="configField"><option value="3">CAN_TIMEOUT</option><option value="0">PHASE_ORDER</option><option value="1">CAN_ID</option><option value="2">CAN_MASTER</option></select><input id="configValue" type="number" step="any" placeholder="配置值"><label class="check"><input id="configCommit" type="checkbox">提交到 Flash</label><button id="configSet">通过 CAN 写入配置</button></p></article>'''
+    PAGE = PAGE.replace(
+        '</section><div class="log-head">',
+        _config_panel + '</section><div class="log-head">',
+        1,
+    )
 PAGE = PAGE.replace(
     'input{width:100%;',
     'input,select{width:100%;',
@@ -1366,11 +1476,9 @@ PAGE = PAGE.replace(
     '</body></html>',
     r'''<script>
 const trajectoryMode=document.querySelector('#trajectoryMode');
-const syncTrajectoryMode=()=>{const position=trajectoryMode.value==='position';document.querySelector('#trajectoryPositionInputs').hidden=!position;document.querySelector('#trajectoryVelocityInputs').hidden=position};
-trajectoryMode.onchange=syncTrajectoryMode;syncTrajectoryMode();
-document.querySelector('#trajectoryStart').onclick=()=>api('/api/bridge/trajectory',{physical_ready:document.querySelector('#enableReady').checked,mode:trajectoryMode.value,target:document.querySelector('#trajectoryTarget').value,speed_limit:document.querySelector('#trajectorySpeedLimit').value,velocity:document.querySelector('#trajectoryVelocity').value,duration:document.querySelector('#trajectoryDuration').value,hold:document.querySelector('#trajectoryHold').value,kp:document.querySelector('#trajectoryKp').value,kd:document.querySelector('#trajectoryKd').value,torque:document.querySelector('#trajectoryTorque').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
-document.querySelector('#trajectoryStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
-document.querySelector('#configSet').onclick=()=>api('/api/config/set',{field:document.querySelector('#configField').value,value:document.querySelector('#configValue').value,commit:document.querySelector('#configCommit').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
+if(trajectoryMode){const syncTrajectoryMode=()=>{const position=trajectoryMode.value==='position',kp=document.querySelector('#trajectoryKp');document.querySelector('#trajectoryPositionInputs').hidden=!position;document.querySelector('#trajectoryVelocityInputs').hidden=position;kp.disabled=!position;if(!position)kp.value='0'};trajectoryMode.onchange=syncTrajectoryMode;syncTrajectoryMode();document.querySelector('#trajectoryStart').onclick=()=>api('/api/bridge/trajectory',{physical_ready:document.querySelector('#enableReady').checked,mode:trajectoryMode.value,target:document.querySelector('#trajectoryTarget').value,speed_limit:document.querySelector('#trajectorySpeedLimit').value,velocity:document.querySelector('#trajectoryVelocity').value,duration:document.querySelector('#trajectoryDuration').value,hold:document.querySelector('#trajectoryHold').value,kp:document.querySelector('#trajectoryKp').value,kd:document.querySelector('#trajectoryKd').value,torque:document.querySelector('#trajectoryTorque').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#trajectoryStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));}
+const configSet=document.querySelector('#configSet');
+if(configSet)configSet.onclick=()=>api('/api/config/set',{field:document.querySelector('#configField').value,value:document.querySelector('#configValue').value,commit:document.querySelector('#configCommit').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
 </script></body></html>''',
     1,
 )

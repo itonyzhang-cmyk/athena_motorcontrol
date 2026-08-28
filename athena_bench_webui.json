@@ -1,4 +1,4 @@
 {
-  "normal_sha": "a0b71c381ee88ffc1150de887c9b9b3979187b4c636df2276bf317c73f449827",
-  "normal_image": "artifacts/athena_can_config_uart_migration_20260827/motorcontrol.bin"
+  "normal_sha": "f9cfd8e4bfa1d753bee9d496b81c636b851679443b547e75f62be657fe78679c",
+  "normal_image": "artifacts/athena_adc_live_offset_rearm_20260828/motorcontrol.bin"
 }

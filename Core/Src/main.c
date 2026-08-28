@@ -235,7 +235,7 @@ int main(void)
   if(isnan(I_FW_MAX) || I_FW_MAX ==-1){I_FW_MAX=0;}
   if(CAN_ID==-1){CAN_ID = 1;}
   if(CAN_MASTER==-1){CAN_MASTER = 0;}
-  if(CAN_TIMEOUT==-1){CAN_TIMEOUT = 1000;}
+  if(CAN_TIMEOUT==-1){CAN_TIMEOUT = 3000;}
   if(isnan(R_NOMINAL) || R_NOMINAL==-1){R_NOMINAL = 0.0f;}
   if(isnan(TEMP_MAX) || TEMP_MAX==-1){TEMP_MAX = 125.0f;}
   if(isnan(I_MAX_CONT) || I_MAX_CONT==-1){I_MAX_CONT = 14.0f;}

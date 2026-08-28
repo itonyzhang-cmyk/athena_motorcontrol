@@ -31,7 +31,7 @@ the bench. The user must perform the physical write/boot actions:
    valid application protocol client because the normal image consumes CAN
    frames as MIT control traffic.
    An uninitialized/legacy configuration page is expected to select the RAM
-   defaults: receive ID `0x001`, reply ID `0x000`, and timeout 1000 cycles.
+   defaults: receive ID `0x001`, reply ID `0x000`, and timeout 3000 cycles.
 3. With no motor command, wait at least 100 ms. Confirm the power stage stays
    idle; no automatic transition to `MOTOR_MODE` occurs. The PC13 status LED
    should change state at approximately 1 Hz while the controller is idle.

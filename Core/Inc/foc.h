@@ -67,6 +67,8 @@ void abc(float theta, float d, float q, float *a, float *b, float *c);
 void dq0(float theta, float a, float b, float c, float *d, float *q);
 void svm(float v_max, float u, float v, float w, float *dtc_u, float *dtc_v, float *dtc_w);
 void zero_current(ControllerStruct *controller);
+/* Re-sample the CSA offsets after the live neutral PWM bridge is enabled. */
+void zero_current_live(ControllerStruct *controller);
 void reset_foc(ControllerStruct *controller);
 void reset_observer(ObserverStruct *observer);
 void init_controller_params(ControllerStruct *controller);

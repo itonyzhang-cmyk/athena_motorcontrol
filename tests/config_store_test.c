@@ -16,7 +16,7 @@ void config_store_tests(void)
     assert(config_payload_valid(int_regs, float_regs));
     assert(int_regs[1] == 1);
     assert(int_regs[2] == 0);
-    assert(int_regs[3] == 1000);
+    assert(int_regs[3] == 3000);
 
     crc = config_payload_crc32(int_regs, float_regs);
     assert(config_metadata_valid(CONFIG_METADATA_MAGIC,
