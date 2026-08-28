@@ -198,6 +198,31 @@ Do not record secrets, access tokens, or private credentials here.
   these sessions as output-axis velocity acceptance until the gear-ratio
   configuration and velocity-scale evidence are reconciled.
 
+### 2026-08-29 - 20 ms host schedule and closed-loop retest
+
+- Restored the WebUI process with `ATHENA_MIT_INTERVAL_S=0.020` after a
+  restart had silently fallen back to the 5 ms default. The CAN bridge was
+  recovered by terminating only an orphaned `uc12_slcan_bridge` process that
+  held the UC12 device. Three non-enabling MIT frames received feedback before
+  any motion command.
+- On normal image `86e4705c191c5c735881b74e8e1a9cb2f34a8ce44d72087a24d8730366539789`,
+  each 3 s session sent 151 frames with maximum gaps of 29.8-30.0 ms and
+  emitted the `0xFD` stop frame. Status afterward was `mit_active=false` and
+  `enable_active=false`.
+- A position S-curve from 0.0544 to 0.3000 rad (`Kp=3`, `Kd=0.5`, no hold)
+  moved the feedback to 0.2474 rad. The 0.0526 rad residual is recorded as a
+  no-hold tracking error, not a position acceptance pass.
+- Velocity sessions at -0.05, -0.10, and -0.20 rad/s (`Kp=0`, `Kd=1`, 3 s)
+  did not produce a measurable net feedback displacement. The velocity-mode
+  protocol, timing, feedback, and stop path passed, but output-axis constant
+  velocity remains unaccepted pending a low-risk velocity-loop/gear-scale
+  investigation.
+- Read-only post-stop diagnostics found no latched safety, CAN, SPI, or ADC
+  timeout fault. The displayed about -16 A phase values were captured with
+  `POEN=0` after a live-PWM CSA zero capture, so they are an off-state
+  common-mode mismatch rather than physical winding current. Diagnostics now
+  state that boundary explicitly.
+
 ### 2026-08-29 - GD32F303 FWDGT hardware reset verification
 
 - Target controller UID: `39305137-14303434-47457A29`. The FWDGT-only

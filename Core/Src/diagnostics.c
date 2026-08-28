@@ -451,8 +451,10 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
 		case 113U: return (uint32_t)E_ZERO;
 		case 114U: return config_payload_crc32(__int_reg, __float_reg);
 		case 115U: return encoder_lut_checksum();
-		/* ADC/current-chain evidence.  These pages are deliberately read-only and
-		 * expose the exact values used by analog_sample(), not reconstructed values. */
+		/* ADC/current-chain evidence. These pages expose the exact values used by
+		 * analog_sample(), not reconstructed values. The CSA offset is captured
+		 * with neutral PWM active, so after the gate is disabled these deltas are
+		 * electrical-state evidence only, not a physical winding-current reading. */
 		case 116U: return (uint32_t)((uint16_t)controller.adc_b_raw) |
 		                  ((uint32_t)(uint16_t)controller.adc_c_raw << 16);
 		case 117U: return (uint32_t)((uint16_t)controller.adc_b_offset) |
