@@ -23,7 +23,9 @@ extern "C" {
 #define KT						__float_reg[14]									// Torque Constant (N-m/A)
 #define R_TH					__float_reg[15]									// Thermal resistance (C/W)
 #define C_TH					__float_reg[16]									// Thermal mass (C/J)
-#define GR						__float_reg[17]									// Gear ratio
+/* Retained only to read legacy configuration pages. Reducer kinematics are
+ * intentionally an upper-controller concern and must not enter MIT/FOC. */
+#define GR						__float_reg[17]
 #define I_CAL					__float_reg[18]									// Calibration Current
 #define P_MIN					__float_reg[19]									// Position setpoint lower limit (rad)
 #define P_MAX					__float_reg[20]									// Position setupoint upper bound (rad)

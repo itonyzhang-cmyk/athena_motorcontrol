@@ -156,7 +156,7 @@ void can_tx_init(CANTxMessage *msg){
 void pack_reply(CANTxMessage *msg, uint8_t id, float p, float v, float t){
     int p_int = float_to_uint(p, P_MIN, P_MAX, 16);
     int v_int = float_to_uint(v, V_MIN, V_MAX, 12);
-    int t_int = float_to_uint(t, -I_MAX*KT*GR, I_MAX*KT*GR, 12);
+    int t_int = float_to_uint(t, -I_MAX*KT, I_MAX*KT, 12);
     msg->data[0] = id;
     msg->data[1] = p_int>>8;
     msg->data[2] = p_int&0xFF;
@@ -192,7 +192,7 @@ void unpack_cmd(CANRxMessage msg, float *commands){// ControllerStruct * control
         commands[1] = uint_to_float(v_int, V_MIN, V_MAX, 12);
         commands[2] = uint_to_float(kp_int, KP_MIN, KP_MAX, 12);
         commands[3] = uint_to_float(kd_int, KD_MIN, KD_MAX, 12);
-        commands[4] = uint_to_float(t_int, -I_MAX*KT*GR, I_MAX*KT*GR, 12);
+        commands[4] = uint_to_float(t_int, -I_MAX*KT, I_MAX*KT, 12);
     //printf("Received   ");
     //printf("%.3f  %.3f  %.3f  %.3f  %.3f   %.3f", controller->p_des, controller->v_des, controller->kp, controller->kd, controller->t_ff, controller->i_q_ref);
     //printf("\n\r");
@@ -310,7 +310,7 @@ void pack_reply(can_trasnmit_message_struct *msg, uint8_t id, float p, float v, 
 {
   int p_int = float_to_uint(p, P_MIN, P_MAX, 16);
   int v_int = float_to_uint(v, V_MIN, V_MAX, 12);
-  int t_int = float_to_uint(t, -I_MAX * KT * GR, I_MAX * KT * GR, 12);
+  int t_int = float_to_uint(t, -I_MAX * KT, I_MAX * KT, 12);
   msg->tx_data[0] = id;
   msg->tx_data[1] = p_int >> 8;
   msg->tx_data[2] = p_int & 0xFF;
@@ -350,6 +350,6 @@ void unpack_cmd(can_receive_message_struct msg, float *commands)
   commands[1] = uint_to_float(v_int, V_MIN, V_MAX, 12);
   commands[2] = uint_to_float(kp_int, KP_MIN, KP_MAX, 12);
   commands[3] = uint_to_float(kd_int, KD_MIN, KD_MAX, 12);
-  commands[4] = uint_to_float(t_int, -I_MAX * KT * GR, I_MAX * KT * GR, 12);
+  commands[4] = uint_to_float(t_int, -I_MAX * KT, I_MAX * KT, 12);
 }
 #endif

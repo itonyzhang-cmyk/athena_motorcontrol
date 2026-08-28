@@ -115,6 +115,23 @@ def configured_mit_ranges() -> MitRanges:
                      torque_max=DEFAULT_RANGES.torque_max)
 
 
+def configured_output_reduction() -> float:
+    """Load the fixed motor-to-output reduction used by the upper controller."""
+    try:
+        reduction = float(json.loads(NORMAL_CONFIG.read_text(encoding="utf-8"))["output_reduction"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 1.0
+    return reduction if math.isfinite(reduction) and reduction >= 1.0 else 1.0
+
+
+def output_to_motor(position: float, velocity: float, kp: float, kd: float,
+                    torque: float, reduction: float) -> tuple[float, float, float, float, float]:
+    """Map output-axis physical commands to the motor-side MIT protocol."""
+    return (position * reduction, velocity * reduction,
+            kp / (reduction * reduction), kd / (reduction * reduction),
+            torque / reduction)
+
+
 def persist_mit_ranges(ranges: MitRanges) -> None:
     """Persist a controller-confirmed P_MIN/P_MAX update for the next restart."""
     data = json.loads(NORMAL_CONFIG.read_text(encoding="utf-8"))
@@ -141,7 +158,7 @@ def _semantic_can_line(clean: str, ranges: MitRanges) -> str | None:
             torque = tq * 80.0 / 4095.0 - 40.0
             if abs(torque) <= 0.01:
                 torque = 0.0
-            return ("CAN 语义 TX: MIT p={:.4f} rad, v={:.3f} rad/s, "
+            return ("CAN 语义 TX: MIT(电机侧) p={:.4f} rad, v={:.3f} rad/s, "
                     "Kp={:.2f}, Kd={:.3f}, t_ff={:.3f} Nm".format(
                         p * (ranges.position_max - ranges.position_min) / 65535.0 + ranges.position_min,
                         v * 130.0 / 4095.0 - 65.0,
@@ -155,7 +172,7 @@ def _semantic_can_line(clean: str, ranges: MitRanges) -> str | None:
         if abs(torque) <= 0.01:
             torque = 0.0
         decoded["torque"] = torque
-        return ("CAN 语义 RX: 反馈(上一控制周期) p={position:.4f} rad, "
+        return ("CAN 语义 RX: 电机侧反馈(上一控制周期) p={position:.4f} rad, "
                 "v_est={velocity:.3f} rad/s, t_filt={torque:.3f} Nm"
                 .format(**decoded))
     return None
@@ -174,6 +191,7 @@ class Runner:
     def __init__(self) -> None:
         self.lock = threading.Lock()
         self.mit_ranges = configured_mit_ranges()
+        self.output_reduction = configured_output_reduction()
         self.active: dict[str, Any] | None = None
         self.logs: deque[str] = deque(maxlen=1600)
         self.last_result: dict[str, Any] = {"state": "idle", "exit_code": None}
@@ -273,6 +291,8 @@ class Runner:
                   (1, 14), (1, 17), (1, 19), (1, 20), (1, 21), (1, 22),
                   (1, 23), (1, 24), (1, 8))
         if not 0 <= field < len(fields): return False, "配置字段编号无效"
+        if field == 13:
+            return False, "GR 是无效的旧配置；请在上位机修改 output_reduction"
         with self.lock:
             ranges = self.mit_ranges
         if field in (14, 15):
@@ -384,6 +404,7 @@ class Runner:
         """Start the host-owned trajectory producer after a successful preflight."""
         with self.lock:
             ranges = self.mit_ranges
+            reduction = self.output_reduction
         try:
             mode = str(values.get("mode", "position"))
             kp = float(values.get("kp"))
@@ -406,15 +427,20 @@ class Runner:
             if mode == "position":
                 target = float(values.get("target"))
                 speed_limit = float(values.get("speed_limit"))
-                if not ranges.position_min <= target <= ranges.position_max or not math.isfinite(target):
-                    return False, ("目标位置超出当前 MIT 位置范围 "
-                                   f"{ranges.position_min:g}..{ranges.position_max:g} rad")
-                if not 0.05 <= speed_limit <= TRAJECTORY_MAX_SPEED_RAD_S or not math.isfinite(speed_limit):
-                    return False, f"速度上限必须在 0.05..{TRAJECTORY_MAX_SPEED_RAD_S:g} rad/s"
+                if not (math.isfinite(target) and
+                        ranges.position_min <= target * reduction <= ranges.position_max):
+                    return False, ("输出端目标位置超出可编码范围 "
+                                   f"{ranges.position_min / reduction:g}..{ranges.position_max / reduction:g} rad")
+                output_speed_max = min(TRAJECTORY_MAX_SPEED_RAD_S,
+                                       ranges.velocity_max / reduction)
+                if not 0.05 <= speed_limit <= output_speed_max or not math.isfinite(speed_limit):
+                    return False, f"输出端速度上限必须在 0.05..{output_speed_max:g} rad/s"
             else:
                 velocity = float(values.get("velocity"))
-                if not 0.05 <= abs(velocity) <= TRAJECTORY_MAX_SPEED_RAD_S or not math.isfinite(velocity):
-                    return False, f"速度必须在 +/-0.05..{TRAJECTORY_MAX_SPEED_RAD_S:g} rad/s"
+                output_speed_max = min(TRAJECTORY_MAX_SPEED_RAD_S,
+                                       ranges.velocity_max / reduction)
+                if not 0.05 <= abs(velocity) <= output_speed_max or not math.isfinite(velocity):
+                    return False, f"输出端速度必须在 +/-0.05..{output_speed_max:g} rad/s"
                 if kp != 0.0:
                     return False, "恒速模式固定使用 Kp=0；位置环不能参与连续旋转"
         except (TypeError, ValueError):
@@ -429,8 +455,9 @@ class Runner:
                 return False, "请先启动 CAN0 trace"
             if start is None:
                 return False, "未取得当前位置；请重新执行动作前置检查"
+            start_output = start / reduction
             if mode == "position":
-                minimum_duration = 1.5 * abs(target - start) / speed_limit
+                minimum_duration = 1.5 * abs(target - start_output) / speed_limit
                 if duration < minimum_duration:
                     return False, (f"执行时间过短：该 S 曲线至少需要 {minimum_duration:.3f} 秒，"
                                    f"才能不超过 {speed_limit:g} rad/s")
@@ -438,7 +465,7 @@ class Runner:
                 # Velocity mode is continuous.  The encoded MIT position is
                 # rebased around live feedback on every frame; logical multi-
                 # turn position is tracked independently on the host.
-                target = start
+                target = start_output
             self.enable_active = True
             self.mit_stop_event.clear()
             self.mit_session_frames = 0
@@ -450,8 +477,8 @@ class Runner:
                 self._logical_feedback_position_rad = start
                 self._logical_tracking_active = True
             request = {"mode": mode, "kp": kp, "kd": kd, "torque": torque,
-                       "duration": duration, "hold": hold, "start": start,
-                       "target": target, "ranges": ranges}
+                       "duration": duration, "hold": hold, "start": start_output,
+                       "target": target, "ranges": ranges, "reduction": reduction}
             if mode == "position":
                 request["speed_limit"] = speed_limit
             else:
@@ -468,6 +495,7 @@ class Runner:
         duration = float(request["duration"])
         hold = float(request["hold"])
         kp, kd, torque = (float(request[name]) for name in ("kp", "kd", "torque"))
+        reduction = float(request["reduction"])
         with self.lock:
             tty = self.bridge_tty
         ranges = request["ranges"]
@@ -481,8 +509,8 @@ class Runner:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
                 self.log("S 曲线轨迹: " if mode == "position" else "恒速轨迹: ")
-                self.log(f"起点={start:.4f} rad, 终点={target:.4f} rad, 执行={duration:g} s, "
-                         f"Kp={kp:g}, Kd={kd:g}, t_ff={torque:g}")
+                self.log(f"输出端起点={start:.4f} rad, 终点={target:.4f} rad, 执行={duration:g} s, "
+                         f"Kp={kp:g}, Kd={kd:g}, t_ff={torque:g}; 减速比={reduction:g}:1")
                 started = time.monotonic()
                 next_send = started
                 last_send = None
@@ -502,13 +530,16 @@ class Runner:
                             feedback_position = self.last_feedback_position_rad
                         # Kp is deliberately zero in continuous velocity mode;
                         # p_des is a bounded transport placeholder only.
-                        position = start if feedback_position is None else feedback_position
-                        position = min(ranges.position_max, max(ranges.position_min, position))
+                        position = start if feedback_position is None else feedback_position / reduction
+                    motor_position, motor_velocity, motor_kp, motor_kd, motor_torque = output_to_motor(
+                        position, velocity, kp, kd, torque, reduction)
+                    motor_position = min(ranges.position_max, max(ranges.position_min, motor_position))
                     now = time.monotonic()
                     if now < next_send:
                         time.sleep(next_send - now)
                     now = time.monotonic()
-                    serial_port.write(format_slcan(1, encode_command(position, velocity, kp, kd, torque, ranges)))
+                    serial_port.write(format_slcan(1, encode_command(
+                        motor_position, motor_velocity, motor_kp, motor_kd, motor_torque, ranges)))
                     if last_send is not None:
                         max_gap = max(max_gap, now - last_send)
                     last_send = now
@@ -527,9 +558,12 @@ class Runner:
                     if mode == "velocity":
                         with self.lock:
                             hold_position = (target if self.last_feedback_position_rad is None
-                                             else self.last_feedback_position_rad)
-                        hold_position = min(ranges.position_max, max(ranges.position_min, hold_position))
-                    serial_port.write(format_slcan(1, encode_command(hold_position, 0.0, kp, kd, torque, ranges)))
+                                             else self.last_feedback_position_rad / reduction)
+                    motor_position, _, motor_kp, motor_kd, motor_torque = output_to_motor(
+                        hold_position, 0.0, kp, kd, torque, reduction)
+                    motor_position = min(ranges.position_max, max(ranges.position_min, motor_position))
+                    serial_port.write(format_slcan(1, encode_command(
+                        motor_position, 0.0, motor_kp, motor_kd, motor_torque, ranges)))
                     self.mit_session_frames += 1
                     next_send += MIT_KEEPALIVE_INTERVAL_S
                     if next_send < now:
@@ -1160,10 +1194,14 @@ class Runner:
             "mit_active": mit_active,
             "enable_active": enable_active,
             "mit_session_frames": self.mit_session_frames,
-            "last_feedback_position_rad": self.last_feedback_position_rad,
-            "last_feedback_velocity_rad_s": self.last_feedback_velocity_rad_s,
-            "logical_position_rad": self.logical_position_rad,
-            "logical_turns": None if self.logical_position_rad is None else self.logical_position_rad / (2.0 * math.pi),
+            "last_feedback_motor_position_rad": self.last_feedback_position_rad,
+            "last_feedback_motor_velocity_rad_s": self.last_feedback_velocity_rad_s,
+            "last_feedback_output_position_rad": None if self.last_feedback_position_rad is None else self.last_feedback_position_rad / self.output_reduction,
+            "last_feedback_output_velocity_rad_s": None if self.last_feedback_velocity_rad_s is None else self.last_feedback_velocity_rad_s / self.output_reduction,
+            "logical_motor_position_rad": self.logical_position_rad,
+            "logical_output_position_rad": None if self.logical_position_rad is None else self.logical_position_rad / self.output_reduction,
+            "logical_output_turns": None if self.logical_position_rad is None else self.logical_position_rad / (self.output_reduction * 2.0 * math.pi),
+            "output_reduction": self.output_reduction,
             "mit_position_min": self.mit_ranges.position_min,
             "mit_position_max": self.mit_ranges.position_max,
             "normal_sha": normal_firmware_config()[0],
@@ -1430,6 +1468,30 @@ async function refresh(){try{let r=await fetch('/api/status',{headers:{'X-Bench-
 
 
 PAGE = PAGE.replace(
+    '<span>最近反馈位置</span><code id="positionRad">暂无</code><span>逻辑多圈位置</span>',
+    '<span>电机侧反馈</span><code id="motorPositionRad">暂无</code><span>输出端反馈</span><code id="outputPositionRad">暂无</code><span>输出端逻辑多圈</span>',
+    1,
+).replace(
+    "document.querySelector('#positionRad').textContent=s.last_feedback_position_rad===null?'暂无':Number(s.last_feedback_position_rad).toFixed(5)+' rad';",
+    "document.querySelector('#motorPositionRad').textContent=s.last_feedback_motor_position_rad===null?'暂无':Number(s.last_feedback_motor_position_rad).toFixed(5)+' rad';document.querySelector('#outputPositionRad').textContent=s.last_feedback_output_position_rad===null?'暂无':Number(s.last_feedback_output_position_rad).toFixed(5)+' rad';",
+    1,
+).replace(
+    "s.logical_position_rad===null?'暂无':Number(s.logical_position_rad).toFixed(5)+' rad'",
+    "s.logical_output_position_rad===null?'暂无':Number(s.logical_output_position_rad).toFixed(5)+' rad'",
+    1,
+).replace(
+    "s.logical_turns===null?'暂无':Number(s.logical_turns).toFixed(4)",
+    "s.logical_output_turns===null?'暂无':Number(s.logical_output_turns).toFixed(4)",
+    1,
+).replace(
+    '<span>圈数</span><code id="logicalTurns">暂无</code>',
+    '<span>输出端圈数</span><code id="logicalTurns">暂无</code>',
+    1,
+).replace(
+    '<option value="13">GR</option>',
+    '',
+    1,
+).replace(
     '<pre id="log">等待认证…</pre>', '<textarea id="log" readonly spellcheck="false">等待认证…</textarea>',
 ).replace(
     'pre{height:330px;overflow:auto;', 'textarea#log{height:330px;width:100%;box-sizing:border-box;resize:vertical;overflow:auto;',
@@ -1509,7 +1571,7 @@ PAGE = re.sub(r"document\.querySelector\('#positionStepCustom'\)\.onclick=.*?;\n
 # parameter MIT panel.  The raw panel remains useful for protocol/FOC checks;
 # this panel owns the time-varying position and velocity references needed for
 # repeatable motion tests.
-_trajectory_panel = r'''<article class="panel tab-panel" data-tab="trajectory"><h2>上位机轨迹控制</h2><p>位置模式以 20 ms 周期生成三次 S 曲线的 p(t)/v(t)。恒速模式固定 Kp=0，只用 Kd 速度环；MIT 位置字段保持在可编码范围内，主机按反馈位置跨端解包累计逻辑多圈位置与圈数。</p><p><select id="trajectoryMode" aria-label="轨迹模式"><option value="position">S 曲线到目标位置</option><option value="velocity">恒速前进</option></select></p><p id="trajectoryPositionInputs"><input id="trajectoryTarget" type="number" step="0.001" placeholder="目标位置 rad (-100..100)"><input id="trajectorySpeedLimit" type="number" min="0.05" max="20" step="0.05" value="2" placeholder="最大速度 rad/s"></p><p id="trajectoryVelocityInputs" hidden><input id="trajectoryVelocity" type="number" min="-20" max="20" step="0.05" value="0.2" placeholder="速度 rad/s（正负决定方向）"></p><p><input id="trajectoryDuration" type="number" min="0.1" max="300" step="0.1" value="2" placeholder="执行时间 s"><input id="trajectoryHold" type="number" min="0" max="300" step="0.1" value="2" placeholder="到达后保持 s（0 为不保持）"><input id="trajectoryKp" type="number" min="0" max="500" step="0.1" value="20" placeholder="Kp"><input id="trajectoryKd" type="number" min="0" max="5" step="0.01" value="1" placeholder="Kd"><input id="trajectoryTorque" type="number" min="-40" max="40" step="0.01" value="0" placeholder="前馈力矩 Nm"></p><p class="muted">位置模式受当前 P_MIN/P_MAX 限制。恒速模式开始时以最新反馈重置逻辑位置，随后按反馈位置跨端解包累计；停止后不保持转动。</p><button id="trajectoryStart">开始轨迹</button> <button class="danger" id="trajectoryStop">停止轨迹</button></article>'''
+_trajectory_panel = r'''<article class="panel tab-panel" data-tab="trajectory"><h2>上位机轨迹控制（输出端）</h2><p>输入和显示均为减速器输出端。主机按 9:1 换算 p/v，并把 Kp、Kd、前馈力矩换算成电机侧 MIT 参数；固件只处理磁编码器电机侧坐标。</p><p><select id="trajectoryMode" aria-label="轨迹模式"><option value="position">S 曲线到目标位置</option><option value="velocity">恒速前进</option></select></p><p id="trajectoryPositionInputs"><input id="trajectoryTarget" type="number" step="0.001" placeholder="输出端目标位置 rad (-11.11..11.11)"><input id="trajectorySpeedLimit" type="number" min="0.05" max="7.2" step="0.05" value="2" placeholder="输出端最大速度 rad/s"></p><p id="trajectoryVelocityInputs" hidden><input id="trajectoryVelocity" type="number" min="-7.2" max="7.2" step="0.05" value="0.2" placeholder="输出端速度 rad/s（正负决定方向）"></p><p><input id="trajectoryDuration" type="number" min="0.1" max="300" step="0.1" value="2" placeholder="执行时间 s"><input id="trajectoryHold" type="number" min="0" max="300" step="0.1" value="2" placeholder="到达后保持 s（0 为不保持）"><input id="trajectoryKp" type="number" min="0" max="500" step="0.1" value="20" placeholder="输出端 Kp"><input id="trajectoryKd" type="number" min="0" max="5" step="0.01" value="1" placeholder="输出端 Kd"><input id="trajectoryTorque" type="number" min="-40" max="40" step="0.01" value="0" placeholder="输出端前馈 Nm"></p><p class="muted">MIT 范围仍是电机侧 P_MIN/P_MAX。恒速模式用实时电机侧反馈重置输出端逻辑位置；停止后不保持转动。自定义 MIT 页面始终使用原始电机侧单位。</p><button id="trajectoryStart">开始轨迹</button> <button class="danger" id="trajectoryStop">停止轨迹</button></article>'''
 PAGE = PAGE.replace(
     'id="trajectoryVelocity" type="number" min="-20" max="20" step="0.05" value="1"',
     'id="trajectoryVelocity" type="number" min="-20" max="20" step="0.05" value="0.2"',

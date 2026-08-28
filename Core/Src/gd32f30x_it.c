@@ -247,12 +247,12 @@ void USBD_LP_CAN0_RX0_IRQHandler(void)
 #endif
 
     // Pack response
-    pack_reply(&can_tx, CAN_ID, comm_encoder.angle_multiturn[0] / GR, comm_encoder.velocity / GR, controller.i_q_filt * KT * GR);
+    pack_reply(&can_tx, CAN_ID, comm_encoder.angle_multiturn[0], comm_encoder.velocity, controller.i_q_filt * KT);
     can_message_transmit(CAN0, &can_tx);
 
 #ifdef DEBUG_CAN
     debug("CAN TX P:%.3f V:%.3f I:%.3f\r\n",
-            comm_encoder.angle_multiturn[0] / GR, comm_encoder.velocity / GR, controller.i_q_filt * KT * GR);
+            comm_encoder.angle_multiturn[0], comm_encoder.velocity, controller.i_q_filt * KT);
 #endif
 
     /* Check for special Commands */

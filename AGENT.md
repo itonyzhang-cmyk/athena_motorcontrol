@@ -167,6 +167,28 @@ Do not record secrets, access tokens, or private credentials here.
 
 ## Session Log
 
+### 2026-08-29 - Motor-side MIT boundary and upper-controller reduction
+
+- The AS5047 magnetic encoder is now the sole firmware position source and
+  MIT/FOC boundary: position, velocity, and torque feedback are motor-side.
+  `GR` no longer participates in FOC, MIT torque packing, CAN feedback, or
+  UART setup; its persisted slot is retained only to load legacy preference
+  pages. Hall feedback remains unavailable because the required magnet is not
+  fitted.
+- The reviewed WebUI normal-image record is now motor-side image
+  `artifacts/athena_motor_side_protocol_20260829/motorcontrol.bin`, SHA-256
+  `e087eeeb01d76d0562d8200300876fd7ac562b1be96ea6afdf38c220234144a5`.
+  It records `output_reduction=9.0`. The high-level trajectory panel accepts
+  and displays output-side coordinates and explicitly maps them to motor-side
+  MIT fields; the raw custom MIT panel remains motor-side. For example, an
+  output target of 4.0 rad maps to a motor-side target of 36.0 rad.
+- Full host regression and the normal-image symbol audit passed. On the remote
+  bench, the image and configuration hash were transferred successfully, but
+  `athena_safe_flash.sh identify/preflight` stopped before any write: ST-LINK
+  reported 3.19 V then OpenOCD could not connect to the target. No Flash,
+  preference page, or Option Byte was modified. Restore target power/SWD access
+  before retrying the hash-locked `flash-normal` and no-enable feedback check.
+
 ### 2026-08-29 - FWDGT self-test isolation correction and motion checks
 
 - Review found that the original `FWDGT_SELFTEST` branch was entered after

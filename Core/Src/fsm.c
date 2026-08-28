@@ -518,7 +518,7 @@ static MotorGateResult motor_gate_preflight(void)
 	    printf("\r\n Configuration Options \n\r");
 	    printf(" %-4s %-31s %-5s %-6s %-2s\r\n", "prefix", "parameter", "min", "max", "current value");
 	    printf("\r\n Motor:\r\n");
-	    printf(" %-4s %-31s %-5s %-6s %.3f\n\r", "g", "Gear Ratio", "0", "-", GR);
+	    printf(" %-4s %-31s %-5s %-6s %.3f\n\r", "g", "Legacy Gear Ratio (unused)", "-", "-", GR);
 	    printf(" %-4s %-31s %-5s %-6s %.5f\n\r", "k", "Torque Constant (N-m/A)", "0", "-", KT);
 	    printf("\r\n Control:\r\n");
 	    printf(" %-4s %-31s %-5s %-6s %.1f\n\r", "b", "Current Bandwidth (Hz)", "100", "2000", I_BW);
@@ -580,8 +580,7 @@ static MotorGateResult motor_gate_preflight(void)
 			 printf("I_CAL set to %f\r\n", I_CAL);
 			 break;
 		 case 'g':
-			 GR = fmaxf(atof(fsmstate->cmd_buff), .001f);	// Limit prevents divide by zero if user tries to enter zero
-			 printf("GR set to %f\r\n", GR);
+			 printf("GR is legacy configuration only; change output reduction in the upper controller.\r\n");
 			 break;
 		 case 'k':
 			 KT = fmaxf(atof(fsmstate->cmd_buff), 0.0001f);	// Limit prevents divide by zero.  Seems like a reasonable LB?

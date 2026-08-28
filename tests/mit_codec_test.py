@@ -1,4 +1,6 @@
+import sys
 import unittest
+from pathlib import Path
 
 from tools.athena_mit_codec import (
     DEFAULT_RANGES,
@@ -10,6 +12,8 @@ from tools.athena_mit_codec import (
     parse_slcan,
     special_command,
 )
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+from athena_bench_webui import output_to_motor
 
 
 class MitCodecTest(unittest.TestCase):
@@ -47,6 +51,10 @@ class MitCodecTest(unittest.TestCase):
         command = encode_command(4.0, 0.0, 0.0, 0.0, 0.0, ranges)
         feedback = bytes((1, command[0], command[1], 0x7F, 0xF0, 0x00))
         self.assertAlmostEqual(decode_feedback(feedback, ranges)["position"], 4.0, delta=0.01)
+
+    def test_output_axis_command_is_converted_to_motor_side(self):
+        command = output_to_motor(4.0, 0.2, 81.0, 40.5, 9.0, 9.0)
+        self.assertEqual(command, (36.0, 1.8, 1.0, 0.5, 1.0))
 
 
 if __name__ == "__main__":

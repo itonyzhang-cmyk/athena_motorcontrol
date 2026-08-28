@@ -418,8 +418,10 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
 
 		controller->theta_elec = encoder->elec_angle;
 		controller->dtheta_elec = encoder->elec_velocity;
-		controller->dtheta_mech = encoder->velocity/GR;
-		controller->theta_mech = encoder->angle_multiturn[0]/GR;
+		/* MIT is the motor-side protocol boundary. The AS5047 directly measures
+		 * this shaft, so reducer kinematics belong to the upper controller. */
+		controller->dtheta_mech = encoder->velocity;
+		controller->theta_mech = encoder->angle_multiturn[0];
 
        /// Commutation  ///
        dq0(controller->theta_elec, controller->i_a, controller->i_b, controller->i_c, &controller->i_d, &controller->i_q);    //dq0 transform on currents - 3.8 us
@@ -492,7 +494,7 @@ void torque_control(ControllerStruct *controller){
 		(controller->i_max - startup_current) * ramp;
 	float torque_des = controller->kp * position_error + controller->t_ff +
 		controller->kd * (controller->v_des - controller->dtheta_mech);
-	controller->i_q_des = fast_fmaxf(fast_fminf(torque_des/(KT*GR), ramped_limit), -ramped_limit);
+	controller->i_q_des = fast_fmaxf(fast_fminf(torque_des/KT, ramped_limit), -ramped_limit);
 	controller->i_d_des = 0.0f;
 	if (controller->torque_ramp_cycles < ramp_cycles) {
 		controller->torque_ramp_cycles++;
