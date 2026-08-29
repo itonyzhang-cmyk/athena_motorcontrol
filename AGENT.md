@@ -189,6 +189,22 @@ Do not record secrets, access tokens, or private credentials here.
   preference page, or Option Byte was modified. Restore target power/SWD access
   before retrying the hash-locked `flash-normal` and no-enable feedback check.
 
+### 2026-08-29 - Motor-side image flash and non-enable CAN confirmation
+
+- After a repeat preflight passed, target UID `39305137-14303434-47457A29`,
+  Option Bytes, and the 3.19 V target-voltage gate were verified. The exact
+  `e087eeeb01d76d0562d8200300876fd7ac562b1be96ea6afdf38c220234144a5`
+  normal image was programmed through the page-by-page normal flow. The
+  mandatory two 512 KiB pre-flash reads matched each other; post-flash image
+  readback matched the source exactly; the configuration page was byte-for-byte
+  unchanged; and the post-flash Option Bytes retained SHA-256
+  `c0b942fbb9fe967ec0e7b675e080d48c930fc5fe3fde70f6dd6f9646fdffc0d3`.
+- `boot-normal` passed. Three non-enable MIT frames then returned motor-side
+  position `12.0287 rad`, which the WebUI correctly displayed as output-side
+  position `1.3365 rad` at the configured 9:1 reduction. No enable (`0xFC`)
+  or motion command was sent. The bridge is stopped and both MIT/enable state
+  flags are false.
+
 ### 2026-08-29 - FWDGT self-test isolation correction and motion checks
 
 - Review found that the original `FWDGT_SELFTEST` branch was entered after
