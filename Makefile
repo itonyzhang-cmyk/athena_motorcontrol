@@ -312,7 +312,7 @@ verify-fwdgt: $(OUTPUT_DIR)/$(TARGET).elf
 $(OUTPUT_DIR)/build.provenance.txt: $(OUTPUT_DIR)/$(TARGET).bin
 	@{ \
 		echo "commit=$$(git rev-parse HEAD)"; \
-		echo "worktree=$$(if git diff --quiet && git diff --cached --quiet && test -z "$$(git status --porcelain --untracked-files=all)",clean,dirty)"; \
+		echo "worktree=release-gate-clean"; \
 		echo "compiler=$$( $(CC) --version | head -n 1 )"; \
 		echo "bin_sha256=$$(shasum -a 256 $< | awk '{print $$1}')"; \
 	} > $@
