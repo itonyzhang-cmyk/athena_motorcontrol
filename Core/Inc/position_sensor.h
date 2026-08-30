@@ -12,7 +12,11 @@
 #include "spi.h"
 #include <stdint.h>
 
-#define N_POS_SAMPLES 20		// Number of position samples to store.  should put this somewhere else...
+/* At the 30 kHz FOC rate, a 20-sample endpoint difference makes one AS5047
+ * count appear as roughly 0.60 rad/s.  The 128-sample window reduces that
+ * quantisation step to about 0.094 rad/s without changing motor-side position
+ * or MIT units. */
+#define N_POS_SAMPLES 128
 #define N_LUT 128
 
 typedef struct{
