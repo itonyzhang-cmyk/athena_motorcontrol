@@ -1452,3 +1452,17 @@ Do not record secrets, access tokens, or private credentials here.
   `0xFD`, and had no watchdog/DRV fault. This confirms the prior no-motion
   result was a software regression caused by the wrong velocity-window image,
   not a mechanical-endstop conclusion.
+
+### 2026-08-30 - Extended MIT and velocity regression
+
+- On the same flashed `f885e33c...26ae8` image, repeated custom MIT tests with
+  `Kp=8`, `Kd=0.5`, signed feed-forward `+0.3/-0.3 Nm` moved the motor-side
+  feedback in both directions: approximately `2.129..2.300 rad` forward and
+  `2.290..2.089 rad` reverse. Sessions sent 148 and 134 frames, with maximum
+  gaps `32.8 ms` and `33.8 ms`, and no watchdog/DRV fault.
+- Host-owned velocity trajectories then ran at output-side `+/-0.5 rad/s`,
+  mapping to motor-side `+/-4.5 rad/s` at the configured 9:1 reduction. The
+  positive run moved feedback about `2.12 -> 11.06 rad`; the negative run moved
+  about `17.72 -> 11.05 rad`. They sent 150 and 140 frames, reached measured
+  torque peaks `2.14 Nm` and `1.73 Nm`, and ended with explicit `0xFD` stop.
+  This closes the current position/MIT and constant-speed regression gate.
