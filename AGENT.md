@@ -205,6 +205,21 @@ Do not record secrets, access tokens, or private credentials here.
   or motion command was sent. The bridge is stopped and both MIT/enable state
   flags are false.
 
+### 2026-08-29 - Closed-loop velocity diagnosis
+
+- The motor-side position and output-side 9:1 WebUI conversion were confirmed
+  on the flashed image, and a bounded raw 1 Nm motor-side feed-forward test
+  established that bridge, gate drive, FOC current loop, encoder feedback, and
+  stop command can produce and stop real motion. It must not be used as a
+  normal motion primitive because it has no position or velocity constraint.
+- Position and velocity trajectories showed nearly zero net displacement at
+  small targets despite valid 20 ms host timing and no safety/DRV fault. The
+  feedback velocity jumped about +/-0.6 rad/s while mechanically at rest.
+  The cause is the old 20-sample finite-difference window at the 30 kHz GD32
+  loop: one 14-bit AS5047 count quantisation step maps to about 0.60 rad/s.
+  The sample window is increased to 128 samples before repeating closed-loop
+  validation; this changes only velocity estimation, not position or MIT units.
+
 ### 2026-08-29 - FWDGT self-test isolation correction and motion checks
 
 - Review found that the original `FWDGT_SELFTEST` branch was entered after
@@ -1287,3 +1302,95 @@ Do not record secrets, access tokens, or private credentials here.
 - Full host tests plus normal/safe/inject image verification completed using
   the pinned Arm GNU 15.3 toolchain.  No candidate image was flashed, booted,
   or sent any CAN command in this work.
+
+### 2026-08-29 - Velocity-estimator filter image flash, motion paused
+
+- The only firmware change in the reviewed image is the AS5047 velocity
+  finite-difference window, from 20 to 128 samples.  It leaves motor-side
+  `angle_multiturn[0]`, motor-side MIT feedback packing, FOC mechanical angle,
+  and the persisted legacy `GR=1` control boundary unchanged.  The 9:1
+  conversion remains solely in the upper-controller WebUI.
+- Image `artifacts/athena_velocity_filter_20260829/motorcontrol.bin` (63,236
+  bytes, SHA-256
+  `a7561698d7746cb873130f70dd0dc8c0ce41d5baf57a5b5030d5882df50075f7`)
+  passed full host regression and normal-image symbol audit.  It was
+  hash-locked and flashed to UID `39305137-14303434-47457A29`; post-flash
+  readback matched the image, the configuration page was unchanged, and
+  Option Bytes remained
+  `c0b942fbb9fe967ec0e7b675e080d48c930fc5fe3fde70f6dd6f9646fdffc0d3`.
+- Per the user request, testing is paused after flash.  The WebUI and CAN
+  bridge are stopped; no enable frame or motion frame was sent after boot.
+
+### 2026-08-29 - Firmware-owned MIT contract review
+
+- The firmware defines the only MIT wire contract, all in motor-side units:
+  P_MIN/P_MAX, V_MIN/V_MAX, KP_MAX, KD_MAX, and torque range I_MAX * KT.
+  AS5047 feedback and FOC use the same motor-side position and velocity; GR is
+  not part of this contract.
+- The upper-controller trajectory panel had correctly converted output-axis
+  gains by R^2, but retained its former numerical defaults.  At 9:1, its
+  displayed Kp=20 and Kd=1 encoded as motor-side 0.247 and 0.0123, rather than
+  the former motor-side 20 and 1.  This is sufficient to explain loss of
+  drive in low-speed tests without a coordinate-source error.
+- WebUI now stores the complete firmware MIT contract, updates it only after a
+  matching CAN configuration transaction commits, and decodes trace frames
+  from that contract rather than hard-coded generic MIT limits.  Its output
+  trajectory presets are Kp=1620 and Kd=81, which map to motor-side 20 and 1
+  at 9:1.  The legacy fixed-action controls and non-enable preflight now also
+  call the same contract-aware MIT encoder rather than assembling old raw
+  bytes.  Full offline host regression passed; this UI-only change has not
+  sent a CAN control frame or performed motion verification.
+
+### 2026-08-30 - Custom MIT wire-frame evidence test
+
+- Updated the WebUI custom-MIT session log to retain the exact first and last
+  transmitted SLCAN command, 8-byte payload, and values decoded with the live
+  firmware MIT ranges.  The decoded torque is the final signed feed-forward
+  value after automatic friction-direction composition.
+- On the remote host `192.168.31.20`, with the flashed normal image
+  `a7561698d7746cb873130f70dd0dc8c0ce41d5baf57a5b5030d5882df50075f7`, ran a
+  3-second custom MIT session: page values `p=45`, `v=0`, `Kp=2`, `Kd=1`,
+  gravity compensation `0`, friction amplitude `1`.  It sent 384 MIT frames,
+  received 122 feedback samples, and sent the explicit `0xFD` stop frame.
+- First frame decoded as `p=44.9973`, `v=-0.016`, `Kp=1.954`, `Kd=1.000`,
+  `t_ff=+0.987 Nm`; last frame decoded as the same target fields with
+  `t_ff=-1.006 Nm` after the feedback crossed the target.  Motor-side feedback
+  stayed in `44.9638..45.4124 rad`; maximum observed frame gap was `41.4 ms`,
+  so USB-CAN scheduling jitter remains above the roughly 33 ms watchdog margin.
+- Local MIT codec tests (14 cases), Python compilation, and `make host-tools-test`
+  passed.  Bridge remained running but both MIT and enable sessions were idle
+  after the test.
+
+### 2026-08-30 - Mechanical lock isolation during MIT tuning
+
+- Continued live tests after motor-side position reached approximately
+  `90.16 rad`.  Negative position steps (`Kp=3..5`, `Kd=1.5..2`) and a
+  `p=80 rad` target produced only fractions of a radian of return motion.
+  Pure velocity commands `v=+2` and `v=-2 rad/s` with `Kp=0, Kd=1` also
+  produced no sustained movement.
+- Direct torque tests at the same position (`+2 Nm` and `-2 Nm`, zero gains)
+  produced measured torque peaks of about `2.3 Nm` in both directions, while
+  feedback position remained within `90.1488..90.1762 rad` (less than
+  `0.03 rad` span).  All sessions sent `0xFD` and ended idle.
+- This isolates the current failure to a mechanical lock/limit or equivalent
+  power-stage load near `90 rad`; it is not a missing MIT frame, codec, or
+  Kp/Kd-only issue.  Do not tune gains further at this position.  Move the
+  mechanism to a known free mid-range position before selecting empty-load
+  gains.
+
+### 2026-08-30 - Regression audit: velocity-window rollback
+
+- The remote image `a7561698d7746cb873130f70dd0dc8c0ce41d5baf57a5b5030d5882df50075f7`
+  was built from a dirty worktree containing `N_POS_SAMPLES=128` in
+  `Core/Inc/position_sensor.h`.  The last reviewed motor-side protocol source
+  and the previously verified motion path use `N_POS_SAMPLES=20`; the 128-sample
+  change was not part of a committed, reviewed firmware revision.
+- A live diagnostic request sent during a motion session also competed for the
+  same UC12 bridge and caused the session to end in `state=0`, `i_q_des=0`;
+  that snapshot cannot be used as proof of a control-loop fault.  Future
+  runtime snapshots must be captured without concurrent diagnostic traffic.
+- Reverted `N_POS_SAMPLES` to `20` and rebuilt with the pinned Arm GNU 15.2
+  toolchain.  `verify-normal` passed for the resulting
+  `build/regression-20samples/unsafe/motorcontrol.bin`.  No flash write was
+  performed in this audit; the remote board still runs the 128-sample image
+  until an explicit flash/boot operation is authorized.

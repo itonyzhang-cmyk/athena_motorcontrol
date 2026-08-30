@@ -1,7 +1,15 @@
 {
   "normal_sha": "e087eeeb01d76d0562d8200300876fd7ac562b1be96ea6afdf38c220234144a5",
   "normal_image": "artifacts/athena_motor_side_protocol_20260829/motorcontrol.bin",
-  "mit_position_min": -100.0,
-  "mit_position_max": 100.0,
+  "firmware_mit": {
+    "position_min": -100.0,
+    "position_max": 100.0,
+    "velocity_min": -65.0,
+    "velocity_max": 65.0,
+    "kp_max": 500.0,
+    "kd_max": 5.0,
+    "current_limit_a": 40.0,
+    "torque_constant_nm_per_a": 1.0
+  },
   "output_reduction": 9.0
 }

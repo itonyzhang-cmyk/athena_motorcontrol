@@ -28,6 +28,21 @@ FWDGT_SELFTEST ?= 0
 # CAN-only path probe: leaves SAFE_BRINGUP protections enabled and bypasses
 # diagnostic CRC parsing to prove the RX interrupt and TX path independently.
 CAN_PROBE ?= 0
+ALLOW_DIRTY_BUILD ?= 0
+
+# A normal image is a hardware-facing release artifact.  Refuse to build it
+# from a dirty checkout unless the caller explicitly opts into an experiment.
+ifeq ($(SAFE_BRINGUP), 0)
+ifeq ($(BRINGUP_INJECT), 0)
+ifeq ($(FWDGT_SELFTEST), 0)
+ifeq ($(ALLOW_DIRTY_BUILD), 0)
+ifneq ($(strip $(shell git status --porcelain --untracked-files=all 2>/dev/null)),)
+$(error Refusing normal firmware build from a dirty worktree; commit/stash changes or set ALLOW_DIRTY_BUILD=1 for an explicitly experimental build)
+endif
+endif
+endif
+endif
+endif
 
 ifeq ($(FWDGT_SELFTEST), 1)
 # The watchdog acceptance image is intentionally a normal-profile derivative
@@ -289,7 +304,22 @@ verify-inject: $(OUTPUT_DIR)/$(TARGET).elf
 verify-fwdgt: $(OUTPUT_DIR)/$(TARGET).elf
 	sh tools/verify_fwdgt_selftest_image.sh $(NM) $<
 
-.PHONY: all host-test host-inject-test host-tools-test host-app-test host-mit-test host-can-topology-test verify-safe verify-inject verify-normal verify-fwdgt clean
+$(OUTPUT_DIR)/build.provenance.txt: $(OUTPUT_DIR)/$(TARGET).bin
+	@{ \
+		echo "commit=$$(git rev-parse HEAD)"; \
+		echo "worktree=$$(if git diff --quiet && git diff --cached --quiet && test -z "$$(git status --porcelain --untracked-files=all)",clean,dirty)"; \
+		echo "compiler=$$( $(CC) --version | head -n 1 )"; \
+		echo "bin_sha256=$$(shasum -a 256 $< | awk '{print $$1}')"; \
+	} > $@
+
+release-normal:
+	@$(MAKE) SAFE_BRINGUP=0 BRINGUP_INJECT=0 FWDGT_SELFTEST=0 ALLOW_DIRTY_BUILD=0 \
+		BUILD_DIR=build/release-normal GCC_PATH=$${GCC_PATH:-/Users/choqy/.cache/arm-gnu-toolchain-15.2.rel1-20260825/bin} \
+		all verify-normal
+	@$(MAKE) BUILD_DIR=build/release-normal SAFE_BRINGUP=0 BRINGUP_INJECT=0 ALLOW_DIRTY_BUILD=1 \
+		build/release-normal/unsafe/build.provenance.txt
+
+.PHONY: all host-test host-inject-test host-tools-test host-app-test host-mit-test host-can-topology-test verify-safe verify-inject verify-normal verify-fwdgt release-normal clean
 
 
 #######################################

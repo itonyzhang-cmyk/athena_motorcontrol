@@ -256,8 +256,8 @@ int main(void)
   if(isnan(KT) || KT==-1){KT = 1.0f;}
   if(isnan(KP_MAX) || KP_MAX==-1){KP_MAX = 500.0f;}
   if(isnan(KD_MAX) || KD_MAX==-1){KD_MAX = 5.0f;}
-  if(isnan(P_MAX)){P_MAX = 12.5f;}
-  if(isnan(P_MIN)){P_MIN = -12.5f;}
+  if(isnan(P_MAX)){P_MAX = 100.0f;}
+  if(isnan(P_MIN)){P_MIN = -100.0f;}
   if(isnan(V_MAX)){V_MAX = 65.0f;}
   if(isnan(V_MIN)){V_MIN = -65.0f;}
 

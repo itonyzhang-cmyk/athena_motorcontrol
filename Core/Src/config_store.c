@@ -73,8 +73,8 @@ void config_apply_defaults(int int_regs[CONFIG_INT_WORDS],
     float_regs[CONFIG_C_TH] = 0.0f;
     float_regs[CONFIG_GR] = 1.0f;
     float_regs[CONFIG_I_CAL] = 5.0f;
-    float_regs[CONFIG_P_MIN] = -12.5f;
-    float_regs[CONFIG_P_MAX] = 12.5f;
+    float_regs[CONFIG_P_MIN] = -100.0f;
+    float_regs[CONFIG_P_MAX] = 100.0f;
     float_regs[CONFIG_V_MIN] = -65.0f;
     float_regs[CONFIG_V_MAX] = 65.0f;
     float_regs[CONFIG_KP_MAX] = 500.0f;

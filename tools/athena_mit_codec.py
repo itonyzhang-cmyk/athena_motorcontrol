@@ -15,8 +15,8 @@ import os
 
 @dataclass(frozen=True)
 class MitRanges:
-    position_min: float = -12.5
-    position_max: float = 12.5
+    position_min: float = -100.0
+    position_max: float = 100.0
     velocity_min: float = -65.0
     velocity_max: float = 65.0
     kp_max: float = 500.0
@@ -26,8 +26,8 @@ class MitRanges:
 
 def _position_range_from_environment() -> MitRanges:
     try:
-        minimum = float(os.environ.get("ATHENA_MIT_POSITION_MIN", "-12.5"))
-        maximum = float(os.environ.get("ATHENA_MIT_POSITION_MAX", "12.5"))
+        minimum = float(os.environ.get("ATHENA_MIT_POSITION_MIN", "-100.0"))
+        maximum = float(os.environ.get("ATHENA_MIT_POSITION_MAX", "100.0"))
     except ValueError:
         return MitRanges()
     if not math.isfinite(minimum) or not math.isfinite(maximum) or minimum >= 0.0 or maximum <= 0.0:

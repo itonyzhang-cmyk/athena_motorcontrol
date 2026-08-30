@@ -1418,6 +1418,8 @@ int main(int argc, char **argv)
     struct client client;
     const char *command;
     int option;
+    int command_index = argc;
+    int option_argc;
     int result = 1;
     int do_self_test = 0;
     unsigned inject_vector = 0;
@@ -1432,7 +1434,23 @@ int main(int argc, char **argv)
     client.options.timeout_ms = 1000;
     client.options.interval_ms = 25;
     client.options.seconds = 600;
-    while ((option = getopt_long(argc, argv, "c:t:i:s:o:v:a:jwTh",
+    /* Parse only global options before the command.  Some getopt variants
+     * continue scanning after positional arguments, which turns a valid
+     * `config set p_min -100` value into an option. */
+    for (int index = 1; index < argc; ++index) {
+        if (!strcmp(argv[index], "ping") || !strcmp(argv[index], "info") ||
+            !strcmp(argv[index], "snapshot") || !strcmp(argv[index], "watch") ||
+            !strcmp(argv[index], "export") || !strcmp(argv[index], "inject") ||
+            !strcmp(argv[index], "stop") || !strcmp(argv[index], "drv") ||
+            !strcmp(argv[index], "drv-wake") || !strcmp(argv[index], "drv-wake-status") ||
+            !strcmp(argv[index], "drv-status") || !strcmp(argv[index], "control") ||
+            !strcmp(argv[index], "config")) {
+            command_index = index;
+            break;
+        }
+    }
+    option_argc = command_index;
+    while ((option = getopt_long(option_argc, argv, "c:t:i:s:o:v:a:jwTh",
                                  long_options, NULL)) != -1) {
         switch (option) {
         case 'c':
@@ -1477,11 +1495,12 @@ int main(int argc, char **argv)
         default: usage(argv[0]); return 2;
         }
     }
+    optind = command_index;
     if (do_self_test) return self_test();
     if (optind + 1 != argc &&
         !(optind + 4 == argc && !strcmp(argv[optind], "inject")) &&
         !(optind + 2 <= argc && optind + 3 >= argc && !strcmp(argv[optind], "control")) &&
-        !(optind + 2 <= argc && optind + 4 >= argc && !strcmp(argv[optind], "config"))) {
+        !(optind + 2 <= argc && optind + 5 >= argc && !strcmp(argv[optind], "config"))) {
         usage(argv[0]);
         return 2;
     }

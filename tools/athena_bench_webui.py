@@ -20,6 +20,7 @@ import threading
 import time
 import re
 import select
+import signal
 from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -57,7 +58,6 @@ BRIDGE = WORKSPACE / "tools/uc12_slcan_bridge/uc12_slcan_bridge"
 DIAG = REPO / "tools/athena_diag_uc12/athena_diag_uc12"
 FLASH = REPO / "tools/athena_safe_flash.sh"
 
-MIT_CHECK_FRAME = "t00187FFF7FF0000007FF\r"
 ENABLE_FRAME = "t0018FFFFFFFFFFFFFFFC\r"
 STOP_FRAME = "t0018FFFFFFFFFFFFFFFD\r"
 # USB-CAN/PTY scheduling can occasionally stall for several milliseconds. Keep
@@ -93,30 +93,42 @@ def normal_firmware_config() -> tuple[str, Path]:
     return sha, image
 
 
-def configured_mit_ranges() -> MitRanges:
-    """Load the exact position codec range configured for the normal image.
+def configured_mit_protocol() -> tuple[MitRanges, float, float]:
+    """Load the normal-firmware MIT contract, always in motor-side units.
 
-    The MIT position field is an integer, so its range must match the live
-    firmware P_MIN/P_MAX values bit-for-bit.  A host-side default is unsafe
-    once the controller range is made configurable.
+    Firmware owns this contract: P/V/Kp/Kd come from its persisted registers
+    and torque is exactly I_MAX * KT.  The upper controller must never infer
+    one of these fields from a reducer ratio or a generic MIT default.
     """
     try:
         data = json.loads(NORMAL_CONFIG.read_text(encoding="utf-8"))
-        minimum = float(data.get("mit_position_min", DEFAULT_RANGES.position_min))
-        maximum = float(data.get("mit_position_max", DEFAULT_RANGES.position_max))
-    except (OSError, ValueError, TypeError):
-        return DEFAULT_RANGES
-    if not (math.isfinite(minimum) and math.isfinite(maximum) and minimum < 0.0 < maximum):
-        return DEFAULT_RANGES
-    return MitRanges(position_min=minimum, position_max=maximum,
-                     velocity_min=DEFAULT_RANGES.velocity_min,
-                     velocity_max=DEFAULT_RANGES.velocity_max,
-                     kp_max=DEFAULT_RANGES.kp_max, kd_max=DEFAULT_RANGES.kd_max,
-                     torque_max=DEFAULT_RANGES.torque_max)
+        protocol = data["firmware_mit"]
+        current_limit = float(protocol["current_limit_a"])
+        torque_constant = float(protocol["torque_constant_nm_per_a"])
+        ranges = MitRanges(
+            position_min=float(protocol["position_min"]),
+            position_max=float(protocol["position_max"]),
+            velocity_min=float(protocol["velocity_min"]),
+            velocity_max=float(protocol["velocity_max"]),
+            kp_max=float(protocol["kp_max"]),
+            kd_max=float(protocol["kd_max"]),
+            torque_max=current_limit * torque_constant)
+    except (OSError, ValueError, KeyError, TypeError):
+        raise RuntimeError("正常固件 MIT 协议清单无效")
+    values = (ranges.position_min, ranges.position_max, ranges.velocity_min,
+              ranges.velocity_max, ranges.kp_max, ranges.kd_max,
+              current_limit, torque_constant)
+    if (not all(math.isfinite(value) for value in values) or
+            not ranges.position_min < ranges.position_max or
+            not ranges.velocity_min < ranges.velocity_max or
+            ranges.kp_max < 0.0 or ranges.kd_max < 0.0 or
+            current_limit <= 0.0 or torque_constant <= 0.0):
+        raise RuntimeError("正常固件 MIT 协议清单范围无效")
+    return ranges, current_limit, torque_constant
 
 
 def configured_output_reduction() -> float:
-    """Load the fixed motor-to-output reduction used by the upper controller."""
+    """Load the motor-turns per output-turn ratio used by the upper controller."""
     try:
         reduction = float(json.loads(NORMAL_CONFIG.read_text(encoding="utf-8"))["output_reduction"])
     except (OSError, ValueError, KeyError, TypeError):
@@ -124,19 +136,89 @@ def configured_output_reduction() -> float:
     return reduction if math.isfinite(reduction) and reduction >= 1.0 else 1.0
 
 
+def persist_output_reduction(reduction: float) -> None:
+    """Persist an upper-controller-only kinematic mapping without touching CAN."""
+    data = json.loads(NORMAL_CONFIG.read_text(encoding="utf-8"))
+    data["output_reduction"] = reduction
+    temporary = NORMAL_CONFIG.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(NORMAL_CONFIG)
+
+
 def output_to_motor(position: float, velocity: float, kp: float, kd: float,
                     torque: float, reduction: float) -> tuple[float, float, float, float, float]:
-    """Map output-axis physical commands to the motor-side MIT protocol."""
-    return (position * reduction, velocity * reduction,
-            kp / (reduction * reduction), kd / (reduction * reduction),
-            torque / reduction)
+    """Map only output-axis kinematics; MIT gains and torque stay motor-side."""
+    return (position * reduction, velocity * reduction, kp, kd, torque)
 
 
-def persist_mit_ranges(ranges: MitRanges) -> None:
-    """Persist a controller-confirmed P_MIN/P_MAX update for the next restart."""
+def compose_feedforward_torque(gravity_torque: float, friction_torque: float,
+                               velocity: float, position_error: float) -> float:
+    """Compose signed MIT feed-forward from upper-controller load terms.
+
+    Gravity is already signed by the operator/model. Physical Coulomb friction
+    opposes the intended motion, so its *compensation command* has the same
+    sign as the intended motion. At zero velocity, use the position-error
+    direction so a position step can overcome static friction without manual
+    sign changes.
+    """
+    direction = velocity if abs(velocity) > 1e-6 else position_error
+    friction = math.copysign(abs(friction_torque), direction) if abs(direction) > 1e-6 else 0.0
+    return gravity_torque + friction
+
+
+def updated_firmware_mit_protocol(ranges: MitRanges, current_limit: float,
+                                  torque_constant: float, field: int,
+                                  value: float) -> tuple[MitRanges, float, float]:
+    """Apply one accepted firmware configuration field to the host contract."""
+    values = {
+        "position_min": ranges.position_min, "position_max": ranges.position_max,
+        "velocity_min": ranges.velocity_min, "velocity_max": ranges.velocity_max,
+        "kp_max": ranges.kp_max, "kd_max": ranges.kd_max,
+    }
+    field_names = {14: "position_min", 15: "position_max", 16: "velocity_min",
+                   17: "velocity_max", 18: "kp_max", 19: "kd_max"}
+    if field in field_names:
+        values[field_names[field]] = float(value)
+    elif field == 7:
+        current_limit = float(value)
+    elif field == 12:
+        torque_constant = float(value)
+    else:
+        return ranges, current_limit, torque_constant
+    candidate = MitRanges(**values, torque_max=current_limit * torque_constant)
+    valid = (math.isfinite(current_limit) and math.isfinite(torque_constant) and
+             0.1 <= current_limit <= 60.0 and 0.0001 <= torque_constant <= 10.0 and
+             all(math.isfinite(item) for item in (
+                 candidate.position_min, candidate.position_max,
+                 candidate.velocity_min, candidate.velocity_max,
+                 candidate.kp_max, candidate.kd_max)) and
+             -1000.0 <= candidate.position_min <= 0.0 and
+             0.0 <= candidate.position_max <= 1000.0 and
+             candidate.position_min < candidate.position_max and
+             -1000.0 <= candidate.velocity_min <= 0.0 and
+             0.0 <= candidate.velocity_max <= 1000.0 and
+             candidate.velocity_min < candidate.velocity_max and
+             0.0 <= candidate.kp_max <= 1000.0 and
+             0.0 <= candidate.kd_max <= 100.0)
+    if not valid:
+        raise ValueError("MIT 协议范围无效")
+    return candidate, current_limit, torque_constant
+
+
+def persist_mit_protocol(ranges: MitRanges, current_limit: float,
+                         torque_constant: float) -> None:
+    """Persist only a firmware-confirmed MIT configuration transaction."""
     data = json.loads(NORMAL_CONFIG.read_text(encoding="utf-8"))
-    data["mit_position_min"] = ranges.position_min
-    data["mit_position_max"] = ranges.position_max
+    data["firmware_mit"] = {
+        "position_min": ranges.position_min,
+        "position_max": ranges.position_max,
+        "velocity_min": ranges.velocity_min,
+        "velocity_max": ranges.velocity_max,
+        "kp_max": ranges.kp_max,
+        "kd_max": ranges.kd_max,
+        "current_limit_a": current_limit,
+        "torque_constant_nm_per_a": torque_constant,
+    }
     temporary = NORMAL_CONFIG.with_suffix(".json.tmp")
     temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(NORMAL_CONFIG)
@@ -155,15 +237,15 @@ def _semantic_can_line(clean: str, ranges: MitRanges) -> str | None:
             kp = ((data[3] & 0xF) << 8) | data[4]
             kd = (data[5] << 4) | (data[6] >> 4)
             tq = ((data[6] & 0xF) << 8) | data[7]
-            torque = tq * 80.0 / 4095.0 - 40.0
+            torque = tq * (2.0 * ranges.torque_max) / 4095.0 - ranges.torque_max
             if abs(torque) <= 0.01:
                 torque = 0.0
             return ("CAN 语义 TX: MIT(电机侧) p={:.4f} rad, v={:.3f} rad/s, "
                     "Kp={:.2f}, Kd={:.3f}, t_ff={:.3f} Nm".format(
                         p * (ranges.position_max - ranges.position_min) / 65535.0 + ranges.position_min,
-                        v * 130.0 / 4095.0 - 65.0,
-                        kp * 500.0 / 4095.0,
-                        kd * 5.0 / 4095.0,
+                        v * (ranges.velocity_max - ranges.velocity_min) / 4095.0 + ranges.velocity_min,
+                        kp * ranges.kp_max / 4095.0,
+                        kd * ranges.kd_max / 4095.0,
                         torque))
     rx = FEEDBACK_RE.search(clean)
     if rx:
@@ -178,6 +260,28 @@ def _semantic_can_line(clean: str, ranges: MitRanges) -> str | None:
     return None
 
 
+def _mit_command_details(payload: bytes, ranges: MitRanges) -> str:
+    """Render the exact MIT command payload using the live firmware ranges."""
+    if len(payload) != 8:
+        raise ValueError("MIT command payload must contain exactly 8 bytes")
+    p = (payload[0] << 8) | payload[1]
+    v = (payload[2] << 4) | (payload[3] >> 4)
+    kp = ((payload[3] & 0x0F) << 8) | payload[4]
+    kd = (payload[5] << 4) | (payload[6] >> 4)
+    tq = ((payload[6] & 0x0F) << 8) | payload[7]
+    # Position is the only 16-bit field; the remaining MIT fields are 12-bit.
+    position = p * (ranges.position_max - ranges.position_min) / 65535.0 + ranges.position_min
+    velocity = v * (ranges.velocity_max - ranges.velocity_min) / 4095.0 + ranges.velocity_min
+    kp_value = kp * ranges.kp_max / 4095.0
+    kd_value = kd * ranges.kd_max / 4095.0
+    torque = tq * (2.0 * ranges.torque_max) / 4095.0 - ranges.torque_max
+    if abs(torque) <= 0.01:
+        torque = 0.0
+    return (f"SLCAN=t0018{payload.hex().upper()} payload={payload.hex().upper()} "
+            f"解析 p={position:.4f} rad, v={velocity:.3f} rad/s, "
+            f"Kp={kp_value:.3f}, Kd={kd_value:.3f}, t_ff={torque:+.3f} Nm")
+
+
 def _diag_crc8(data: bytes) -> int:
     crc = 0
     for byte in data:
@@ -190,7 +294,7 @@ def _diag_crc8(data: bytes) -> int:
 class Runner:
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.mit_ranges = configured_mit_ranges()
+        self.mit_ranges, self.mit_current_limit, self.mit_torque_constant = configured_mit_protocol()
         self.output_reduction = configured_output_reduction()
         self.active: dict[str, Any] | None = None
         self.logs: deque[str] = deque(maxlen=1600)
@@ -205,16 +309,73 @@ class Runner:
         self.last_feedback_position = ""
         self.last_feedback_position_rad: float | None = None
         self.last_feedback_velocity_rad_s: float | None = None
+        self.last_feedback_torque_nm: float | None = None
         self.logical_position_rad: float | None = None
         self._logical_feedback_position_rad: float | None = None
         self._logical_tracking_active = False
         self.feedback_generation = 0
         self.diag_sequence = 0
+        # Structured motion evidence survives noisy raw SLCAN trace output.
+        # It records the host's exact MIT fields before they reach the bridge.
+        self.last_motion_evidence: dict[str, Any] | None = None
 
     def log(self, text: str) -> None:
         stamp = time.strftime("%H:%M:%S")
         for line in text.rstrip("\n").splitlines() or [""]:
             self.logs.append(f"[{stamp}] {line}")
+
+    def _begin_motion_evidence(self, source: str, *, reduction: float,
+                               output_target: float | None,
+                               motor_target: float | None, kp: float,
+                               kd: float, torque: float) -> None:
+        with self.lock:
+            self.last_motion_evidence = {
+                "source": source,
+                "started_monotonic_s": time.monotonic(),
+                "reduction": reduction,
+                "output_target_rad": output_target,
+                "motor_target_rad": motor_target,
+                "requested_kp": kp,
+                "requested_kd": kd,
+                "requested_torque_nm": torque,
+                "frames": 0,
+                "last_motor_position_rad": None,
+                "last_motor_velocity_rad_s": None,
+                "last_slcan_payload_hex": None,
+                "feedback_samples": 0,
+                "feedback_motor_position_min_rad": None,
+                "feedback_motor_position_max_rad": None,
+                "feedback_torque_peak_nm": 0.0,
+                "finished": False,
+            }
+
+    def _record_motion_frame(self, position: float, velocity: float, kp: float,
+                             kd: float, torque: float, payload: bytes) -> None:
+        log_frame = False
+        frame_index = 0
+        with self.lock:
+            ranges = self.mit_ranges
+        with self.lock:
+            evidence = self.last_motion_evidence
+            if evidence is None:
+                return
+            evidence["frames"] += 1
+            frame_index = evidence["frames"]
+            log_frame = frame_index == 1
+            evidence["last_motor_position_rad"] = position
+            evidence["last_motor_velocity_rad_s"] = velocity
+            evidence["last_kp"] = kp
+            evidence["last_kd"] = kd
+            evidence["last_torque_nm"] = torque
+            evidence["last_slcan_payload_hex"] = payload.hex().upper()
+        if log_frame:
+            self.log("MIT 实际发送首帧: " + _mit_command_details(payload, ranges))
+
+    def _finish_motion_evidence(self, max_gap_s: float) -> None:
+        with self.lock:
+            if self.last_motion_evidence is not None:
+                self.last_motion_evidence["finished"] = True
+                self.last_motion_evidence["max_frame_gap_ms"] = max_gap_s * 1000.0
 
     class _SerialWriter:
         """Non-blocking PTY writer so a wedged bridge cannot pin an action thread."""
@@ -252,6 +413,25 @@ class Runner:
     def clear_logs(self) -> None:
         with self.lock:
             self.logs.clear()
+
+    def set_output_reduction(self, value: Any) -> tuple[bool, str]:
+        """Update only the next-session output-to-motor kinematic conversion."""
+        try:
+            reduction = float(value)
+        except (TypeError, ValueError):
+            return False, "减速比必须是数字"
+        if not math.isfinite(reduction) or not 1.0 <= reduction <= 1000.0:
+            return False, "减速比必须在 1..1000 之间（电机转数/输出转数）"
+        with self.lock:
+            if self.enable_active or self.mit_check_active:
+                return False, "CAN/MIT 动作运行中，停止后才能修改减速比"
+            try:
+                persist_output_reduction(reduction)
+            except (OSError, ValueError, TypeError) as exc:
+                return False, f"减速比未能保存: {exc}"
+            self.output_reduction = reduction
+        self.log(f"上位机减速比已设为 {reduction:g}:1；未发送 CAN 配置或控制帧")
+        return True, f"减速比已保存为 {reduction:g}:1，仅影响后续轨迹的 P/V 映射"
 
     def send_diag(self, opcode: int, page: int, argument: int = 0) -> tuple[bool, str]:
         """Submit a diagnostic CAN frame through the already-running bridge."""
@@ -295,15 +475,13 @@ class Runner:
             return False, "GR 是无效的旧配置；请在上位机修改 output_reduction"
         with self.lock:
             ranges = self.mit_ranges
-        if field in (14, 15):
-            ranges = MitRanges(
-                position_min=float(value) if field == 14 else ranges.position_min,
-                position_max=float(value) if field == 15 else ranges.position_max,
-                velocity_min=ranges.velocity_min, velocity_max=ranges.velocity_max,
-                kp_max=ranges.kp_max, kd_max=ranges.kd_max, torque_max=ranges.torque_max)
-            if not (math.isfinite(ranges.position_min) and math.isfinite(ranges.position_max) and
-                    ranges.position_min < 0.0 < ranges.position_max):
-                return False, "P_MIN/P_MAX 必须满足 P_MIN < 0 < P_MAX"
+            current_limit = self.mit_current_limit
+            torque_constant = self.mit_torque_constant
+        try:
+            ranges, current_limit, torque_constant = updated_firmware_mit_protocol(
+                ranges, current_limit, torque_constant, field, float(value))
+        except ValueError as exc:
+            return False, str(exc)
         import struct
         word = struct.unpack('<I', struct.pack('<f', float(value)))[0] if fields[field][0] else int(value) & 0xffffffff
         for offset in range(4):
@@ -316,15 +494,20 @@ class Runner:
             time.sleep(0.025)
             ok, msg = self.send_diag(0x07, 0xF9)
             if not ok: return False, msg
-            if field in (14, 15):
+            if field in (7, 12, 14, 15, 16, 17, 18, 19):
                 try:
-                    persist_mit_ranges(ranges)
+                    persist_mit_protocol(ranges, current_limit, torque_constant)
                 except (OSError, ValueError, TypeError) as exc:
                     return False, f"固件已提交，但 WebUI MIT 范围未能持久化: {exc}"
                 with self.lock:
                     self.mit_ranges = ranges
-                return True, ("P_MIN/P_MAX 已在固件和 WebUI 同步提交；"
-                              f"当前 MIT 位置范围 {ranges.position_min:g}..{ranges.position_max:g} rad")
+                    self.mit_current_limit = current_limit
+                    self.mit_torque_constant = torque_constant
+                return True, ("固件 MIT 协议清单已同步提交；"
+                              f"p={ranges.position_min:g}..{ranges.position_max:g} rad, "
+                              f"v={ranges.velocity_min:g}..{ranges.velocity_max:g} rad/s, "
+                              f"Kp<= {ranges.kp_max:g}, Kd<= {ranges.kd_max:g}, "
+                              f"t<= {ranges.torque_max:g} Nm")
             return True, "配置已提交；涉及 CAN/外设初始化的参数需重启生效"
         return True, "配置已暂存并请求校验；点击提交后才写入 Flash"
 
@@ -333,7 +516,8 @@ class Runner:
             requests = [(0x00, 0, 0)]
         elif name == "snapshot":
             requests = [(0x02, page, 0) for page in
-                        (0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19)]
+                        (0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+                         82, 83, 84, 85, 86, 87, 90, 91, 92, 93, 94)]
             requests += [(0x03, page, 0) for page in (9, 10, 11, 12, 13)]
         elif name == "drv-status":
             requests = [(0x02, page, 0) for page in
@@ -409,7 +593,8 @@ class Runner:
             mode = str(values.get("mode", "position"))
             kp = float(values.get("kp"))
             kd = float(values.get("kd"))
-            torque = float(values.get("torque", 0.0))
+            gravity_torque = float(values.get("gravity_torque", values.get("torque", 0.0)))
+            friction_torque = float(values.get("friction_torque", 0.0))
             duration = float(values.get("duration"))
             hold = float(values.get("hold", 0.0))
         except (TypeError, ValueError):
@@ -417,12 +602,16 @@ class Runner:
         if mode not in ("position", "velocity"):
             return False, "未知轨迹模式"
         for name, value, low, high in (
-                ("Kp", kp, 0.0, 500.0), ("Kd", kd, 0.0, 5.0),
-                ("前馈力矩", torque, -40.0, 40.0),
+                ("电机侧 MIT Kp", kp, 0.0, ranges.kp_max),
+                ("电机侧 MIT Kd", kd, 0.0, ranges.kd_max),
+                ("电机侧重力补偿力矩", gravity_torque, -ranges.torque_max, ranges.torque_max),
+                ("电机侧摩擦补偿幅值", friction_torque, 0.0, ranges.torque_max),
                 ("执行时间", duration, 0.1, MIT_MAX_DURATION_S),
                 ("保持时间", hold, 0.0, MIT_MAX_DURATION_S)):
             if not math.isfinite(value) or not low <= value <= high:
                 return False, f"{name} 超出允许范围 {low:g}..{high:g}"
+        if abs(gravity_torque) + friction_torque > ranges.torque_max:
+            return False, "重力补偿与摩擦补偿叠加后可能超出固件力矩范围"
         try:
             if mode == "position":
                 target = float(values.get("target"))
@@ -433,14 +622,14 @@ class Runner:
                                    f"{ranges.position_min / reduction:g}..{ranges.position_max / reduction:g} rad")
                 output_speed_max = min(TRAJECTORY_MAX_SPEED_RAD_S,
                                        ranges.velocity_max / reduction)
-                if not 0.05 <= speed_limit <= output_speed_max or not math.isfinite(speed_limit):
-                    return False, f"输出端速度上限必须在 0.05..{output_speed_max:g} rad/s"
+                if not 0.005 <= speed_limit <= output_speed_max or not math.isfinite(speed_limit):
+                    return False, f"输出端速度上限必须在 0.005..{output_speed_max:g} rad/s"
             else:
                 velocity = float(values.get("velocity"))
                 output_speed_max = min(TRAJECTORY_MAX_SPEED_RAD_S,
                                        ranges.velocity_max / reduction)
-                if not 0.05 <= abs(velocity) <= output_speed_max or not math.isfinite(velocity):
-                    return False, f"输出端速度必须在 +/-0.05..{output_speed_max:g} rad/s"
+                if not 0.005 <= abs(velocity) <= output_speed_max or not math.isfinite(velocity):
+                    return False, f"输出端速度必须在 +/-0.005..{output_speed_max:g} rad/s"
                 if kp != 0.0:
                     return False, "恒速模式固定使用 Kp=0；位置环不能参与连续旋转"
         except (TypeError, ValueError):
@@ -476,7 +665,8 @@ class Runner:
                 self.logical_position_rad = start
                 self._logical_feedback_position_rad = start
                 self._logical_tracking_active = True
-            request = {"mode": mode, "kp": kp, "kd": kd, "torque": torque,
+            request = {"mode": mode, "kp": kp, "kd": kd,
+                       "gravity_torque": gravity_torque, "friction_torque": friction_torque,
                        "duration": duration, "hold": hold, "start": start_output,
                        "target": target, "ranges": ranges, "reduction": reduction}
             if mode == "position":
@@ -494,7 +684,9 @@ class Runner:
         target = float(request["target"])
         duration = float(request["duration"])
         hold = float(request["hold"])
-        kp, kd, torque = (float(request[name]) for name in ("kp", "kd", "torque"))
+        kp, kd = (float(request[name]) for name in ("kp", "kd"))
+        gravity_torque = float(request["gravity_torque"])
+        friction_torque = float(request["friction_torque"])
         reduction = float(request["reduction"])
         with self.lock:
             tty = self.bridge_tty
@@ -508,9 +700,14 @@ class Runner:
                 return
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
+                self._begin_motion_evidence(
+                    "trajectory-" + mode, reduction=reduction,
+                    output_target=target if mode == "position" else None,
+                    motor_target=target * reduction if mode == "position" else None,
+                    kp=kp, kd=kd, torque=gravity_torque)
                 self.log("S 曲线轨迹: " if mode == "position" else "恒速轨迹: ")
                 self.log(f"输出端起点={start:.4f} rad, 终点={target:.4f} rad, 执行={duration:g} s, "
-                         f"Kp={kp:g}, Kd={kd:g}, t_ff={torque:g}; 减速比={reduction:g}:1")
+                         f"Kp={kp:g}, Kd={kd:g}, 重力补偿={gravity_torque:g}, 摩擦补偿幅值={friction_torque:g}; 减速比={reduction:g}:1")
                 started = time.monotonic()
                 next_send = started
                 last_send = None
@@ -531,15 +728,20 @@ class Runner:
                         # Kp is deliberately zero in continuous velocity mode;
                         # p_des is a bounded transport placeholder only.
                         position = start if feedback_position is None else feedback_position / reduction
+                    effective_torque = compose_feedforward_torque(
+                        gravity_torque, friction_torque, velocity, target - position)
                     motor_position, motor_velocity, motor_kp, motor_kd, motor_torque = output_to_motor(
-                        position, velocity, kp, kd, torque, reduction)
+                        position, velocity, kp, kd, effective_torque, reduction)
                     motor_position = min(ranges.position_max, max(ranges.position_min, motor_position))
                     now = time.monotonic()
                     if now < next_send:
                         time.sleep(next_send - now)
                     now = time.monotonic()
-                    serial_port.write(format_slcan(1, encode_command(
-                        motor_position, motor_velocity, motor_kp, motor_kd, motor_torque, ranges)))
+                    payload = encode_command(
+                        motor_position, motor_velocity, motor_kp, motor_kd, motor_torque, ranges)
+                    serial_port.write(format_slcan(1, payload))
+                    self._record_motion_frame(motor_position, motor_velocity, motor_kp,
+                                              motor_kd, motor_torque, payload)
                     if last_send is not None:
                         max_gap = max(max_gap, now - last_send)
                     last_send = now
@@ -559,11 +761,16 @@ class Runner:
                         with self.lock:
                             hold_position = (target if self.last_feedback_position_rad is None
                                              else self.last_feedback_position_rad / reduction)
+                    effective_torque = compose_feedforward_torque(
+                        gravity_torque, friction_torque, 0.0, target - hold_position)
                     motor_position, _, motor_kp, motor_kd, motor_torque = output_to_motor(
-                        hold_position, 0.0, kp, kd, torque, reduction)
+                        hold_position, 0.0, kp, kd, effective_torque, reduction)
                     motor_position = min(ranges.position_max, max(ranges.position_min, motor_position))
-                    serial_port.write(format_slcan(1, encode_command(
-                        motor_position, 0.0, motor_kp, motor_kd, motor_torque, ranges)))
+                    payload = encode_command(motor_position, 0.0, motor_kp, motor_kd,
+                                             motor_torque, ranges)
+                    serial_port.write(format_slcan(1, payload))
+                    self._record_motion_frame(motor_position, 0.0, motor_kp,
+                                              motor_kd, motor_torque, payload)
                     self.mit_session_frames += 1
                     next_send += MIT_KEEPALIVE_INTERVAL_S
                     if next_send < now:
@@ -571,6 +778,7 @@ class Runner:
                 serial_port.write(STOP_FRAME)
                 self.log("轨迹会话已发送停止帧（0xFD）")
                 self.log(f"轨迹发送统计：{self.mit_session_frames} 帧，最大帧间隔 {max_gap * 1000:.1f} ms")
+                self._finish_motion_evidence(max_gap)
         except (OSError, TimeoutError, ValueError) as exc:
             self.log(f"轨迹会话写入失败: {exc}")
         finally:
@@ -665,6 +873,20 @@ class Runner:
                         self.last_feedback_position = payload[1:3].hex().upper()
                         self.last_feedback_position_rad = float(decoded["position"])
                         self.last_feedback_velocity_rad_s = float(decoded["velocity"])
+                        self.last_feedback_torque_nm = float(decoded["torque"])
+                        evidence = self.last_motion_evidence
+                        if evidence is not None and not evidence["finished"]:
+                            position = self.last_feedback_position_rad
+                            evidence["feedback_samples"] += 1
+                            minimum = evidence["feedback_motor_position_min_rad"]
+                            maximum = evidence["feedback_motor_position_max_rad"]
+                            evidence["feedback_motor_position_min_rad"] = (
+                                position if minimum is None else min(minimum, position))
+                            evidence["feedback_motor_position_max_rad"] = (
+                                position if maximum is None else max(maximum, position))
+                            evidence["feedback_torque_peak_nm"] = max(
+                                float(evidence["feedback_torque_peak_nm"]),
+                                abs(self.last_feedback_torque_nm))
                         if self.logical_position_rad is None:
                             self.logical_position_rad = self.last_feedback_position_rad
                         elif (self._logical_tracking_active and
@@ -713,11 +935,12 @@ class Runner:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
             before = self.feedback_generation
+            ranges = self.mit_ranges
         if not live or not tty:
             return False, "请先启动 CAN0 trace，并等待 Serial Port 路径出现"
         try:
             with self._open_serial(tty) as serial_port:
-                serial_port.write(MIT_CHECK_FRAME)
+                serial_port.write(format_slcan(1, encode_command(0.0, 0.0, 0.0, 0.0, 0.0, ranges)))
             self.log("动作前置检查: 已发送中性 MIT 帧，等待新反馈")
         except (OSError, TimeoutError) as exc:
             return False, f"动作前置检查发送失败: {exc}"
@@ -762,6 +985,7 @@ class Runner:
         with self.lock:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
+            ranges = self.mit_ranges
             if self.mit_check_active:
                 return False, "MIT 三次验证已在运行"
             if self.enable_active:
@@ -774,7 +998,7 @@ class Runner:
         try:
             with self._open_serial(tty) as serial_port:
                 for index in range(3):
-                    serial_port.write(MIT_CHECK_FRAME)
+                    serial_port.write(format_slcan(1, encode_command(0.0, 0.0, 0.0, 0.0, 0.0, ranges)))
                     self.log(f"MIT 非使能验证帧 {index + 1}/3 已发送: ID=0x001 DLC=8")
                     if index != 2:
                         time.sleep(0.2)
@@ -812,12 +1036,23 @@ class Runner:
         self.log("使能请求已发送；请读取 DRV 状态/Snapshot，勿在确认前发送力矩帧")
         return True, "已发送一次受限使能帧（0xFC），未发送力矩命令"
 
+    @staticmethod
+    def _frame_from_feedback(position_hex: str, ranges: MitRanges, position_delta: float,
+                             kp: float = 0.0, kd: float = 0.0,
+                             torque: float = 0.0) -> str:
+        """Build a command from firmware feedback with the same MIT contract."""
+        current = ranges.position_min + (int(position_hex, 16) *
+                                         (ranges.position_max - ranges.position_min) / 65535.0)
+        target = min(ranges.position_max, max(ranges.position_min, current + position_delta))
+        return format_slcan(1, encode_command(target, 0.0, kp, kd, torque, ranges))
+
     def hold_zero_once(self) -> tuple[bool, str]:
         """Enable, then send bounded zero-output MIT keepalives at last position."""
         with self.lock:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
             position = self.last_feedback_position
+            ranges = self.mit_ranges
             if self.mit_check_active or self.enable_active:
                 return False, "已有 CAN 测试或使能动作运行中"
             if not live or not tty:
@@ -825,7 +1060,7 @@ class Runner:
             if len(position) != 4:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
-        zero_frame = f"t0018{position}7FF0000007FF\r"
+        zero_frame = self._frame_from_feedback(position, ranges, 0.0)
         try:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
@@ -848,6 +1083,7 @@ class Runner:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
             position = self.last_feedback_position
+            ranges = self.mit_ranges
             if self.mit_check_active or self.enable_active:
                 return False, "已有 CAN 测试或使能动作运行中"
             if not live or not tty:
@@ -855,9 +1091,8 @@ class Runner:
             if len(position) != 4:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
-        # Position is copied from feedback. v=0, Kp ~= 1/500 full scale,
-        # Kd=0 and feed-forward torque=0. No position step is commanded.
-        tiny_frame = f"t0018{position}7FF0080007FF\r"
+        tiny_frame = self._frame_from_feedback(position, ranges, 0.0,
+                                                kp=min(1.0, ranges.kp_max))
         try:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
@@ -880,6 +1115,7 @@ class Runner:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
             position = self.last_feedback_position
+            ranges = self.mit_ranges
             if self.mit_check_active or self.enable_active:
                 return False, "已有 CAN 测试或使能动作运行中"
             if not live or not tty:
@@ -887,9 +1123,8 @@ class Runner:
             if len(position) != 4:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
-        # t=0x800 is one quantization step around zero with +/-40 Nm range
-        # (about +0.02 Nm). Position, velocity, Kp and Kd remain neutral.
-        torque_frame = f"t0018{position}7FF000000800\r"
+        torque_frame = self._frame_from_feedback(
+            position, ranges, 0.0, torque=(2.0 * ranges.torque_max / 4095.0))
         try:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
@@ -912,6 +1147,7 @@ class Runner:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
             position = self.last_feedback_position
+            ranges = self.mit_ranges
             if self.mit_check_active or self.enable_active:
                 return False, "已有 CAN 测试或使能动作运行中"
             if not live or not tty:
@@ -919,8 +1155,8 @@ class Runner:
             if len(position) != 4:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
-        # t=0x809 is approximately +0.2 Nm with the +/-40 Nm range.
-        torque_frame = f"t0018{position}7FF000000809\r"
+        torque_frame = self._frame_from_feedback(position, ranges, 0.0,
+                                                  torque=min(0.2, ranges.torque_max))
         try:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
@@ -943,6 +1179,7 @@ class Runner:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
             position = self.last_feedback_position
+            ranges = self.mit_ranges
             if self.mit_check_active or self.enable_active:
                 return False, "已有 CAN 测试或使能动作运行中"
             if not live or not tty:
@@ -950,8 +1187,8 @@ class Runner:
             if len(position) != 4:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
-        # t=0x819 is approximately +0.5 Nm with the +/-40 Nm range.
-        torque_frame = f"t0018{position}7FF000000819\r"
+        torque_frame = self._frame_from_feedback(position, ranges, 0.0,
+                                                  torque=min(0.5, ranges.torque_max))
         try:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
@@ -974,6 +1211,7 @@ class Runner:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
             position = self.last_feedback_position
+            ranges = self.mit_ranges
             if self.mit_check_active or self.enable_active:
                 return False, "已有 CAN 测试或使能动作运行中"
             if not live or not tty:
@@ -981,8 +1219,8 @@ class Runner:
             if len(position) != 4:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
-        # t=0x832 is approximately +1.0 Nm with the +/-40 Nm range.
-        torque_frame = f"t0018{position}7FF000000832\r"
+        torque_frame = self._frame_from_feedback(position, ranges, 0.0,
+                                                  torque=min(1.0, ranges.torque_max))
         try:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
@@ -1013,17 +1251,12 @@ class Runner:
             if len(position) != 4:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
-        current = int(position, 16)
-        step_counts = max(1, round((math.pi / 180.0) * 65535.0 /
-                                   (ranges.position_max - ranges.position_min)))
-        target = (current + step_counts) & 0xFFFF
-        target_hex = f"{target:04X}"
-        # v=0, Kp ~= 5/500 full scale, Kd=0, feed-forward torque=0.
-        position_frame = f"t0018{target_hex}7FF0{0x29:02X}0007FF\r"
+        position_frame = self._frame_from_feedback(position, ranges, math.pi / 180.0,
+                                                    kp=min(5.0, ranges.kp_max))
         try:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
-                self.log(f"1°位置阶跃: {position} -> {target_hex}，低 Kp，零前馈力矩")
+                self.log(f"1°位置阶跃: {position} +1°，低 Kp，零前馈力矩")
                 deadline = time.monotonic() + 1.0
                 while time.monotonic() < deadline:
                     serial_port.write(position_frame)
@@ -1050,16 +1283,12 @@ class Runner:
             if len(position) != 4:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
-        current = int(position, 16)
-        step_counts = max(1, round((math.pi / 180.0) * 65535.0 /
-                                   (ranges.position_max - ranges.position_min)))
-        target_hex = f"{(current + step_counts) & 0xFFFF:04X}"
-        # v=0, Kp ~= 20/500 full scale (0xA4), Kd=0, torque=0.
-        position_frame = f"t0018{target_hex}7FF0A40007FF\r"
+        position_frame = self._frame_from_feedback(position, ranges, math.pi / 180.0,
+                                                    kp=min(20.0, ranges.kp_max))
         try:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
-                self.log(f"1°位置阶跃(Kp≈20): {position} -> {target_hex}，零前馈力矩")
+                self.log(f"1°位置阶跃(Kp≈20): {position} +1°，零前馈力矩")
                 deadline = time.monotonic() + 1.0
                 while time.monotonic() < deadline:
                     serial_port.write(position_frame)
@@ -1077,13 +1306,13 @@ class Runner:
             kp = float(kp_value)
         except (TypeError, ValueError):
             return False, "Kp 必须是数字"
-        if not 0.0 <= kp <= 100.0:
-            return False, "Kp 必须在 0 到 100 之间"
         with self.lock:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
             position = self.last_feedback_position
             ranges = self.mit_ranges
+            if not 0.0 <= kp <= ranges.kp_max:
+                return False, f"Kp 必须在固件范围 0..{ranges.kp_max:g} 内"
             if self.mit_check_active or self.enable_active:
                 return False, "已有 CAN 测试或使能动作运行中"
             if not live or not tty:
@@ -1091,15 +1320,11 @@ class Runner:
             if len(position) != 4:
                 return False, "尚未获得控制板位置反馈；请先发送三次 MIT 非使能验证"
             self.enable_active = True
-        step_counts = max(1, round((math.pi / 180.0) * 65535.0 /
-                                   (ranges.position_max - ranges.position_min)))
-        target_hex = f"{(int(position, 16) + step_counts) & 0xFFFF:04X}"
-        kp_raw = min(4095, max(0, int(round(kp * 4095.0 / 500.0))))
-        position_frame = f"t0018{target_hex}7FF0{(kp_raw >> 8) & 0x0F:02X}{kp_raw & 0xFF:02X}07FF\r"
+        position_frame = self._frame_from_feedback(position, ranges, math.pi / 180.0, kp=kp)
         try:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
-                self.log(f"自定义 Kp 位置阶跃: Kp={kp:g}, {position} -> {target_hex}，零前馈力矩")
+                self.log(f"自定义 Kp 位置阶跃: Kp={kp:g}, {position} +1°，零前馈力矩")
                 deadline = time.monotonic() + 1.0
                 while time.monotonic() < deadline:
                     serial_port.write(position_frame)
@@ -1114,19 +1339,27 @@ class Runner:
 
     def mit_custom_once(self, values: dict[str, Any]) -> tuple[bool, str]:
         """Send an explicitly entered MIT command for a bounded session."""
-        names = ("position", "velocity", "kp", "kd", "torque")
+        names = ("position", "velocity", "kp", "kd")
         with self.lock:
             ranges = self.mit_ranges
         limits = ((ranges.position_min, ranges.position_max),
                   (ranges.velocity_min, ranges.velocity_max), (0.0, ranges.kp_max),
-                  (0.0, ranges.kd_max), (-ranges.torque_max, ranges.torque_max))
+                  (0.0, ranges.kd_max))
         try:
             parsed = [float(values.get(name)) for name in names]
+            gravity_torque = float(values.get("gravity_torque", values.get("torque", 0.0)))
+            friction_torque = float(values.get("friction_torque", 0.0))
         except (TypeError, ValueError):
             return False, "MIT 五个参数都必须填写数字"
         for name, value, (low, high) in zip(names, parsed, limits):
             if not math.isfinite(value) or not low <= value <= high:
                 return False, f"{name} 超出允许范围 {low}..{high}"
+        for name, value, low, high in (("重力补偿力矩", gravity_torque, -ranges.torque_max, ranges.torque_max),
+                                       ("摩擦补偿幅值", friction_torque, 0.0, ranges.torque_max)):
+            if not math.isfinite(value) or not low <= value <= high:
+                return False, f"{name} 超出允许范围 {low}..{high}"
+        if abs(gravity_torque) + friction_torque > ranges.torque_max:
+            return False, "重力补偿与摩擦补偿叠加后可能超出固件力矩范围"
         try:
             duration = float(values.get("duration", MIT_DEFAULT_DURATION_S))
         except (TypeError, ValueError):
@@ -1141,12 +1374,13 @@ class Runner:
             if not live or not tty:
                 return False, "请先启动 CAN0 trace"
             # start_mit_session owns the session flag; this method is the worker.
-        data = encode_command(*parsed, ranges)
-        frame = format_slcan(1, data)
         try:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
-                self.log(f"自定义 MIT: p={parsed[0]:g} rad, v={parsed[1]:g} rad/s, Kp={parsed[2]:g}, Kd={parsed[3]:g}, t={parsed[4]:g} Nm")
+                self._begin_motion_evidence(
+                    "custom-mit", reduction=1.0, output_target=None,
+                    motor_target=parsed[0], kp=parsed[2], kd=parsed[3], torque=gravity_torque)
+                self.log(f"自定义 MIT: p={parsed[0]:g} rad, v={parsed[1]:g} rad/s, Kp={parsed[2]:g}, Kd={parsed[3]:g}, 重力补偿={gravity_torque:g}, 摩擦补偿幅值={friction_torque:g}")
                 deadline = time.monotonic() + duration
                 next_send = time.monotonic()
                 last_send = None
@@ -1156,7 +1390,16 @@ class Runner:
                     if now < next_send:
                         time.sleep(next_send - now)
                     now = time.monotonic()
-                    serial_port.write(frame)
+                    with self.lock:
+                        feedback_position = self.last_feedback_position_rad
+                    position_error = parsed[0] - (feedback_position if feedback_position is not None else parsed[0])
+                    effective_torque = compose_feedforward_torque(
+                        gravity_torque, friction_torque, parsed[1], position_error)
+                    data = encode_command(parsed[0], parsed[1], parsed[2], parsed[3],
+                                           effective_torque, ranges)
+                    serial_port.write(format_slcan(1, data))
+                    self._record_motion_frame(parsed[0], parsed[1], parsed[2], parsed[3],
+                                              effective_torque, data)
                     if last_send is not None:
                         max_gap = max(max_gap, now - last_send)
                     last_send = now
@@ -1169,8 +1412,14 @@ class Runner:
                 # stop, but leaves the next enable racing a stale DRV/encoder
                 # fault.  0xFD follows the firmware's clean ESC path.
                 serial_port.write(STOP_FRAME)
+                with self.lock:
+                    last_payload = (self.last_motion_evidence or {}).get("last_slcan_payload_hex")
+                    live_ranges = self.mit_ranges
+                if last_payload:
+                    self.log("MIT 实际发送末帧: " + _mit_command_details(bytes.fromhex(last_payload), live_ranges))
                 self.log("自定义 MIT 会话已发送停止帧（0xFD）")
                 self.log(f"MIT 发送统计：{self.mit_session_frames} 帧，最大帧间隔 {max_gap * 1000:.1f} ms")
+                self._finish_motion_evidence(max_gap)
         except OSError as exc:
             return False, f"无法写入桥接伪串口 {tty}: {exc}"
         finally:
@@ -1196,6 +1445,7 @@ class Runner:
             "mit_session_frames": self.mit_session_frames,
             "last_feedback_motor_position_rad": self.last_feedback_position_rad,
             "last_feedback_motor_velocity_rad_s": self.last_feedback_velocity_rad_s,
+            "last_feedback_motor_torque_nm": self.last_feedback_torque_nm,
             "last_feedback_output_position_rad": None if self.last_feedback_position_rad is None else self.last_feedback_position_rad / self.output_reduction,
             "last_feedback_output_velocity_rad_s": None if self.last_feedback_velocity_rad_s is None else self.last_feedback_velocity_rad_s / self.output_reduction,
             "logical_motor_position_rad": self.logical_position_rad,
@@ -1204,8 +1454,15 @@ class Runner:
             "output_reduction": self.output_reduction,
             "mit_position_min": self.mit_ranges.position_min,
             "mit_position_max": self.mit_ranges.position_max,
+            "mit_velocity_min": self.mit_ranges.velocity_min,
+            "mit_velocity_max": self.mit_ranges.velocity_max,
+            "mit_kp_max": self.mit_ranges.kp_max,
+            "mit_kd_max": self.mit_ranges.kd_max,
+            "mit_torque_max": self.mit_ranges.torque_max,
             "normal_sha": normal_firmware_config()[0],
             "normal_image": str(normal_firmware_config()[1]),
+            "last_motion_evidence": (dict(self.last_motion_evidence)
+                                     if self.last_motion_evidence is not None else None),
             "logs": list(self.logs),
         }
 
@@ -1228,13 +1485,12 @@ def local_addresses() -> list[str]:
 
 def actions() -> dict[str, tuple[str, list[str], bool]]:
     build = [
-        "make", "SAFE_BRINGUP=0", "BRINGUP_INJECT=0",
-        f"BUILD_DIR={REPO / 'build/webui-normal'}", f"GCC_PATH={TOOLCHAIN}", "-j4",
+        "make", "release-normal", f"GCC_PATH={TOOLCHAIN}", "-j4",
     ]
     normal_sha, _ = normal_firmware_config()
     return {
-        "offline-tests": ("离线主机测试", ["make", "host-test", "host-app-test", "host-tools-test"], False),
-        "build-normal": ("重新构建正常固件", build, False),
+    "offline-tests": ("离线主机测试", ["make", "host-test", "host-app-test", "host-tools-test"], False),
+    "build-normal": ("重新构建正常固件", build, False),
         "flash-normal": (
             "刷入正常固件",
             [str(FLASH), "flash-normal", "--confirm-normal-sha", normal_sha,
@@ -1366,6 +1622,10 @@ class Handler(BaseHTTPRequestHandler):
             ok, message = RUNNER.send_config_set(field, value, commit)
             self._json(HTTPStatus.OK if ok else HTTPStatus.CONFLICT, {"ok": ok, "message": message})
             return
+        if parsed.path == "/api/output-reduction":
+            ok, message = RUNNER.set_output_reduction(body.get("reduction"))
+            self._json(HTTPStatus.OK if ok else HTTPStatus.CONFLICT, {"ok": ok, "message": message})
+            return
         if parsed.path == "/api/bridge/start":
             ok, message = RUNNER.start_bridge()
         elif parsed.path == "/api/bridge/stop":
@@ -1453,10 +1713,10 @@ PAGE = r'''<!doctype html>
 :root{color-scheme:dark;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#111827;color:#e5e7eb}body{margin:0}.wrap{max-width:1180px;margin:auto;padding:14px 18px}header{display:flex;gap:20px;justify-content:space-between;align-items:end;border-bottom:1px solid #374151;padding-bottom:12px}h1{font-size:22px;margin:0}h2{font-size:15px;margin:0 0 8px}.muted{color:#9ca3af;font-size:12px}.summary{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:10px 0;color:#cbd5e1;font-size:12px}.summary code{background:#0b1220;border:1px solid #374151;border-radius:4px;padding:4px 6px;color:#93c5fd}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px;margin:10px 0}.panel{border:1px solid #374151;border-radius:6px;padding:11px;background:#172033}.panel p{font-size:12px;line-height:1.35;color:#cbd5e1;margin:6px 0}.command{background:#0b1220;padding:7px;border-radius:4px;font:11px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}button{border:1px solid #64748b;border-radius:4px;background:#1e3a5f;color:white;padding:7px 9px;font-size:13px;cursor:pointer}button.danger{background:#7f1d1d;border-color:#ef4444}button.secondary{background:#263449}button:disabled{opacity:.5;cursor:not-allowed}input{width:100%;box-sizing:border-box;background:#0b1220;border:1px solid #475569;color:#e5e7eb;border-radius:4px;padding:7px;margin:5px 0}.check{display:flex;gap:8px;align-items:start;font-size:12px;margin:7px 0}.check input{width:auto;margin:2px 0}#notice{min-height:18px;color:#fcd34d;font-size:13px}.log-head{display:flex;justify-content:space-between;align-items:start;gap:12px}.log-head h2{margin-top:8px}pre{height:330px;overflow:auto;margin:0;background:#050a14;border:1px solid #374151;border-radius:6px;padding:10px;white-space:pre-wrap;word-break:break-word;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.state{color:#93c5fd;font-size:12px}@media(max-width:550px){header{display:block}.wrap{padding:12px}pre{height:280px}}
 </style><body><main class="wrap"><header><div><h1>Athena 电机控制台架</h1><div class="muted">固定动作面板。无任意 Shell/CAN 命令入口。</div></div><div id="state" class="state">等待连接</div></header>
 <p id="notice"></p><div class="summary"><span>当前正常固件 SHA-256</span><code id="shaTop">加载中…</code><span>最近反馈位置</span><code id="positionRad">暂无</code><span>逻辑多圈位置</span><code id="logicalPosition">暂无</code><span>圈数</span><code id="logicalTurns">暂无</code><span>推荐顺序：刷写 → 启动 → PING → Snapshot → DRV 状态 → CAN Trace</span></div><section class="grid">
-<article class="panel"><h2>离线验证</h2><p>构建前或代码修改后执行。不会访问控制板。</p><div class="command">make host-test host-app-test host-tools-test</div><p><button data-action="offline-tests">执行离线主机测试</button></p><div class="command">make SAFE_BRINGUP=0 BRINGUP_INJECT=0 BUILD_DIR=build/webui-normal GCC_PATH=&lt;持久化 Arm GNU Toolchain&gt; -j4</div><p><button data-action="build-normal">重新构建正常固件</button></p></article>
+<article class="panel"><h2>离线验证</h2><p>构建前或代码修改后执行。不会访问控制板。</p><div class="command">make host-test host-app-test host-tools-test</div><p><button data-action="offline-tests">执行离线主机测试</button></p><div class="command">make release-normal GCC_PATH=&lt;固定 Arm GNU Toolchain&gt;</div><p><button data-action="build-normal">重新构建正常固件</button></p></article>
 <article class="panel"><h2>刷写与启动</h2><p>刷写使用逐页擦写、写入、读回校验，并保留 CPU halted。启动前不发送任何运动命令。</p><div class="command">tools/athena_safe_flash.sh flash-normal --confirm-normal-sha <span id="sha"></span> --i-understand-this-writes-main-flash</div><input id="shaInput" aria-label="SHA-256" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="可手动粘贴完整 SHA-256"><p><button class="secondary" id="fillSha" type="button">填入当前 SHA</button></p><label class="check"><input id="physical" type="checkbox">我已确认控制板、ST-LINK、限流电源、机械固定和可断电路径均已就绪。</label><button class="danger" id="flash">刷入正常固件</button><hr><div class="command">tools/athena_safe_flash.sh boot-normal</div><label class="check"><input id="bootReady" type="checkbox">我已确认物理台架可安全启动。</label><button id="boot">启动正常固件</button></article>
 <article class="panel"><h2>正常固件只读验证</h2><p>PING、Snapshot 和 DRV 状态均为只读，不会启用电机。</p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 ping</div><p><button data-action="diag-ping">执行 PING</button></p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 snapshot</div><p><button data-action="diag-snapshot">执行 Snapshot</button></p><div class="command">tools/athena_diag_uc12/athena_diag_uc12 drv-status</div><p><button data-action="diag-drv-status">读取 DRV 状态</button> <button class="secondary" data-action="diag-drv-fault-snapshot">读取故障瞬间快照</button></p><hr><h2>RAM 调试日志</h2><p>默认关闭；开启后只记录运行期关键事件，重启会清空。读取前请停止 CAN0 Trace。</p><p><button data-action="diag-debug-on">开启记录</button> <button class="secondary" data-action="diag-debug-status">读取状态</button> <button class="secondary" data-action="diag-debug-off">关闭记录</button></p><div style="display:flex;gap:6px;align-items:center"><input id="debugLogIndex" type="number" min="0" max="31" step="1" value="0" aria-label="RAM 调试日志索引"><button id="debugLogRead" class="secondary">读取该条日志</button></div></article>
-<article class="panel"><h2>CAN0 收发与受限使能</h2><p>桥接独占 UC12。先用非使能帧确认收到控制板回复，再在电机固定、限流和断电路径确认后发送一次 0xFC。</p><div class="command">./uc12_slcan_bridge --channel 0 --unsafe-tx --trace</div><p><button id="bridgeStart">启动 CAN0 Trace</button> <button class="secondary" id="bridgeStop">停止</button></p><div class="command">printf 't00187FFF7FF0000007FF\\r' &gt; &lt;bridge-pty&gt; (固定执行 3 次，间隔 200 ms)</div><p><button id="mitCheck">发送三次 MIT 非使能验证</button></p><div class="command">printf 't0018FFFFFFFFFFFFFFFC\\r' &gt; &lt;bridge-pty&gt; (仅发送一次)</div><label class="check"><input id="enableReady" type="checkbox">我已确认电机已固定、限流已设置，并能立即断电。</label><p><button class="danger" id="enableOnce">单次受限使能</button> <button id="holdZero">1 秒零输出保持</button> <button id="holdTinyKp">1 秒极小 Kp 闭环</button> <button id="feedforwardMin">1 秒约 0.02 Nm</button> <button id="feedforwardLow">1 秒约 0.2 Nm</button> <button id="feedforwardMedium">1 秒约 0.5 Nm</button> <button id="feedforwardHigh">1 秒约 1.0 Nm</button> <button id="positionStep">1 秒 1° 位置阶跃</button> <button id="positionStepStiff">1 秒 1° 阶跃(Kp≈20)</button></p><p class="muted">力矩测试持续 1 秒自动停止。位置阶跃会尝试小幅运动，必须确认运动空间已释放、限流 0.2 A 且可立即断电。</p></article>
+<article class="panel"><h2>CAN0 收发与受限使能</h2><p>桥接独占 UC12。非使能验证帧由当前固件 MIT 协议清单编码；确认收到控制板回复后，才可在电机固定、限流和断电路径就绪时发送一次 0xFC。</p><div class="command">./uc12_slcan_bridge --channel 0 --unsafe-tx --trace</div><p><button id="bridgeStart">启动 CAN0 Trace</button> <button class="secondary" id="bridgeStop">停止</button></p><p><button id="mitCheck">发送三次 MIT 非使能验证</button></p><div class="command">0xFC 使能帧仅发送一次</div><label class="check"><input id="enableReady" type="checkbox">我已确认电机已固定、限流已设置，并能立即断电。</label><p><button class="danger" id="enableOnce">单次受限使能</button> <button id="holdZero">1 秒零输出保持</button> <button id="holdTinyKp">1 秒极小 Kp 闭环</button> <button id="feedforwardMin">1 秒最小力矩量化步进</button> <button id="feedforwardLow">1 秒约 0.2 Nm</button> <button id="feedforwardMedium">1 秒约 0.5 Nm</button> <button id="feedforwardHigh">1 秒约 1.0 Nm</button> <button id="positionStep">1 秒 1° 位置阶跃</button> <button id="positionStepStiff">1 秒 1° 阶跃(Kp≈20)</button></p><p class="muted">力矩测试持续 1 秒自动停止。位置阶跃会尝试小幅运动，必须确认运动空间已释放、限流 0.2 A 且可立即断电。</p></article>
 </section><p class="panel"><label>Kp（位置阶跃，0-100）：<input id="customKp" type="number" min="0" max="100" step="1" value="20"></label> <button id="positionStepCustom">执行输入 Kp 的 1° 阶跃</button></p><div class="log-head"><h2>实时日志</h2><button class="secondary" id="clearLogs">清除当前内容</button></div><pre id="log">等待认证…</pre></main><script>
 const params=new URLSearchParams(location.search), fromUrl=params.get('token'); let token=fromUrl||localStorage.getItem('athenaBenchToken')||'';if(fromUrl)localStorage.setItem('athenaBenchToken',fromUrl);if(!token){token=prompt('输入服务启动时显示的访问令牌：')||'';localStorage.setItem('athenaBenchToken',token)}
 const note=t=>document.querySelector('#notice').textContent=t;const api=async(path,body)=>{let r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Bench-Token':token},body:JSON.stringify(body||{})});let j=await r.json();if(!r.ok)throw Error(j.error||j.message||r.status);return j};
@@ -1530,7 +1790,7 @@ PAGE = PAGE.replace(
 ).replace(
     '</script></body></html>', "document.querySelectorAll('[data-tab-select]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-tab-select]').forEach(x=>x.classList.toggle('active',x===b));document.querySelectorAll('[data-tab]').forEach(p=>p.hidden=p.dataset.tab!==b.dataset.tabSelect)});document.querySelectorAll('[data-tab]').forEach(p=>p.hidden=p.dataset.tab!=='offline');document.querySelector('#canActionRun').onclick=()=>document.querySelector('#'+document.querySelector('#canActionSelect').value).click();</script></body></html>",
 ).replace(
-    '<style>', '<style>.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}.tabs .tab{background:#172033;color:#cbd5e1}.tabs .tab.active{background:#2563eb;color:#fff}.tab-panel[hidden]{display:none}.can-strip{grid-column:1/-1}.can-strip p{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.can-strip select{max-width:240px;width:auto;background:#0b1220;border:1px solid #475569;color:#e5e7eb;border-radius:4px;padding:7px}.legacy-control{display:none!important}',
+    '<style>', '<style>.tabs{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}.tabs .tab{background:#172033;color:#cbd5e1}.tabs .tab.active{background:#2563eb;color:#fff}.tab-panel[hidden]{display:none}.panel label:not(.check){display:inline-flex;flex-direction:column;gap:3px;vertical-align:top;margin:4px 8px 4px 0;color:#cbd5e1;font-size:12px}.panel label:not(.check) input,.panel label:not(.check) select{min-width:130px}.can-strip{grid-column:1/-1}.can-strip p{display:flex;gap:6px;flex-wrap:wrap;align-items:center}.can-strip select{max-width:240px;width:auto;background:#0b1220;border:1px solid #475569;color:#e5e7eb;border-radius:4px;padding:7px}.legacy-control{display:none!important}',
 ).replace(
     "document.querySelector('#log').textContent='';", "document.querySelector('#log').value='';",
 ).replace(
@@ -1560,6 +1820,20 @@ PAGE = PAGE.replace(
     "const mitCustomButton=document.querySelector('#mitCustom'),mitStopButton=document.querySelector('#mitStop');if(mitCustomButton)mitCustomButton.onclick=()=>api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:document.querySelector('#mitP').value,velocity:document.querySelector('#mitV').value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,torque:document.querySelector('#mitT').value,duration:document.querySelector('#mitDuration').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));if(mitStopButton)mitStopButton.onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));",
     1,
 )
+if 'id="mitP"' not in PAGE:
+    _mit_panel = r'''<article class="panel tab-panel" data-tab="mit"><h2>自定义 MIT 持续会话（电机侧）</h2><p>以下五个参数严格使用固件 MIT API 的电机侧单位，不包含减速器换算。</p><p><label>位置 p (rad)<input id="mitP" type="number" step="0.001" value="0"></label><label>速度 v (rad/s)<input id="mitV" type="number" step="0.001" value="0"></label><label>位置增益 Kp<input id="mitKp" type="number" step="0.001" value="0"></label><label>速度增益 Kd<input id="mitKd" type="number" step="0.001" value="0"></label><label>前馈力矩 (Nm)<input id="mitT" type="number" step="0.001" value="0"></label><label>持续时间 (s)<input id="mitDuration" type="number" min="0.1" max="300" step="0.1" value="1"></label></p><button id="mitCustom">发送自定义 MIT</button> <button class="danger" id="mitStop">停止 MIT</button></article>'''
+    PAGE = PAGE.replace('<div class="log-head">', _mit_panel + '<div class="log-head">', 1)
+PAGE = PAGE.replace(
+    '<p>以下五个参数严格使用固件 MIT API 的电机侧单位，不包含减速器换算。</p>',
+    '<p>增益和前馈力矩始终使用固件 MIT API 的电机侧单位。位置和速度可在输出端输入，由上位机换算后发送。</p><p class="control-row"><label>目标坐标<select id="mitCoordinate"><option value="output">输出端目标（自动换算）</option><option value="motor">电机侧原始 MIT</option></select></label><span id="mitReductionNote" class="muted"></span></p><p class="control-row" id="mitOutputInputs"><label>输出端目标位置 (rad)<input id="mitOutputP" type="number" step="0.001" value="0"></label><label>输出端目标速度 (rad/s)<input id="mitOutputV" type="number" step="0.001" value="0"></label></p>',
+    1,
+)
+PAGE = PAGE.replace('<label>位置 p (rad)<input id="mitP"', '<label>电机侧位置 p (rad)<input id="mitP"', 1)
+PAGE = PAGE.replace('<label>速度 v (rad/s)<input id="mitV"', '<label>电机侧速度 v (rad/s)<input id="mitV"', 1)
+PAGE = PAGE.replace('<label>位置增益 Kp<input id="mitKp"', '<label>电机侧 MIT Kp<input id="mitKp"', 1)
+PAGE = PAGE.replace('<label>速度增益 Kd<input id="mitKd"', '<label>电机侧 MIT Kd<input id="mitKd"', 1)
+PAGE = PAGE.replace('<label>前馈力矩 (Nm)<input id="mitT"', '<label>电机侧重力补偿 (Nm)<input id="mitGravity" type="number" step="0.001" value="0"><label>电机侧摩擦补偿幅值 (Nm)<input id="mitFriction" type="number" min="0" step="0.001" value="0">', 1)
+PAGE = PAGE.replace('<label>电机侧 MIT 前馈力矩 (Nm)<input id="mitT"', '<label>电机侧重力补偿 (Nm)<input id="mitGravity" type="number" step="0.001" value="0"><label>电机侧摩擦补偿幅值 (Nm)<input id="mitFriction" type="number" min="0" step="0.001" value="0">', 1)
 
 # The fixed Kp position-step control is intentionally no longer exposed in the UI.
 # Keep its backend endpoint for compatibility with older scripts, but remove its
@@ -1571,7 +1845,21 @@ PAGE = re.sub(r"document\.querySelector\('#positionStepCustom'\)\.onclick=.*?;\n
 # parameter MIT panel.  The raw panel remains useful for protocol/FOC checks;
 # this panel owns the time-varying position and velocity references needed for
 # repeatable motion tests.
-_trajectory_panel = r'''<article class="panel tab-panel" data-tab="trajectory"><h2>上位机轨迹控制（输出端）</h2><p>输入和显示均为减速器输出端。主机按 9:1 换算 p/v，并把 Kp、Kd、前馈力矩换算成电机侧 MIT 参数；固件只处理磁编码器电机侧坐标。</p><p><select id="trajectoryMode" aria-label="轨迹模式"><option value="position">S 曲线到目标位置</option><option value="velocity">恒速前进</option></select></p><p id="trajectoryPositionInputs"><input id="trajectoryTarget" type="number" step="0.001" placeholder="输出端目标位置 rad (-11.11..11.11)"><input id="trajectorySpeedLimit" type="number" min="0.05" max="7.2" step="0.05" value="2" placeholder="输出端最大速度 rad/s"></p><p id="trajectoryVelocityInputs" hidden><input id="trajectoryVelocity" type="number" min="-7.2" max="7.2" step="0.05" value="0.2" placeholder="输出端速度 rad/s（正负决定方向）"></p><p><input id="trajectoryDuration" type="number" min="0.1" max="300" step="0.1" value="2" placeholder="执行时间 s"><input id="trajectoryHold" type="number" min="0" max="300" step="0.1" value="2" placeholder="到达后保持 s（0 为不保持）"><input id="trajectoryKp" type="number" min="0" max="500" step="0.1" value="20" placeholder="输出端 Kp"><input id="trajectoryKd" type="number" min="0" max="5" step="0.01" value="1" placeholder="输出端 Kd"><input id="trajectoryTorque" type="number" min="-40" max="40" step="0.01" value="0" placeholder="输出端前馈 Nm"></p><p class="muted">MIT 范围仍是电机侧 P_MIN/P_MAX。恒速模式用实时电机侧反馈重置输出端逻辑位置；停止后不保持转动。自定义 MIT 页面始终使用原始电机侧单位。</p><button id="trajectoryStart">开始轨迹</button> <button class="danger" id="trajectoryStop">停止轨迹</button></article>'''
+_trajectory_panel = r'''<article class="panel tab-panel" data-tab="trajectory"><h2>上位机轨迹控制</h2><p>目标位置和速度以减速器输出端填写；页面按当前减速比换算为电机侧目标。Kp、Kd 和补偿力矩始终是固件 MIT API 的电机侧参数。</p><p><label>模式<select id="trajectoryMode" aria-label="轨迹模式"><option value="position">S 曲线到目标位置</option><option value="velocity">恒速前进</option></select></label></p><p id="trajectoryPositionInputs"><label>输出端目标位置 (rad)<input id="trajectoryTarget" type="number" step="0.001" placeholder="输出端目标位置"></label><output id="trajectoryTargetMotorPreview" class="muted">电机侧目标位置: 等待输入</output><label>输出端速度上限 (rad/s)<input id="trajectorySpeedLimit" type="number" min="0.005" max="7.2" step="0.005" value="0.02"></label><output id="trajectorySpeedLimitMotorPreview" class="muted">电机侧速度上限: 等待输入</output></p><p id="trajectoryVelocityInputs" hidden><label>输出端恒速 (rad/s)<input id="trajectoryVelocity" type="number" min="-7.2" max="7.2" step="0.005" value="0.02"></label><output id="trajectoryVelocityMotorPreview" class="muted">电机侧恒速: 等待输入</output></p><p><label>执行时间 (s)<input id="trajectoryDuration" type="number" min="0.1" max="300" step="0.1" value="2"></label><label>保持时间 (s)<input id="trajectoryHold" type="number" min="0" max="300" step="0.1" value="2"></label><label>电机侧 MIT Kp<input id="trajectoryKp" type="number" min="0" max="500" step="0.1" value="20"></label><label>电机侧 MIT Kd<input id="trajectoryKd" type="number" min="0" max="5" step="0.01" value="1"></label><label>电机侧重力补偿 (Nm)<input id="trajectoryGravity" type="number" step="0.01" value="0"></label><label>电机侧摩擦补偿幅值 (Nm)<input id="trajectoryFriction" type="number" min="0" step="0.01" value="0"></label></p><p class="muted">摩擦补偿指令与期望运动同向；零速保持时根据位置误差方向取同向符号。</p><button id="trajectoryStart">开始轨迹</button> <button class="danger" id="trajectoryStop">停止轨迹</button></article>'''
+if 'id="trajectoryTarget"' not in PAGE:
+    PAGE = PAGE.replace('<div class="log-head">', _trajectory_panel + '<div class="log-head">', 1)
+PAGE = PAGE.replace(
+    '<p><label>模式<select id="trajectoryMode" aria-label="轨迹模式">',
+    '<p><label>减速比（电机转数 / 输出转数）<input id="outputReduction" type="number" min="1" max="1000" step="0.001" value="9"></label> <button class="secondary" id="outputReductionSave">保存减速比</button> <span class="muted">仅影响上位机 P/V 映射，不写入电机固件。</span></p><p><label>模式<select id="trajectoryMode" aria-label="轨迹模式">',
+    1,
+)
+PAGE = PAGE.replace(
+    '<span>最近反馈位置</span><code id="positionRad">暂无</code><span>逻辑多圈位置</span><code id="logicalPosition">暂无</code><span>圈数</span><code id="logicalTurns">暂无</code><span>推荐顺序：刷写 → 启动 → PING → Snapshot → DRV 状态 → CAN Trace</span>',
+    '<span>电机侧反馈</span><code id="motorFeedback">暂无</code><span>输出端反馈</span><code id="outputFeedback">暂无</code><span>输出端逻辑多圈</span><code id="logicalOutputPosition">暂无</code><span>输出端圈数</span><code id="outputTurns">暂无</code>',
+    1,
+)
+PAGE = re.sub(r'(<p id="notice"></p>)(<div class="summary">.*?</div>)(<nav class="tabs"[^>]*>.*?</nav>)',
+              r'\1\3\2', PAGE, count=1, flags=re.S)
 PAGE = PAGE.replace(
     'id="trajectoryVelocity" type="number" min="-20" max="20" step="0.05" value="1"',
     'id="trajectoryVelocity" type="number" min="-20" max="20" step="0.05" value="0.2"',
@@ -1622,10 +1910,95 @@ PAGE = PAGE.replace(
     '</body></html>',
     r'''<script>
 const trajectoryMode=document.querySelector('#trajectoryMode');
-if(trajectoryMode){const syncTrajectoryMode=()=>{const position=trajectoryMode.value==='position',kp=document.querySelector('#trajectoryKp');document.querySelector('#trajectoryPositionInputs').hidden=!position;document.querySelector('#trajectoryVelocityInputs').hidden=position;kp.disabled=!position;if(!position)kp.value='0'};trajectoryMode.onchange=syncTrajectoryMode;syncTrajectoryMode();document.querySelector('#trajectoryStart').onclick=()=>api('/api/bridge/trajectory',{physical_ready:document.querySelector('#enableReady').checked,mode:trajectoryMode.value,target:document.querySelector('#trajectoryTarget').value,speed_limit:document.querySelector('#trajectorySpeedLimit').value,velocity:document.querySelector('#trajectoryVelocity').value,duration:document.querySelector('#trajectoryDuration').value,hold:document.querySelector('#trajectoryHold').value,kp:document.querySelector('#trajectoryKp').value,kd:document.querySelector('#trajectoryKd').value,torque:document.querySelector('#trajectoryTorque').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#trajectoryStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));}
+let trajectoryReduction=1;
+const outputReductionInput=document.querySelector('#outputReduction'),outputReductionSave=document.querySelector('#outputReductionSave');
+if(outputReductionSave)outputReductionSave.onclick=()=>api('/api/output-reduction',{reduction:outputReductionInput.value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
+const mitCoordinate=document.querySelector('#mitCoordinate'),mitOutputInputs=document.querySelector('#mitOutputInputs'),mitOutputP=document.querySelector('#mitOutputP'),mitOutputV=document.querySelector('#mitOutputV'),mitP=document.querySelector('#mitP'),mitV=document.querySelector('#mitV'),mitReductionNote=document.querySelector('#mitReductionNote');
+const syncMitCoordinate=()=>{if(!mitCoordinate)return;const output=mitCoordinate.value==='output';mitOutputInputs.hidden=!output;mitP.disabled=output;mitV.disabled=output;if(output){const p=Number(mitOutputP.value),v=Number(mitOutputV.value);if(Number.isFinite(p))mitP.value=(p*trajectoryReduction).toFixed(4);if(Number.isFinite(v))mitV.value=(v*trajectoryReduction).toFixed(4);mitReductionNote.textContent=`按 ${trajectoryReduction}:1 换算，以下电机侧 p/v 为实际发送值`;}else{mitReductionNote.textContent='以下 p/v 直接作为固件 MIT 电机侧命令发送';}};
+if(mitCoordinate){mitCoordinate.onchange=syncMitCoordinate;[mitOutputP,mitOutputV].forEach(input=>input.oninput=syncMitCoordinate);syncMitCoordinate();const mitCustom=document.querySelector('#mitCustom');if(mitCustom)mitCustom.onclick=()=>{syncMitCoordinate();api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:mitP.value,velocity:mitV.value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,torque:document.querySelector('#mitT').value,duration:document.querySelector('#mitDuration').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));};}
+const trajectoryPreview=(inputId, outputId, label)=>{const input=document.querySelector('#'+inputId),output=document.querySelector('#'+outputId);if(!input||!output)return;const value=Number(input.value);output.textContent=Number.isFinite(value)?`${label}: ${(value*trajectoryReduction).toFixed(4)} rad${inputId.includes('Velocity')||inputId.includes('SpeedLimit')?'/s':''}`:`${label}: 等待输入`;};
+const refreshTrajectoryPreviews=()=>{trajectoryPreview('trajectoryTarget','trajectoryTargetMotorPreview','电机侧目标位置');trajectoryPreview('trajectorySpeedLimit','trajectorySpeedLimitMotorPreview','电机侧速度上限');trajectoryPreview('trajectoryVelocity','trajectoryVelocityMotorPreview','电机侧恒速');};
+if(trajectoryMode){const syncTrajectoryMode=()=>{const position=trajectoryMode.value==='position',kp=document.querySelector('#trajectoryKp');document.querySelector('#trajectoryPositionInputs').hidden=!position;document.querySelector('#trajectoryVelocityInputs').hidden=position;kp.disabled=!position;if(!position)kp.value='0';refreshTrajectoryPreviews()};trajectoryMode.onchange=syncTrajectoryMode;['trajectoryTarget','trajectorySpeedLimit','trajectoryVelocity'].forEach(id=>document.querySelector('#'+id).oninput=refreshTrajectoryPreviews);syncTrajectoryMode();document.querySelector('#trajectoryStart').onclick=()=>api('/api/bridge/trajectory',{physical_ready:document.querySelector('#enableReady').checked,mode:trajectoryMode.value,target:document.querySelector('#trajectoryTarget').value,speed_limit:document.querySelector('#trajectorySpeedLimit').value,velocity:document.querySelector('#trajectoryVelocity').value,duration:document.querySelector('#trajectoryDuration').value,hold:document.querySelector('#trajectoryHold').value,kp:document.querySelector('#trajectoryKp').value,kd:document.querySelector('#trajectoryKd').value,torque:document.querySelector('#trajectoryTorque').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#trajectoryStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));}
 const configSet=document.querySelector('#configSet');
 if(configSet)configSet.onclick=()=>api('/api/config/set',{field:document.querySelector('#configField').value,value:document.querySelector('#configValue').value,commit:document.querySelector('#configCommit').checked}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
 </script></body></html>''',
+    1,
+)
+PAGE = PAGE.replace(
+    "let s=await r.json();document.querySelector('#sha').textContent=s.normal_sha;",
+    "let s=await r.json();if(typeof refreshTrajectoryPreviews==='function'){trajectoryReduction=s.output_reduction||1;if(outputReductionInput&&document.activeElement!==outputReductionInput)outputReductionInput.value=trajectoryReduction;refreshTrajectoryPreviews();if(typeof syncMitCoordinate==='function')syncMitCoordinate()}document.querySelector('#sha').textContent=s.normal_sha;",
+    1,
+)
+PAGE = PAGE.replace(
+    '<span>推荐顺序：刷写 → 启动 → PING → Snapshot → DRV 状态 → CAN Trace</span>',
+    '',
+    1,
+)
+PAGE = PAGE.replace(
+    '<span>当前正常固件 SHA-256</span><code id="shaTop">加载中…</code>',
+    '',
+    1,
+)
+PAGE = PAGE.replace(
+    "document.querySelector('#shaTop').textContent=s.normal_sha;",
+    "const shaTop=document.querySelector('#shaTop');if(shaTop)shaTop.textContent=s.normal_sha;",
+    1,
+)
+PAGE = PAGE.replace(
+    '</style>',
+    '''.tabs + .summary{margin-top:0;border:1px solid #374151;border-radius:6px;padding:8px 10px;background:#0f172a}.summary{display:flex;align-items:center;gap:6px 10px;flex-wrap:nowrap;overflow-x:auto}.summary span{font-size:11px;color:#94a3b8;white-space:nowrap}.summary code{display:block;white-space:nowrap}.control-row{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px 10px;align-items:end}.tab-panel[data-tab="trajectory"] > p:not(.muted),.tab-panel[data-tab="mit"] > p:not(.muted){display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:6px 10px;align-items:end}.tab-panel output,.tab-panel .muted{align-self:end;padding:7px 0;line-height:1.25}</style>''',
+    1,
+)
+
+# The rendered handlers send separate load-model terms; the backend composes
+# the single signed MIT t_ff field immediately before each frame.
+PAGE = PAGE.replace(
+    "torque:document.querySelector('#mitT').value",
+    "gravity_torque:document.querySelector('#mitGravity').value,friction_torque:document.querySelector('#mitFriction').value",
+)
+PAGE = PAGE.replace(
+    "torque:document.querySelector('#trajectoryTorque').value",
+    "gravity_torque:document.querySelector('#trajectoryGravity').value,friction_torque:document.querySelector('#trajectoryFriction').value",
+)
+
+# Replace the earlier compatibility markup as complete panels.  Incremental
+# substitutions used while the UI evolved made the raw MIT form structurally
+# fragile (an input tail could be rendered as text) and mixed unrelated
+# controls into one responsive grid.
+_mit_panel_final = r'''<article class="panel tab-panel motion-panel" data-tab="mit">
+<h2>自定义 MIT 持续会话（电机侧）</h2>
+<p class="muted">位置、速度可按输出端填写并自动换算；Kp、Kd、重力与摩擦补偿始终是电机侧 MIT 参数。</p>
+<section class="motion-section"><h3>目标坐标</h3>
+<div class="control-row"><label>输入坐标系<select id="mitCoordinate"><option value="output">输出端目标（自动换算）</option><option value="motor">电机侧原始 MIT</option></select></label><output id="mitReductionNote" class="muted"></output></div>
+<div class="control-row" id="mitOutputInputs"><label>输出端目标位置 (rad)<input id="mitOutputP" type="number" step="0.001" value="0"></label><label>输出端目标速度 (rad/s)<input id="mitOutputV" type="number" step="0.001" value="0"></label></div>
+<div class="control-row"><label>电机侧位置 p (rad)<input id="mitP" type="number" step="0.001" value="0"></label><label>电机侧速度 v (rad/s)<input id="mitV" type="number" step="0.001" value="0"></label></div></section>
+<section class="motion-section"><h3>MIT 参数</h3>
+<div class="control-row"><label>电机侧 MIT Kp<input id="mitKp" type="number" min="0" max="500" step="0.001" value="0"></label><label>电机侧 MIT Kd<input id="mitKd" type="number" min="0" max="5" step="0.001" value="0"></label><label>持续时间 (s)<input id="mitDuration" type="number" min="0.1" max="300" step="0.1" value="1"></label></div></section>
+<section class="motion-section"><h3>前馈补偿</h3>
+<div class="control-row"><label>电机侧重力补偿 (Nm)<input id="mitGravity" type="number" step="0.001" value="0"></label><label>电机侧摩擦补偿幅值 (Nm)<input id="mitFriction" type="number" min="0" step="0.001" value="0"></label></div>
+<p class="muted">摩擦补偿指令与期望运动同向；零速保持时按位置误差方向取同向符号。</p></section>
+<div class="motion-actions"><button id="mitCustom">发送自定义 MIT</button><button class="danger" id="mitStop">停止 MIT</button></div></article>'''
+PAGE = re.sub(r'<article class="panel tab-panel" data-tab="mit">.*?</article>',
+              _mit_panel_final, PAGE, count=1, flags=re.S)
+
+_trajectory_panel_final = r'''<article class="panel tab-panel motion-panel" data-tab="trajectory">
+<h2>上位机轨迹控制</h2>
+<p class="muted">目标位置和速度按减速器输出端填写，页面按当前减速比映射到电机侧；Kp、Kd 与补偿力矩保持电机侧语义。</p>
+<section class="motion-section"><h3>映射与模式</h3>
+<div class="control-row"><label>减速比（电机转数 / 输出转数）<input id="outputReduction" type="number" min="1" max="1000" step="0.001" value="9"></label><div class="inline-action"><button class="secondary" id="outputReductionSave">保存减速比</button><span class="muted">仅影响上位机 P/V 映射</span></div><label>模式<select id="trajectoryMode" aria-label="轨迹模式"><option value="position">S 曲线到目标位置</option><option value="velocity">恒速前进</option></select></label></div></section>
+<section class="motion-section" id="trajectoryPositionInputs"><h3>位置轨迹</h3>
+<div class="control-row"><label>输出端目标位置 (rad)<input id="trajectoryTarget" type="number" step="0.001" placeholder="输出端目标位置"></label><output id="trajectoryTargetMotorPreview" class="muted">电机侧目标位置: 等待输入</output><label>输出端速度上限 (rad/s)<input id="trajectorySpeedLimit" type="number" min="0.005" max="7.2" step="0.005" value="0.02"></label><output id="trajectorySpeedLimitMotorPreview" class="muted">电机侧速度上限: 等待输入</output></div></section>
+<section class="motion-section" id="trajectoryVelocityInputs" hidden><h3>恒速轨迹</h3>
+<div class="control-row"><label>输出端恒速 (rad/s)<input id="trajectoryVelocity" type="number" min="-7.2" max="7.2" step="0.005" value="0.02"></label><output id="trajectoryVelocityMotorPreview" class="muted">电机侧恒速: 等待输入</output></div></section>
+<section class="motion-section"><h3>MIT 参数与补偿</h3>
+<div class="control-row"><label>执行时间 (s)<input id="trajectoryDuration" type="number" min="0.1" max="300" step="0.1" value="2"></label><label>保持时间 (s)<input id="trajectoryHold" type="number" min="0" max="300" step="0.1" value="2"></label><label>电机侧 MIT Kp<input id="trajectoryKp" type="number" min="0" max="500" step="0.1" value="20"></label><label>电机侧 MIT Kd<input id="trajectoryKd" type="number" min="0" max="5" step="0.01" value="1"></label><label>电机侧重力补偿 (Nm)<input id="trajectoryGravity" type="number" step="0.01" value="0"></label><label>电机侧摩擦补偿幅值 (Nm)<input id="trajectoryFriction" type="number" min="0" step="0.01" value="0"></label></div>
+<p class="muted">摩擦补偿指令与期望运动同向；零速保持时根据位置误差方向取同向符号。</p></section>
+<div class="motion-actions"><button id="trajectoryStart">开始轨迹</button><button class="danger" id="trajectoryStop">停止轨迹</button></div></article>'''
+PAGE = re.sub(r'<article class="panel tab-panel" data-tab="trajectory">.*?</article>',
+              _trajectory_panel_final, PAGE, count=1, flags=re.S)
+PAGE = PAGE.replace(
+    '</style>',
+    '''.motion-panel{max-width:none}.motion-section{border-top:1px solid #2b3a50;margin-top:10px;padding-top:9px}.motion-section h3{font-size:12px;font-weight:600;color:#93c5fd;margin:0 0 4px}.motion-panel .control-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px 12px;align-items:end}.motion-panel label{display:flex!important;margin:0!important;min-width:0}.motion-panel label input,.motion-panel label select{min-width:0!important;margin:0!important}.motion-panel output{min-height:34px;display:flex;align-items:center;padding:0!important}.inline-action{display:flex;gap:8px;align-items:center;min-height:52px}.motion-actions{display:flex;gap:8px;margin-top:12px}@media(max-width:550px){.motion-panel .control-row{grid-template-columns:1fr}.inline-action{min-height:0;flex-wrap:wrap}}</style>''',
     1,
 )
 
@@ -1673,6 +2046,14 @@ def main() -> None:
     for address in local_addresses():
         print(f"LAN:   http://{address}:{args.port}/?token={ACCESS_TOKEN}")
     print("Press Ctrl-C to stop. Running actions continue only until their command exits.")
+    # Remote deployment restarts this process with SIGTERM.  Convert it to the
+    # same controlled path as Ctrl-C so the UC12 bridge releases the USB device
+    # instead of surviving as an orphan process.
+    def stop_on_signal(_signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, stop_on_signal)
+    signal.signal(signal.SIGHUP, stop_on_signal)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
