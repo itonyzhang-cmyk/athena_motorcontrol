@@ -1478,3 +1478,21 @@ Do not record secrets, access tokens, or private credentials here.
   `source=custom-mit-one-shot`, `frames=1`, `max_frame_gap_ms=0`, and payload
   `82CB7FF0000007FF` decoded as `p=2.1836 rad`, `v=-0.016 rad/s`, `Kp=0`,
   `Kd=0`, `t_ff=0`. No repeated command or automatic stop frame was logged.
+
+### 2026-08-31 - Empty-load gain sweep
+
+- Tests were run serially on the flashed `128`-sample image so motion evidence
+  could not be overwritten by a following session. `Kp=10, Kd=1` reached a
+  `17.10 rad` motor target only to about `16.84 rad` (roughly `0.26 rad`
+  error). `Kp=20, Kd=1.5` improved the same direction to about `17.00 rad`
+  (roughly `0.10 rad` error) without visible overshoot.
+- The reverse test with `Kp=20, Kd=1.5` showed direction asymmetry and about
+  `0.27 rad` residual error. Adding `0.2 Nm` directional friction compensation
+  reduced the final error to about `0.08 rad`, but did not remove the startup
+  transient. These values are a provisional empty-load starting point, not a
+  universal tuned profile.
+- `Kp=20, Kd=2, friction=0.2 Nm` was rejected: the run produced approximately
+  `3.0 Nm` peak torque and feedback escaped from the `11.7 rad` target region
+  to about `45.27 rad`. The session was stopped with `0xFD`; bridge and enable
+  state are now idle. Do not use `Kd=2` with this trajectory/transport timing
+  until the cause is isolated.
