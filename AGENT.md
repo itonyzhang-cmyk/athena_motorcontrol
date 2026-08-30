@@ -1394,3 +1394,11 @@ Do not record secrets, access tokens, or private credentials here.
   `build/regression-20samples/unsafe/motorcontrol.bin`.  No flash write was
   performed in this audit; the remote board still runs the 128-sample image
   until an explicit flash/boot operation is authorized.
+
+### 2026-08-30 - Release artifact prepared
+
+- Formal release source is commit `14986a0`; the release worktree excludes the
+  user-owned `STM32F446RETX_FLASH.ld` edit and all generated caches.
+- Candidate artifact `artifacts/athena_motor_side_release_20260830/motorcontrol.bin`
+  is built with Arm GNU 15.3 and passes `verify-normal`; SHA-256 is
+  `45b732c076c9f9540824f329a81bc36f9a3552a9317886bc8ba05f696b852a`.
