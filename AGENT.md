@@ -1402,3 +1402,16 @@ Do not record secrets, access tokens, or private credentials here.
 - Candidate artifact `artifacts/athena_motor_side_release_20260830/motorcontrol.bin`
   is built with Arm GNU 15.3 and passes `verify-normal`; SHA-256 is
   `45b732c076c9f9540824f329a81bc36f9a3552a9317886bc8ba05f696b852a`.
+
+### 2026-08-30 - Flash gate blocked before write
+
+- The new artifact and its WebUI SHA record were synchronized to
+  `192.168.31.20`.  Both direct `preflight` attempts and the hash-locked
+  `flash-normal` action saw ST-LINK V2J37S7 and 3.195 V target voltage, then
+  failed at `init mode failed (unable to connect to the target)`.  The flasher
+  stops during mandatory preflight, before backup/read/erase/program steps;
+  main Flash, config page, and Option Bytes were not written.
+- The currently running older experimental image remains installed.  Its
+  non-enable CAN check returned all three feedback frames around motor-side
+  position 39.88 rad, then the bridge was stopped.  This proves the live CAN
+  path only; it is not a post-flash regression result.
