@@ -1434,3 +1434,21 @@ Do not record secrets, access tokens, or private credentials here.
   Feedback stayed within `39.867..39.895 rad`, so the loop generated torque
   but did not overcome the present mechanical static load. Both sessions
   completed with explicit `0xFD` stop and no watchdog/DRV fault.
+
+### 2026-08-30 - Corrected regression reference and reflash
+
+- The prior `20`-sample release was a mistaken regression reference: it was a
+  reviewed source baseline, but not the last practically usable motion image.
+  Its AS5047 velocity estimate still quantized by about `0.60 rad/s`, which
+  made low-speed MIT damping oppose the position step. The last known effective
+  motion path was the uncommitted `128`-sample experiment; it is now restored
+  as reviewed source in commit `513e08e` and release artifact
+  `f885e33cb91b74c23dffcec8f2316fd846b324fd236a854adfefad184b226ae8`.
+- The corrected artifact was flashed and read back exactly, then booted.
+  Non-enable feedback remained safe. With `Kp=5`, `Kd=1`, and signed
+  feed-forward `+0.5/-0.5 Nm`, a positive target `3.5 rad` moved feedback from
+  about `2.50` to `2.56 rad`; a negative target `1.5 rad` moved it from about
+  `2.53` to `2.10 rad`. Both sessions sent more than 130 frames, ended with
+  `0xFD`, and had no watchdog/DRV fault. This confirms the prior no-motion
+  result was a software regression caused by the wrong velocity-window image,
+  not a mechanical-endstop conclusion.
