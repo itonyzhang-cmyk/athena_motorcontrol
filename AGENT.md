@@ -1466,3 +1466,15 @@ Do not record secrets, access tokens, or private credentials here.
   about `17.72 -> 11.05 rad`. They sent 150 and 140 frames, reached measured
   torque peaks `2.14 Nm` and `1.73 Nm`, and ended with explicit `0xFD` stop.
   This closes the current position/MIT and constant-speed regression gate.
+
+### 2026-08-31 - Custom MIT changed to one-shot injection
+
+- Custom MIT no longer has a host-side duration or keepalive loop. A click
+  writes exactly `0xFC` then one fully encoded MIT frame; it does not append
+  `0xFD`. Firmware `CAN_TIMEOUT=3000 ms` owns expiry, while the explicit stop
+  action can still send `0xFD` sooner. Trajectory control remains the only
+  host-side segmented/continuous command producer.
+- Remote zero-gain, zero-torque validation recorded
+  `source=custom-mit-one-shot`, `frames=1`, `max_frame_gap_ms=0`, and payload
+  `82CB7FF0000007FF` decoded as `p=2.1836 rad`, `v=-0.016 rad/s`, `Kp=0`,
+  `Kd=0`, `t_ff=0`. No repeated command or automatic stop frame was logged.

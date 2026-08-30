@@ -571,7 +571,7 @@ class Runner:
             self.mit_thread = threading.Thread(
                 target=self._mit_session_worker, args=(dict(values),), daemon=True)
             self.mit_thread.start()
-        return True, "MIT 持续会话已启动"
+        return True, "自定义 MIT 单次命令已提交"
 
     def _mit_session_worker(self, values: dict[str, Any]) -> None:
         try:
