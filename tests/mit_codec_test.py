@@ -1,5 +1,6 @@
 import sys
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 from tools.athena_mit_codec import (
@@ -18,12 +19,48 @@ from athena_bench_webui import (
     configured_mit_protocol,
     output_to_motor,
     _mit_command_details,
+    ENABLE_FRAME,
     Runner,
     updated_firmware_mit_protocol,
 )
 
 
 class MitCodecTest(unittest.TestCase):
+    def test_custom_mit_is_one_enable_and_one_command_without_auto_stop(self):
+        class Bridge:
+            @staticmethod
+            def poll():
+                return None
+
+        class Serial:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, value):
+                self.writes.append(value)
+
+        serial = Serial()
+
+        @contextmanager
+        def open_serial(_path):
+            yield serial
+
+        runner = Runner()
+        runner.bridge = Bridge()
+        runner.bridge_tty = "/tmp/test-mit"
+        runner.last_feedback_position_rad = 0.0
+        runner._open_serial = open_serial
+        ok, message = runner.mit_custom_once({
+            "_worker": True, "position": 1.0, "velocity": 0.0,
+            "kp": 2.0, "kd": 1.0, "gravity_torque": 0.0,
+            "friction_torque": 0.0,
+        })
+        self.assertTrue(ok, message)
+        self.assertEqual(len(serial.writes), 2)
+        self.assertEqual(serial.writes[0], ENABLE_FRAME)
+        self.assertTrue(serial.writes[1].startswith("t0018"))
+        self.assertNotIn("FF FF FF FF FF FF FF FD", "\n".join(runner.logs))
+
     def test_default_codec_and_normal_contract_use_the_same_position_range(self):
         ranges, current_limit, torque_constant = configured_mit_protocol()
         self.assertEqual((DEFAULT_RANGES.position_min, DEFAULT_RANGES.position_max), (-100.0, 100.0))

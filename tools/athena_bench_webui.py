@@ -548,19 +548,18 @@ class Runner:
 
     def stop_mit(self) -> tuple[bool, str]:
         with self.lock:
-            if not self.enable_active:
-                return False, "当前没有正在运行的 MIT 会话"
             self.mit_stop_event.set()
             tty = self.bridge_tty
-        self.log("已请求停止 MIT 持续会话；等待当前帧写入结束")
-        if tty:
-            try:
-                with self._open_serial(tty) as serial_port:
-                    serial_port.write(STOP_FRAME)
-                self.log("MIT 停止帧已发送: ID=0x001 data=FF FF FF FF FF FF FF FD")
-            except (OSError, TimeoutError) as exc:
-                self.log(f"MIT 停止帧发送失败: {exc}")
-        return True, "已请求停止 MIT 会话"
+        if not tty:
+            return False, "CAN0 trace 未运行，无法发送 MIT 停止帧"
+        try:
+            with self._open_serial(tty) as serial_port:
+                serial_port.write(STOP_FRAME)
+            self.log("MIT 停止帧已发送: ID=0x001 data=FF FF FF FF FF FF FF FD")
+        except (OSError, TimeoutError) as exc:
+            self.log(f"MIT 停止帧发送失败: {exc}")
+            return False, f"MIT 停止帧发送失败: {exc}"
+        return True, "已发送 MIT 停止帧"
 
     def start_mit_session(self, values: dict[str, Any]) -> tuple[bool, str]:
         with self.lock:
@@ -1338,7 +1337,12 @@ class Runner:
         return True, f"已完成 1 秒 1° 位置阶跃（Kp={kp:g}）"
 
     def mit_custom_once(self, values: dict[str, Any]) -> tuple[bool, str]:
-        """Send an explicitly entered MIT command for a bounded session."""
+        """Enable once and inject one complete raw MIT command.
+
+        The command is deliberately not repeated or followed by 0xFD: this
+        isolates the exact host frame. Firmware CAN_TIMEOUT remains responsible
+        for expiry, while stop_mit() can explicitly withdraw it earlier.
+        """
         names = ("position", "velocity", "kp", "kd")
         with self.lock:
             ranges = self.mit_ranges
@@ -1360,12 +1364,6 @@ class Runner:
                 return False, f"{name} 超出允许范围 {low}..{high}"
         if abs(gravity_torque) + friction_torque > ranges.torque_max:
             return False, "重力补偿与摩擦补偿叠加后可能超出固件力矩范围"
-        try:
-            duration = float(values.get("duration", MIT_DEFAULT_DURATION_S))
-        except (TypeError, ValueError):
-            return False, "持续时间必须是数字"
-        if not math.isfinite(duration) or not 0.1 <= duration <= MIT_MAX_DURATION_S:
-            return False, f"持续时间必须在 0.1..{MIT_MAX_DURATION_S:g} 秒之间"
         with self.lock:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
@@ -1378,56 +1376,28 @@ class Runner:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
                 self._begin_motion_evidence(
-                    "custom-mit", reduction=1.0, output_target=None,
+                    "custom-mit-one-shot", reduction=1.0, output_target=None,
                     motor_target=parsed[0], kp=parsed[2], kd=parsed[3], torque=gravity_torque)
-                self.log(f"自定义 MIT: p={parsed[0]:g} rad, v={parsed[1]:g} rad/s, Kp={parsed[2]:g}, Kd={parsed[3]:g}, 重力补偿={gravity_torque:g}, 摩擦补偿幅值={friction_torque:g}")
-                deadline = time.monotonic() + duration
-                next_send = time.monotonic()
-                last_send = None
-                max_gap = 0.0
-                while time.monotonic() < deadline and not self.mit_stop_event.is_set():
-                    now = time.monotonic()
-                    if now < next_send:
-                        time.sleep(next_send - now)
-                    now = time.monotonic()
-                    with self.lock:
-                        feedback_position = self.last_feedback_position_rad
-                    position_error = parsed[0] - (feedback_position if feedback_position is not None else parsed[0])
-                    effective_torque = compose_feedforward_torque(
-                        gravity_torque, friction_torque, parsed[1], position_error)
-                    data = encode_command(parsed[0], parsed[1], parsed[2], parsed[3],
-                                           effective_torque, ranges)
-                    serial_port.write(format_slcan(1, data))
-                    self._record_motion_frame(parsed[0], parsed[1], parsed[2], parsed[3],
-                                              effective_torque, data)
-                    if last_send is not None:
-                        max_gap = max(max_gap, now - last_send)
-                    last_send = now
-                    self.mit_session_frames += 1
-                    next_send += MIT_KEEPALIVE_INTERVAL_S
-                    if next_send < now:
-                        next_send = now + MIT_KEEPALIVE_INTERVAL_S
-                # End every bounded session explicitly.  Letting the stream
-                # go silent makes the firmware watchdog perform the normal
-                # stop, but leaves the next enable racing a stale DRV/encoder
-                # fault.  0xFD follows the firmware's clean ESC path.
-                serial_port.write(STOP_FRAME)
                 with self.lock:
-                    last_payload = (self.last_motion_evidence or {}).get("last_slcan_payload_hex")
-                    live_ranges = self.mit_ranges
-                if last_payload:
-                    self.log("MIT 实际发送末帧: " + _mit_command_details(bytes.fromhex(last_payload), live_ranges))
-                self.log("自定义 MIT 会话已发送停止帧（0xFD）")
-                self.log(f"MIT 发送统计：{self.mit_session_frames} 帧，最大帧间隔 {max_gap * 1000:.1f} ms")
-                self._finish_motion_evidence(max_gap)
+                    feedback_position = self.last_feedback_position_rad
+                position_error = parsed[0] - (feedback_position if feedback_position is not None else parsed[0])
+                effective_torque = compose_feedforward_torque(
+                    gravity_torque, friction_torque, parsed[1], position_error)
+                data = encode_command(parsed[0], parsed[1], parsed[2], parsed[3],
+                                      effective_torque, ranges)
+                serial_port.write(format_slcan(1, data))
+                self._record_motion_frame(parsed[0], parsed[1], parsed[2], parsed[3],
+                                          effective_torque, data)
+                self.mit_session_frames = 1
+                self._finish_motion_evidence(0.0)
+                self.log("自定义 MIT 单次注入: " + _mit_command_details(data, ranges))
+                self.log("未重复发送、未自动发送 0xFD；固件将在 CAN_TIMEOUT 后停机，可随时手动停止")
         except OSError as exc:
             return False, f"无法写入桥接伪串口 {tty}: {exc}"
         finally:
             with self.lock:
                 self.enable_active = False
-        stopped = self.mit_stop_event.is_set()
-        self.log("自定义 MIT 会话结束；" + ("用户已停止" if stopped else "达到设定时长"))
-        return True, ("MIT 会话已停止" if stopped else f"已完成 {duration:g} 秒自定义 MIT 会话")
+        return True, "已发送 0xFC 使能帧和 1 帧自定义 MIT 命令"
 
     def status(self) -> dict[str, Any]:
         with self.lock:
@@ -1807,7 +1777,7 @@ PAGE = PAGE.replace(
     '除单次受限使能外，MIT 测试会以 10 ms 周期持续发送控制帧并保持反馈，1 秒后自动停止。',
 ).replace(
     "document.querySelectorAll('[data-action]').forEach",
-    "document.querySelector('#mitCustom').onclick=()=>api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:document.querySelector('#mitP').value,velocity:document.querySelector('#mitV').value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,torque:document.querySelector('#mitT').value,duration:document.querySelector('#mitDuration').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#mitStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelectorAll('[data-action]').forEach",
+    "document.querySelector('#mitCustom').onclick=()=>api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:document.querySelector('#mitP').value,velocity:document.querySelector('#mitV').value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,gravity_torque:document.querySelector('#mitGravity').value,friction_torque:document.querySelector('#mitFriction').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#mitStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelectorAll('[data-action]').forEach",
 ).replace(
     '<span>当前正常固件 SHA-256</span>',
     '<span>当前正常固件 SHA-256</span>',
@@ -1816,12 +1786,12 @@ PAGE = PAGE.replace(
     "document.querySelector('#shaTop').textContent=s.normal_sha;",
 )
 PAGE = PAGE.replace(
-    "document.querySelector('#mitCustom').onclick=()=>api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:document.querySelector('#mitP').value,velocity:document.querySelector('#mitV').value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,torque:document.querySelector('#mitT').value,duration:document.querySelector('#mitDuration').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#mitStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));",
-    "const mitCustomButton=document.querySelector('#mitCustom'),mitStopButton=document.querySelector('#mitStop');if(mitCustomButton)mitCustomButton.onclick=()=>api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:document.querySelector('#mitP').value,velocity:document.querySelector('#mitV').value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,torque:document.querySelector('#mitT').value,duration:document.querySelector('#mitDuration').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));if(mitStopButton)mitStopButton.onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));",
+    "document.querySelector('#mitCustom').onclick=()=>api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:document.querySelector('#mitP').value,velocity:document.querySelector('#mitV').value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,gravity_torque:document.querySelector('#mitGravity').value,friction_torque:document.querySelector('#mitFriction').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#mitStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));",
+    "const mitCustomButton=document.querySelector('#mitCustom'),mitStopButton=document.querySelector('#mitStop');if(mitCustomButton)mitCustomButton.onclick=()=>api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:document.querySelector('#mitP').value,velocity:document.querySelector('#mitV').value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,gravity_torque:document.querySelector('#mitGravity').value,friction_torque:document.querySelector('#mitFriction').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));if(mitStopButton)mitStopButton.onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));",
     1,
 )
 if 'id="mitP"' not in PAGE:
-    _mit_panel = r'''<article class="panel tab-panel" data-tab="mit"><h2>自定义 MIT 持续会话（电机侧）</h2><p>以下五个参数严格使用固件 MIT API 的电机侧单位，不包含减速器换算。</p><p><label>位置 p (rad)<input id="mitP" type="number" step="0.001" value="0"></label><label>速度 v (rad/s)<input id="mitV" type="number" step="0.001" value="0"></label><label>位置增益 Kp<input id="mitKp" type="number" step="0.001" value="0"></label><label>速度增益 Kd<input id="mitKd" type="number" step="0.001" value="0"></label><label>前馈力矩 (Nm)<input id="mitT" type="number" step="0.001" value="0"></label><label>持续时间 (s)<input id="mitDuration" type="number" min="0.1" max="300" step="0.1" value="1"></label></p><button id="mitCustom">发送自定义 MIT</button> <button class="danger" id="mitStop">停止 MIT</button></article>'''
+    _mit_panel = r'''<article class="panel tab-panel" data-tab="mit"><h2>自定义 MIT 单次命令（电机侧）</h2><p>仅发送一次使能和一次 MIT 命令；固件 CAN_TIMEOUT 后自动失效。</p><p><label>位置 p (rad)<input id="mitP" type="number" step="0.001" value="0"></label><label>速度 v (rad/s)<input id="mitV" type="number" step="0.001" value="0"></label><label>位置增益 Kp<input id="mitKp" type="number" step="0.001" value="0"></label><label>速度增益 Kd<input id="mitKd" type="number" step="0.001" value="0"></label><label>重力补偿 (Nm)<input id="mitGravity" type="number" step="0.001" value="0"></label><label>摩擦补偿幅值 (Nm)<input id="mitFriction" type="number" min="0" step="0.001" value="0"></label></p><button id="mitCustom">发送单次 MIT</button> <button class="danger" id="mitStop">发送停止帧</button></article>'''
     PAGE = PAGE.replace('<div class="log-head">', _mit_panel + '<div class="log-head">', 1)
 PAGE = PAGE.replace(
     '<p>以下五个参数严格使用固件 MIT API 的电机侧单位，不包含减速器换算。</p>',
@@ -1915,7 +1885,7 @@ const outputReductionInput=document.querySelector('#outputReduction'),outputRedu
 if(outputReductionSave)outputReductionSave.onclick=()=>api('/api/output-reduction',{reduction:outputReductionInput.value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));
 const mitCoordinate=document.querySelector('#mitCoordinate'),mitOutputInputs=document.querySelector('#mitOutputInputs'),mitOutputP=document.querySelector('#mitOutputP'),mitOutputV=document.querySelector('#mitOutputV'),mitP=document.querySelector('#mitP'),mitV=document.querySelector('#mitV'),mitReductionNote=document.querySelector('#mitReductionNote');
 const syncMitCoordinate=()=>{if(!mitCoordinate)return;const output=mitCoordinate.value==='output';mitOutputInputs.hidden=!output;mitP.disabled=output;mitV.disabled=output;if(output){const p=Number(mitOutputP.value),v=Number(mitOutputV.value);if(Number.isFinite(p))mitP.value=(p*trajectoryReduction).toFixed(4);if(Number.isFinite(v))mitV.value=(v*trajectoryReduction).toFixed(4);mitReductionNote.textContent=`按 ${trajectoryReduction}:1 换算，以下电机侧 p/v 为实际发送值`;}else{mitReductionNote.textContent='以下 p/v 直接作为固件 MIT 电机侧命令发送';}};
-if(mitCoordinate){mitCoordinate.onchange=syncMitCoordinate;[mitOutputP,mitOutputV].forEach(input=>input.oninput=syncMitCoordinate);syncMitCoordinate();const mitCustom=document.querySelector('#mitCustom');if(mitCustom)mitCustom.onclick=()=>{syncMitCoordinate();api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:mitP.value,velocity:mitV.value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,torque:document.querySelector('#mitT').value,duration:document.querySelector('#mitDuration').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));};}
+if(mitCoordinate){mitCoordinate.onchange=syncMitCoordinate;[mitOutputP,mitOutputV].forEach(input=>input.oninput=syncMitCoordinate);syncMitCoordinate();const mitCustom=document.querySelector('#mitCustom');if(mitCustom)mitCustom.onclick=()=>{syncMitCoordinate();api('/api/bridge/mit-custom',{physical_ready:document.querySelector('#enableReady').checked,position:mitP.value,velocity:mitV.value,kp:document.querySelector('#mitKp').value,kd:document.querySelector('#mitKd').value,gravity_torque:document.querySelector('#mitGravity').value,friction_torque:document.querySelector('#mitFriction').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));};}
 const trajectoryPreview=(inputId, outputId, label)=>{const input=document.querySelector('#'+inputId),output=document.querySelector('#'+outputId);if(!input||!output)return;const value=Number(input.value);output.textContent=Number.isFinite(value)?`${label}: ${(value*trajectoryReduction).toFixed(4)} rad${inputId.includes('Velocity')||inputId.includes('SpeedLimit')?'/s':''}`:`${label}: 等待输入`;};
 const refreshTrajectoryPreviews=()=>{trajectoryPreview('trajectoryTarget','trajectoryTargetMotorPreview','电机侧目标位置');trajectoryPreview('trajectorySpeedLimit','trajectorySpeedLimitMotorPreview','电机侧速度上限');trajectoryPreview('trajectoryVelocity','trajectoryVelocityMotorPreview','电机侧恒速');};
 if(trajectoryMode){const syncTrajectoryMode=()=>{const position=trajectoryMode.value==='position',kp=document.querySelector('#trajectoryKp');document.querySelector('#trajectoryPositionInputs').hidden=!position;document.querySelector('#trajectoryVelocityInputs').hidden=position;kp.disabled=!position;if(!position)kp.value='0';refreshTrajectoryPreviews()};trajectoryMode.onchange=syncTrajectoryMode;['trajectoryTarget','trajectorySpeedLimit','trajectoryVelocity'].forEach(id=>document.querySelector('#'+id).oninput=refreshTrajectoryPreviews);syncTrajectoryMode();document.querySelector('#trajectoryStart').onclick=()=>api('/api/bridge/trajectory',{physical_ready:document.querySelector('#enableReady').checked,mode:trajectoryMode.value,target:document.querySelector('#trajectoryTarget').value,speed_limit:document.querySelector('#trajectorySpeedLimit').value,velocity:document.querySelector('#trajectoryVelocity').value,duration:document.querySelector('#trajectoryDuration').value,hold:document.querySelector('#trajectoryHold').value,kp:document.querySelector('#trajectoryKp').value,kd:document.querySelector('#trajectoryKd').value,torque:document.querySelector('#trajectoryTorque').value}).then(x=>note(x.message)).catch(e=>note('失败: '+e.message));document.querySelector('#trajectoryStop').onclick=()=>api('/api/bridge/mit-stop').then(x=>note(x.message)).catch(e=>note('失败: '+e.message));}
@@ -1953,10 +1923,6 @@ PAGE = PAGE.replace(
 # The rendered handlers send separate load-model terms; the backend composes
 # the single signed MIT t_ff field immediately before each frame.
 PAGE = PAGE.replace(
-    "torque:document.querySelector('#mitT').value",
-    "gravity_torque:document.querySelector('#mitGravity').value,friction_torque:document.querySelector('#mitFriction').value",
-)
-PAGE = PAGE.replace(
     "torque:document.querySelector('#trajectoryTorque').value",
     "gravity_torque:document.querySelector('#trajectoryGravity').value,friction_torque:document.querySelector('#trajectoryFriction').value",
 )
@@ -1966,14 +1932,15 @@ PAGE = PAGE.replace(
 # fragile (an input tail could be rendered as text) and mixed unrelated
 # controls into one responsive grid.
 _mit_panel_final = r'''<article class="panel tab-panel motion-panel" data-tab="mit">
-<h2>自定义 MIT 持续会话（电机侧）</h2>
+<h2>自定义 MIT 单次命令（电机侧）</h2>
 <p class="muted">位置、速度可按输出端填写并自动换算；Kp、Kd、重力与摩擦补偿始终是电机侧 MIT 参数。</p>
 <section class="motion-section"><h3>目标坐标</h3>
 <div class="control-row"><label>输入坐标系<select id="mitCoordinate"><option value="output">输出端目标（自动换算）</option><option value="motor">电机侧原始 MIT</option></select></label><output id="mitReductionNote" class="muted"></output></div>
 <div class="control-row" id="mitOutputInputs"><label>输出端目标位置 (rad)<input id="mitOutputP" type="number" step="0.001" value="0"></label><label>输出端目标速度 (rad/s)<input id="mitOutputV" type="number" step="0.001" value="0"></label></div>
 <div class="control-row"><label>电机侧位置 p (rad)<input id="mitP" type="number" step="0.001" value="0"></label><label>电机侧速度 v (rad/s)<input id="mitV" type="number" step="0.001" value="0"></label></div></section>
 <section class="motion-section"><h3>MIT 参数</h3>
-<div class="control-row"><label>电机侧 MIT Kp<input id="mitKp" type="number" min="0" max="500" step="0.001" value="0"></label><label>电机侧 MIT Kd<input id="mitKd" type="number" min="0" max="5" step="0.001" value="0"></label><label>持续时间 (s)<input id="mitDuration" type="number" min="0.1" max="300" step="0.1" value="1"></label></div></section>
+<div class="control-row"><label>电机侧 MIT Kp<input id="mitKp" type="number" min="0" max="500" step="0.001" value="0"></label><label>电机侧 MIT Kd<input id="mitKd" type="number" min="0" max="5" step="0.001" value="0"></label></div>
+<p class="muted">每次点击仅发送 0xFC 使能帧和一帧 MIT 命令，不做分段或重复发送。命令会在固件 CAN_TIMEOUT 后自动失效；需要立即撤销时发送停止帧。</p></section>
 <section class="motion-section"><h3>前馈补偿</h3>
 <div class="control-row"><label>电机侧重力补偿 (Nm)<input id="mitGravity" type="number" step="0.001" value="0"></label><label>电机侧摩擦补偿幅值 (Nm)<input id="mitFriction" type="number" min="0" step="0.001" value="0"></label></div>
 <p class="muted">摩擦补偿指令与期望运动同向；零速保持时按位置误差方向取同向符号。</p></section>
