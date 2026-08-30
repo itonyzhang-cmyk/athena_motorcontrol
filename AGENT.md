@@ -1415,3 +1415,22 @@ Do not record secrets, access tokens, or private credentials here.
   non-enable CAN check returned all three feedback frames around motor-side
   position 39.88 rad, then the bridge was stopped.  This proves the live CAN
   path only; it is not a post-flash regression result.
+
+### 2026-08-30 - Release flashed and regression completed
+
+- After SWD recovery, the hash-locked `flash-normal` flow accepted
+  `artifacts/athena_motor_side_release_20260830/motorcontrol.bin` (SHA-256
+  `45b732c076c9f9540824f329a81bc36f9a3552a9317886bc8ba05f696b852a`). Two
+  independent 512 KiB pre-flash reads matched; all 120 pages were verified;
+  full post-flash readback matched exactly; then `boot-normal` started the
+  image. UID and Option Bytes remained unchanged.
+- Post-boot non-enable MIT regression returned three feedback frames around
+  motor-side position `39.88 rad`; `mit_active=false` and `enable_active=false`
+  after stopping the bridge.
+- Real custom-MIT regression used motor-side targets `41.0` and `38.8 rad`,
+  `Kp=5`, `Kd=1`, and signed feed-forward `+0.5/-0.5 Nm` for about one second
+  each. The sessions sent 153 and 131 frames, with maximum frame gaps
+  `31.9 ms` and `36.8 ms`; measured torque peaks were `+1.44` and `-1.49 Nm`.
+  Feedback stayed within `39.867..39.895 rad`, so the loop generated torque
+  but did not overcome the present mechanical static load. Both sessions
+  completed with explicit `0xFD` stop and no watchdog/DRV fault.
