@@ -29,6 +29,7 @@ FWDGT_SELFTEST ?= 0
 # diagnostic CRC parsing to prove the RX interrupt and TX path independently.
 CAN_PROBE ?= 0
 ALLOW_DIRTY_BUILD ?= 0
+ALLOW_EXPERIMENTAL_RELEASE ?= 0
 
 # A normal image is a hardware-facing release artifact.  Refuse to build it
 # from a dirty checkout unless the caller explicitly opts into an experiment.
@@ -43,6 +44,19 @@ RELEASE_DIRTY := $(shell git status --porcelain --untracked-files=all 2>/dev/nul
 	awk '$$2 != "STM32F446RETX_FLASH.ld" {print}')
 ifneq ($(strip $(RELEASE_DIRTY)),)
 $(error Refusing normal firmware build from a dirty worktree; commit/stash changes or set ALLOW_DIRTY_BUILD=1 for an explicitly experimental build)
+endif
+endif
+endif
+endif
+endif
+
+ifeq ($(SAFE_BRINGUP), 0)
+ifeq ($(BRINGUP_INJECT), 0)
+ifeq ($(FWDGT_SELFTEST), 0)
+ifeq ($(ALLOW_EXPERIMENTAL_RELEASE), 0)
+RELEASE_SUBJECT := $(shell git log -1 --pretty=%s 2>/dev/null)
+ifneq ($(shell printf '%s' "$(RELEASE_SUBJECT)" | grep -Eiq '(^|[^[:alnum:]])(wip|tmp|temp|experiment|experimental|test-only)([^[:alnum:]]|$$)' && echo yes),)
+$(error Refusing normal firmware build from an experimental commit subject; use a release/fix commit or set ALLOW_EXPERIMENTAL_RELEASE=1 for explicit bench work)
 endif
 endif
 endif
@@ -312,13 +326,16 @@ verify-fwdgt: $(OUTPUT_DIR)/$(TARGET).elf
 $(OUTPUT_DIR)/build.provenance.txt: $(OUTPUT_DIR)/$(TARGET).bin
 	@{ \
 		echo "commit=$$(git rev-parse HEAD)"; \
+		echo "branch=$$(git branch --show-current 2>/dev/null || echo detached)"; \
+		echo "subject=$$(git log -1 --pretty=%s 2>/dev/null)"; \
+		echo "source_policy=formal-release"; \
 		echo "worktree=release-gate-clean"; \
 		echo "compiler=$$( $(CC) --version | head -n 1 )"; \
 		echo "bin_sha256=$$(shasum -a 256 $< | awk '{print $$1}')"; \
 	} > $@
 
 release-normal:
-	@$(MAKE) SAFE_BRINGUP=0 BRINGUP_INJECT=0 FWDGT_SELFTEST=0 ALLOW_DIRTY_BUILD=0 \
+	@$(MAKE) SAFE_BRINGUP=0 BRINGUP_INJECT=0 FWDGT_SELFTEST=0 ALLOW_DIRTY_BUILD=0 ALLOW_EXPERIMENTAL_RELEASE=0 \
 		BUILD_DIR=build/release-normal GCC_PATH=$${GCC_PATH:-/Users/choqy/.cache/arm-gnu-toolchain-15.2.rel1-20260825/bin} \
 		all verify-normal
 	@$(MAKE) BUILD_DIR=build/release-normal SAFE_BRINGUP=0 BRINGUP_INJECT=0 ALLOW_DIRTY_BUILD=1 \
