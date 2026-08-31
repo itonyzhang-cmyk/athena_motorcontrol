@@ -1,4 +1,4 @@
-source_commit=43343f1
+source_commit=866949f
 branch=experiment/current-loop-pi-measurement
 profile=SAFE_BRINGUP=0
 build=ALLOW_DIRTY_BUILD=1
