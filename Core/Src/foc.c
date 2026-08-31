@@ -184,6 +184,7 @@ uint32_t current_loop_test_snapshot(uint8_t page)
 #include "ivt_protection.h"
 
 #ifndef STM32F446
+#ifndef ADC_SYNC_TRIGGER
 #define ADC_EOIC_POLL_LIMIT 2048U
 
 static int adc_wait_for_eoic(uint32_t adc_periph)
@@ -196,6 +197,9 @@ static int adc_wait_for_eoic(uint32_t adc_periph)
 	}
 	return 0;
 }
+#else
+#define ADC_SYNC_STALE_LIMIT 4U
+#endif
 #endif
 
 static void evaluate_i_v_t_protection(ControllerStruct *controller)
@@ -292,6 +296,40 @@ void analog_sample (ControllerStruct *controller){
     controller->i_b = controller->i_scale*(float)(controller->adc_b_raw - controller->adc_b_offset);
     controller->i_c = -controller->i_a - controller->i_b;
 #else
+#ifdef ADC_SYNC_TRIGGER
+	/* CH3 triggered this conversion in the preceding PWM half-cycle.  The
+	 * first event occurs after timer start, so an initially invalid sample is
+	 * not an ADC fault. Once valid, only consecutive missing midpoint samples
+	 * take the existing hard-fault path. */
+	if (adc_flag_get(ADC_CH_MAIN, ADC_FLAG_EOIC) == RESET ||
+		adc_flag_get(ADC_CH_VBUS, ADC_FLAG_EOIC) == RESET) {
+		if (controller->adc_valid != 0U &&
+			++controller->adc_stale_cycles > ADC_SYNC_STALE_LIMIT) {
+			controller->adc_valid = 0U;
+			controller->adc_timeout_count++;
+			safety_force_outputs_off(SAFETY_FAULT_ADC_TIMEOUT);
+		}
+		return;
+	}
+	controller->adc_stale_cycles = 0U;
+	adc_flag_clear(ADC_CH_MAIN, ADC_FLAG_EOIC);
+	adc_flag_clear(ADC_CH_VBUS, ADC_FLAG_EOIC);
+	if(!PHASE_ORDER){
+		controller->adc_b_raw = adc_inserted_data_read(ADC_CH_IB, ADC_INSERTED_CHANNEL_0);
+		controller->adc_c_raw = adc_inserted_data_read(ADC_CH_IC, ADC_INSERTED_CHANNEL_0);
+	}
+	else{
+		controller->adc_b_raw = adc_inserted_data_read(ADC_CH_IC, ADC_INSERTED_CHANNEL_0);
+		controller->adc_c_raw = adc_inserted_data_read(ADC_CH_IB, ADC_INSERTED_CHANNEL_0);
+	}
+	controller->adc_vbus_raw = adc_inserted_data_read(ADC_CH_VBUS, ADC_INSERTED_CHANNEL_0);
+	controller->v_bus = (float)controller->adc_vbus_raw * V_SCALE;
+	controller->i_b = controller->i_scale * (float)(controller->adc_b_raw - controller->adc_b_offset);
+	controller->i_c = controller->i_scale * (float)(controller->adc_c_raw - controller->adc_c_offset);
+	controller->i_a = -controller->i_b - controller->i_c;
+	controller->adc_valid = 1U;
+	controller->adc_sample_count++;
+#else
 	if(!PHASE_ORDER){
 		controller->adc_b_raw = adc_inserted_data_read(ADC_CH_IB, ADC_INSERTED_CHANNEL_0);
 		controller->adc_c_raw = adc_inserted_data_read(ADC_CH_IC, ADC_INSERTED_CHANNEL_0);
@@ -329,6 +367,7 @@ void analog_sample (ControllerStruct *controller){
 #endif
 
     evaluate_i_v_t_protection(controller);
+#endif
 
 }
 
@@ -375,6 +414,14 @@ void svm(float v_max, float u, float v, float w, float *dtc_u, float *dtc_v, flo
 void zero_current(ControllerStruct *controller){
 	/* Measure zero-current ADC offset */
 
+#ifdef ADC_SYNC_TRIGGER
+	/* The timer-driven conversion has not necessarily occurred while this
+	 * startup helper is executing. The enable sequence replaces this with a
+	 * completed midpoint sample in zero_current_live() before MOTOR_MODE. */
+	(void)controller;
+	return;
+#else
+
 #ifdef STM32F446
     int adc_a_offset = 0;
     int adc_b_offset = 0;
@@ -410,6 +457,8 @@ void zero_current(ControllerStruct *controller){
     controller->adc_c_offset = adc_c_offset/n;
 #endif
 
+#endif
+
     }
 
 void zero_current_live(ControllerStruct *controller){
@@ -418,6 +467,15 @@ void zero_current_live(ControllerStruct *controller){
 	 * been enabled and the DRV charge pump has settled. Discard conversions
 	 * already queued before the bridge transition, then average a short window
 	 * without changing PWM state. */
+#ifdef ADC_SYNC_TRIGGER
+	/* The midpoint trigger is asynchronous to this ISR. Waiting here would
+	 * consume future PWM events while the ISR is blocked. The latest completed
+	 * synchronized sample is the only valid live-offset input. */
+	if (controller->adc_valid == 0U) return;
+	controller->adc_b_offset = controller->adc_b_raw;
+	controller->adc_c_offset = controller->adc_c_raw;
+	return;
+#else
 #ifdef STM32F446
 	int adc_a_offset = 0;
 	int adc_b_offset = 0;
@@ -427,7 +485,6 @@ void zero_current_live(ControllerStruct *controller){
 #endif
 	const int discard = 8;
 	const int samples = 64;
-
 #ifndef STM32F446
 	adc_flag_clear(ADC_CH_MAIN, ADC_FLAG_EOIC);
 	adc_flag_clear(ADC_CH_VBUS, ADC_FLAG_EOIC);
@@ -454,6 +511,7 @@ void zero_current_live(ControllerStruct *controller){
 #else
 	controller->adc_b_offset = adc_b_offset / samples;
 	controller->adc_c_offset = adc_c_offset / samples;
+#endif
 #endif
 }
 

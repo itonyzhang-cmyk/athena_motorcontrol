@@ -236,6 +236,16 @@ void MX_TIM0_Init(void)
     timer_channel_output_shadow_config(TIMER0, TIMER_CH_2, TIMER_OC_SHADOW_ENABLE);
     timer_channel_output_pulse_value_config(TIMER0, TIMER_CH_2, 0);
 
+#ifdef ADC_SYNC_TRIGGER
+    /* CH3 has no board output. Its compare event is solely the injected-ADC
+     * trigger, fixed at the carrier midpoint instead of following phase PWM. */
+    timer_channel_output_config(TIMER0, TIMER_CH_3, &timer_ocintpara);
+    timer_channel_output_mode_config(TIMER0, TIMER_CH_3, TIMER_OC_MODE_TIMING);
+    timer_channel_output_fast_config(TIMER0, TIMER_CH_3, TIMER_OC_FAST_ENABLE);
+    timer_channel_output_shadow_config(TIMER0, TIMER_CH_3, TIMER_OC_SHADOW_ENABLE);
+    timer_channel_output_pulse_value_config(TIMER0, TIMER_CH_3, SVPWM_PERIOD / 2U);
+#endif
+
     /* Break, Deadtime */
     timer_break_struct_para_init(&timer_breakpara);
     timer_breakpara.runoffstate      = TIMER_ROS_STATE_DISABLE;
