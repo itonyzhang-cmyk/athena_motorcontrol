@@ -400,46 +400,21 @@ void zero_current(ControllerStruct *controller){
 
 void zero_current_live(ControllerStruct *controller){
 	/* The CSA output bias is not guaranteed to be identical with POEN/CHxEN
-	 * asserted.  This routine is called only after the neutral PWM vector has
-	 * been enabled and the DRV charge pump has settled.  Discard conversions
-	 * already queued before the bridge transition, then average a short window
-	 * without changing PWM state. */
+	 * asserted. This routine is called from the control ISR only after the
+	 * neutral PWM vector has been enabled and the DRV charge pump has settled.
+	 *
+	 * ADC0/1 injected conversions are now triggered by TIMER0 CH3, once per
+	 * PWM cycle. Do not call analog_sample() in a local averaging loop here:
+	 * after consuming the one completed CH3 result, that loop would wait for a
+	 * future trigger while still in this ISR and falsely trip ADC safety. The
+	 * normal ISR sample immediately preceding this call is both synchronous and
+	 * in the live electrical state, so use it as the zero reference. */
 #ifdef STM32F446
-	int adc_a_offset = 0;
-	int adc_b_offset = 0;
+	controller->adc_a_offset = controller->adc_a_raw;
+	controller->adc_b_offset = controller->adc_b_raw;
 #else
-	int adc_b_offset = 0;
-	int adc_c_offset = 0;
-#endif
-	const int discard = 8;
-	const int samples = 64;
-
-#ifndef STM32F446
-	adc_flag_clear(ADC_CH_MAIN, ADC_FLAG_EOIC);
-	adc_flag_clear(ADC_CH_VBUS, ADC_FLAG_EOIC);
-#endif
-	for (int i = 0; i < discard + samples; ++i) {
-		analog_sample(controller);
-		if (controller->adc_valid == 0U) {
-			/* Never replace a known-good offset with a stale conversion after
-			 * an ADC timeout; the safety path has already disabled the bridge. */
-			return;
-		}
-		if (i < discard) continue;
-#ifdef STM32F446
-		adc_a_offset += controller->adc_a_raw;
-		adc_b_offset += controller->adc_b_raw;
-#else
-		adc_b_offset += controller->adc_b_raw;
-		adc_c_offset += controller->adc_c_raw;
-#endif
-	}
-#ifdef STM32F446
-	controller->adc_a_offset = adc_a_offset / samples;
-	controller->adc_b_offset = adc_b_offset / samples;
-#else
-	controller->adc_b_offset = adc_b_offset / samples;
-	controller->adc_c_offset = adc_c_offset / samples;
+	controller->adc_b_offset = controller->adc_b_raw;
+	controller->adc_c_offset = controller->adc_c_raw;
 #endif
 }
 
