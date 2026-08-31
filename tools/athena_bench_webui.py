@@ -465,7 +465,58 @@ class Runner:
             time.sleep(0.025)
         return True, f"已通过桥接请求 RAM 调试日志 #{index} 的时间戳、事件和 payload"
 
+    def current_loop_test_once(self, amps: float, axis: str = "d") -> tuple[bool, str]:
+        """Run the firmware-owned current step; CAN only arms and reads it."""
+        if not math.isfinite(amps) or not 0.1 <= amps <= 2.0:
+            return False, "电流阶跃幅值必须在 0.1..2.0 A"
+        with self.lock:
+            tty = self.bridge_tty
+            live = self.bridge is not None and self.bridge.poll() is None
+        if not live or not tty:
+            return False, "请先启动 CAN0 Trace"
+        if axis not in ("d", "q"):
+            return False, "电流阶跃轴必须为 d 或 q"
+        argument = int(round(amps * 10.0))
+        page = 14 if axis == "d" else 13
+        try:
+            with self._open_serial(tty) as serial_port:
+                serial_port.write(ENABLE_FRAME)
+                time.sleep(0.05)
+                frame = bytearray((0xA5, 0x5A, 1, 0x07, 0, page, argument, 0))
+                frame[7] = _diag_crc8(frame[:7])
+                serial_port.write("t7018" + frame.hex().upper() + "\r")
+        except (OSError, TimeoutError) as exc:
+            return False, f"电流环测试启动失败: {exc}"
+        # The GD32 update ISR runs at about 15 kHz on this board: 6000 cycles
+        # therefore need roughly 400 ms, plus startup margin.
+        time.sleep(0.6)
+        values = {}
+        pages = list(range(150, 158)) + list(range(160, 220)) + list(range(226, 235))
+        for page in pages:
+            ok, message = self.send_diag(0x02, page)
+            if not ok:
+                return False, message
+            time.sleep(0.025)
+        self.log(f"内部 {axis} 轴电流阶跃已执行: step={amps:g} A; ISR 同步结果页 150..157、160..219、226..233 已请求")
+        return True, "内部电流阶跃测试完成，结果已写入日志"
+
+    def current_loop_test_set_gains(self, k_p: float, k_i: float) -> tuple[bool, str]:
+        if not (math.isfinite(k_p) and math.isfinite(k_i) and 0.001 <= k_p <= 0.250 and 0.0 <= k_i <= 0.100):
+            return False, "实验 P 必须为 0.001..0.250 V/A，I 必须为 0..0.100/采样"
+        # The diagnostic argument is one byte.  Milliscale encoding preserves
+        # the normal firmware baseline P=0.100, I=0.045, unlike the former
+        # 0.0001 encoding which made a valid baseline impossible to send.
+        for page, value in ((15, int(round(k_p * 1000.0))), (16, int(round(k_i * 1000.0)))):
+            ok, message = self.send_diag(0x07, page, value)
+            if not ok:
+                return False, message
+            time.sleep(0.05)
+        self.log(f"内部电流环实验增益已设为 RAM-only: P={k_p:g} V/A, I={k_i:g}/sample")
+        return True, "内部电流环实验增益已设为 RAM-only；不会写入 Flash"
+
     def send_config_set(self, field: int, value: float | int, commit: bool) -> tuple[bool, str]:
+        # IDs are the stable diagnostic protocol field IDs, not backing-array
+        # indexes.  I_BW is field 6; fields 0..5 are integer legacy settings.
         fields = ((0, 1), (0, 1), (0, 1), (0, 1), (0, 1), (0, 1),
                   (1, 2), (1, 3), (1, 9), (1, 6), (1, 18), (1, 10),
                   (1, 14), (1, 17), (1, 19), (1, 20), (1, 21), (1, 22),
@@ -1542,6 +1593,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/bridge/feedforward-high", "/api/bridge/position-step",
             "/api/bridge/position-step-stiff", "/api/bridge/position-step-custom",
             "/api/bridge/mit-custom", "/api/bridge/trajectory",
+            "/api/bridge/current-loop-test", "/api/bridge/current-loop-gains",
         }
         if parsed.path in control_paths and body.get("physical_ready"):
             ready, check_message = RUNNER.preflight_control()
@@ -1664,8 +1716,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.BAD_REQUEST, {"error": "请确认机械运动空间、限流和断电路径均已就绪"})
                 return
             ok, message = RUNNER.start_trajectory_session(body)
+        elif parsed.path == "/api/bridge/current-loop-test":
+            if not body.get("physical_ready"):
+                self._json(HTTPStatus.BAD_REQUEST, {"error": "请确认电机已固定、限流已设置且可立即断电"})
+                return
+            ok, message = RUNNER.current_loop_test_once(float(body.get("amps", 0.5)), str(body.get("axis", "d")))
             if not ok:
                 RUNNER.log(f"轨迹请求被拒绝: {message}")
+        elif parsed.path == "/api/bridge/current-loop-gains":
+            ok, message = RUNNER.current_loop_test_set_gains(float(body.get("kp")), float(body.get("ki")))
         elif parsed.path == "/api/logs/clear":
             RUNNER.clear_logs()
             self._json(HTTPStatus.OK, {"ok": True, "message": "已清除当前实时日志"})

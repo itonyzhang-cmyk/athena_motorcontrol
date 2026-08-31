@@ -10,6 +10,7 @@
 #include "diag_protocol.h"
 #include "drv8323.h"
 #include "fsm.h"
+#include "foc.h"
 #include "gpio.h"
 #include "hw_config.h"
 #include "safety.h"
@@ -285,6 +286,12 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
 {
     *status = DIAG_STATUS_OK;
 
+#ifndef STM32F446
+    if (request->opcode == DIAG_OPCODE_GET_SNAPSHOT &&
+        request->page >= 160U && request->page < 220U)
+        return current_loop_test_snapshot(request->page);
+#endif
+
     switch (request->opcode) {
     case DIAG_OPCODE_PING:
         if (request->page == 0U) {
@@ -419,6 +426,23 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
         case 92U: return milli_payload(controller.kp);
         case 93U: return milli_payload(controller.kd);
         case 94U: return milli_payload(controller.t_ff);
+        case 150U: return current_loop_test_snapshot(150U);
+        case 151U: return current_loop_test_snapshot(151U);
+        case 152U: return current_loop_test_snapshot(152U);
+        case 153U: return current_loop_test_snapshot(153U);
+        case 154U: return current_loop_test_snapshot(154U);
+        case 155U: return current_loop_test_snapshot(155U);
+        case 156U: return current_loop_test_snapshot(156U);
+        case 157U: return current_loop_test_snapshot(157U);
+        case 226U: return current_loop_test_snapshot(226U);
+        case 227U: return current_loop_test_snapshot(227U);
+        case 228U: return current_loop_test_snapshot(228U);
+        case 229U: return current_loop_test_snapshot(229U);
+        case 230U: return current_loop_test_snapshot(230U);
+        case 231U: return current_loop_test_snapshot(231U);
+        case 232U: return current_loop_test_snapshot(232U);
+        case 233U: return current_loop_test_snapshot(233U);
+        case 234U: return current_loop_test_snapshot(234U);
         case 95U: return (uint32_t)state.state |
                           ((uint32_t)state.next_state << 8) |
                           ((uint32_t)comm_encoder_cal.started << 16) |
@@ -648,6 +672,31 @@ static uint32_t handle_control_request(const DiagRequest *request, uint8_t *stat
             return 0U;
         }
         return value;
+    case 13U: /* Arm internal +q current step; argument is 0.1 A units. */
+    case 14U: /* Arm internal +d current step; argument is 0.1 A units. */
+        if (request->argument < 1U || request->argument > 20U ||
+            state.state != MOTOR_MODE || drv_enable_ready() == 0U ||
+            safety_get_faults() != 0U || controller.adc_valid == 0U) {
+            *status = DIAG_STATUS_BUSY;
+            return 0U;
+        }
+        current_loop_test_start((float)request->argument * 0.1f,
+                                request->page == 13U ? 1U : 0U);
+        return (uint32_t)request->argument * 100U;
+    case 15U: /* RAM-only P gain, encoded in 0.001 V/A units. */
+        if (current_loop_test_set_gains((float)request->argument * 0.001f,
+                                        controller.ki_q) == 0U) {
+            *status = DIAG_STATUS_BUSY;
+            return 0U;
+        }
+        return request->argument;
+    case 16U: /* RAM-only PI zero, encoded in 0.001 per-sample units. */
+        if (current_loop_test_set_gains(controller.k_q,
+                                        (float)request->argument * 0.001f) == 0U) {
+            *status = DIAG_STATUS_BUSY;
+            return 0U;
+        }
+        return request->argument;
     default:
         *status = DIAG_STATUS_UNSUPPORTED;
         return 0U;

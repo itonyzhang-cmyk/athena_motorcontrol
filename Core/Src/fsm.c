@@ -249,7 +249,8 @@ static MotorGateResult motor_gate_preflight(void)
 				 }
 				 /* If CAN has timed out, reset all commands */
 				 uint8_t gate_ok = 1U;
-				 if((CAN_TIMEOUT > 0 ) && (controller.timeout > CAN_TIMEOUT)){
+				 if((CAN_TIMEOUT > 0 ) && (controller.timeout > CAN_TIMEOUT) &&
+				    current_loop_test_active() == 0U){
 					diagnostics_debug_record(DIAG_DEBUG_EVENT_WATCHDOG_TIMEOUT,
 							(uint32_t)controller.timeout);
 					/* A timeout is a power-stage stop, not merely a zero reference.
@@ -276,7 +277,11 @@ static MotorGateResult motor_gate_preflight(void)
 			 /* Otherwise, commutate */
 			 if (gate_ok != 0U){
 				 torque_control(&controller);
-				 field_weaken(&controller);
+				 /* The firmware field-weakening loop is not part of the
+				  * internal current-step experiment; otherwise it overwrites
+				  * the d-axis test reference before the PI loop sees it. */
+				 if (current_loop_test_active() == 0U)
+					 field_weaken(&controller);
 				 commutate(&controller, &comm_encoder);
 			 }
 			 /* Count only an active MOTOR session and saturate the counter.  A

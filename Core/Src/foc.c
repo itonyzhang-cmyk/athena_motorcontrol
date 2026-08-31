@@ -6,6 +6,116 @@
  */
 
 #include "foc.h"
+#include "structs.h"
+
+#ifndef STM32F446
+/* Internal current-loop step test.  CAN only arms it; the 30 kHz ISR owns
+ * the waveform and metrics so bridge timing cannot affect the experiment. */
+static volatile uint8_t current_test_active;
+static volatile uint32_t current_test_tick;
+static volatile float current_test_step;
+static volatile float current_test_peak;
+static volatile float current_test_min;
+static volatile float current_test_final;
+static volatile uint8_t current_test_seen;
+static volatile int16_t current_test_start_raw_b, current_test_start_raw_c;
+static volatile int16_t current_test_start_i_b, current_test_start_i_c;
+static volatile int16_t current_test_start_i_d, current_test_start_i_q;
+static volatile int16_t current_test_step_i_b, current_test_step_i_c;
+static volatile int16_t current_test_step_i_d, current_test_step_i_q;
+static volatile int16_t current_test_final_raw_b, current_test_final_raw_c;
+static volatile int16_t current_test_final_i_b, current_test_final_i_c;
+static volatile int16_t current_test_final_i_d, current_test_final_i_q;
+static volatile int16_t current_test_offset_b, current_test_offset_c;
+static volatile uint8_t current_test_axis;
+#define CURRENT_TEST_SAMPLES 60U
+static volatile int16_t current_test_samples[CURRENT_TEST_SAMPLES];
+
+void current_loop_test_start(float step_amps, uint8_t axis)
+{
+    if (!(step_amps >= 0.1f && step_amps <= 2.0f) || axis > 1U) return;
+    current_test_step = step_amps;
+    current_test_axis = axis;
+    current_test_tick = 0U;
+    current_test_peak = 0.0f;
+    current_test_min = 0.0f;
+    current_test_seen = 0U;
+    current_test_start_raw_b = 0;
+    current_test_start_raw_c = 0;
+    current_test_start_i_b = 0;
+    current_test_start_i_c = 0;
+    current_test_start_i_d = 0;
+    current_test_start_i_q = 0;
+    current_test_step_i_b = 0;
+    current_test_step_i_c = 0;
+    current_test_step_i_d = 0;
+    current_test_step_i_q = 0;
+    current_test_final_raw_b = 0;
+    current_test_final_raw_c = 0;
+    current_test_final_i_b = 0;
+    current_test_final_i_c = 0;
+    current_test_final_i_d = 0;
+    current_test_final_i_q = 0;
+    current_test_offset_b = (int16_t)controller.adc_b_offset;
+    current_test_offset_c = (int16_t)controller.adc_c_offset;
+    current_test_final = 0.0f;
+    for (uint32_t i = 0U; i < CURRENT_TEST_SAMPLES; ++i) current_test_samples[i] = 0;
+    current_test_active = 1U;
+}
+
+uint8_t current_loop_test_set_gains(float k_p, float k_i)
+{
+    /* This is deliberately RAM-only: it supports a controlled tuning sweep
+     * without silently changing the persistent motor configuration. */
+    if (current_test_active != 0U || !(k_p >= 0.001f && k_p <= 0.250f) ||
+        !(k_i >= 0.0f && k_i <= 0.100f)) return 0U;
+    controller.k_d = k_p;
+    controller.k_q = k_p;
+    controller.ki_d = k_i;
+    controller.ki_q = k_i;
+    controller.d_int = 0.0f;
+    controller.q_int = 0.0f;
+    return 1U;
+}
+
+uint8_t current_loop_test_active(void) { return current_test_active; }
+
+uint32_t current_loop_test_snapshot(uint8_t page)
+{
+    switch (page) {
+    case 150U: return (uint32_t)current_test_active | (current_test_tick << 8);
+    case 151U: return (uint32_t)(int32_t)(current_test_step * 1000.0f);
+    case 152U: return (uint32_t)(int32_t)(current_test_peak * 1000.0f);
+    case 153U: return (uint32_t)(int32_t)(current_test_min * 1000.0f);
+    case 154U: return (uint32_t)(int32_t)(current_test_final * 1000.0f);
+    case 155U: return current_test_axis;
+    case 156U: return (uint32_t)(int32_t)(controller.k_q * 1000000.0f);
+    case 157U: return (uint32_t)(int32_t)(controller.ki_q * 1000000.0f);
+    case 226U: return (uint32_t)(uint16_t)current_test_start_raw_b |
+                       ((uint32_t)(uint16_t)current_test_start_raw_c << 16);
+    case 227U: return (uint32_t)(uint16_t)current_test_start_i_b |
+                       ((uint32_t)(uint16_t)current_test_start_i_c << 16);
+    case 228U: return (uint32_t)(uint16_t)current_test_start_i_d |
+                       ((uint32_t)(uint16_t)current_test_start_i_q << 16);
+    case 229U: return (uint32_t)(uint16_t)current_test_step_i_b |
+                       ((uint32_t)(uint16_t)current_test_step_i_c << 16);
+    case 230U: return (uint32_t)(uint16_t)current_test_step_i_d |
+                       ((uint32_t)(uint16_t)current_test_step_i_q << 16);
+    case 231U: return (uint32_t)(uint16_t)current_test_final_raw_b |
+                       ((uint32_t)(uint16_t)current_test_final_raw_c << 16);
+    case 232U: return (uint32_t)(uint16_t)current_test_final_i_b |
+                       ((uint32_t)(uint16_t)current_test_final_i_c << 16);
+    case 233U: return (uint32_t)(uint16_t)current_test_final_i_d |
+                       ((uint32_t)(uint16_t)current_test_final_i_q << 16);
+    case 234U: return (uint32_t)(uint16_t)current_test_offset_b |
+                       ((uint32_t)(uint16_t)current_test_offset_c << 16);
+    default:
+        if (page >= 160U && page < 160U + CURRENT_TEST_SAMPLES)
+            return (uint32_t)(int32_t)current_test_samples[page - 160U];
+        return 0U;
+    }
+}
+#endif
 #include "adc.h"
 #include "tim.h"
 #include "position_sensor.h"
@@ -433,6 +543,61 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
        controller->v_max = OVERMODULATION*controller->v_bus_filt*(DTC_MAX-DTC_MIN)*SQRT1_3;
        controller->i_max = I_MAX; //I_MAX*(!controller->otw_flag) + I_MAX_CONT*controller->otw_flag;
 
+#ifndef STM32F446
+       if (current_test_active != 0U) {
+           /* Hold zero for 300 cycles, then apply one d/q-axis current step.
+            * A d-axis step does not intentionally generate torque, so it is
+            * the primary PI-tuning signal on a free, unloaded rotor. */
+           controller->i_d_des = current_test_axis == 0U && current_test_tick >= 300U ? current_test_step : 0.0f;
+           controller->i_q_des = current_test_axis != 0U && current_test_tick >= 300U ? current_test_step : 0.0f;
+           if (current_test_tick == 0U) {
+               current_test_start_raw_b = (int16_t)controller->adc_b_raw;
+               current_test_start_raw_c = (int16_t)controller->adc_c_raw;
+               current_test_start_i_b = (int16_t)(controller->i_b * 1000.0f);
+               current_test_start_i_c = (int16_t)(controller->i_c * 1000.0f);
+               current_test_start_i_d = (int16_t)(controller->i_d * 1000.0f);
+               current_test_start_i_q = (int16_t)(controller->i_q * 1000.0f);
+           }
+           if (current_test_tick == 300U) {
+               current_test_step_i_b = (int16_t)(controller->i_b * 1000.0f);
+               current_test_step_i_c = (int16_t)(controller->i_c * 1000.0f);
+               current_test_step_i_d = (int16_t)(controller->i_d * 1000.0f);
+               current_test_step_i_q = (int16_t)(controller->i_q * 1000.0f);
+           }
+           if (current_test_tick >= 300U) {
+               const float measured = current_test_axis == 0U ? controller->i_d : controller->i_q;
+               if (current_test_seen == 0U) {
+                   current_test_peak = measured;
+                   current_test_min = measured;
+                   current_test_seen = 1U;
+               } else {
+                   if (measured > current_test_peak) current_test_peak = measured;
+                   if (measured < current_test_min) current_test_min = measured;
+               }
+               /* 60 evenly spaced samples over the 5700-cycle step window. */
+               if (((current_test_tick - 300U) % 95U) == 0U &&
+                   ((current_test_tick - 300U) / 95U) < CURRENT_TEST_SAMPLES)
+                   current_test_samples[(current_test_tick - 300U) / 95U] =
+                       (int16_t)(measured * 1000.0f);
+               if (current_test_tick >= 5900U) {
+                   current_test_final = measured;
+                   current_test_final_raw_b = (int16_t)controller->adc_b_raw;
+                   current_test_final_raw_c = (int16_t)controller->adc_c_raw;
+                   current_test_final_i_b = (int16_t)(controller->i_b * 1000.0f);
+                   current_test_final_i_c = (int16_t)(controller->i_c * 1000.0f);
+                   current_test_final_i_d = (int16_t)(controller->i_d * 1000.0f);
+                   current_test_final_i_q = (int16_t)(controller->i_q * 1000.0f);
+               }
+           }
+           current_test_tick++;
+           if (current_test_tick >= 6000U) {
+               controller->i_d_des = 0.0f;
+               controller->i_q_des = 0.0f;
+               current_test_active = 0U;
+           }
+       }
+#endif
+
        /* A CAN MIT frame can change t_ff/Kp abruptly.  Slew both current
         * references before the PI loop so a valid command cannot create a
         * sub-cycle phase-current spike that trips DRV8323 OCP. */
@@ -505,6 +670,9 @@ void torque_control(ControllerStruct *controller){
 
 
 void zero_commands(ControllerStruct * controller){
+	#ifndef STM32F446
+	current_test_active = 0U;
+	#endif
 	controller->t_ff = 0;
 	controller->kp = 0;
 	controller->kd = 0;
