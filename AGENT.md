@@ -1496,3 +1496,22 @@ Do not record secrets, access tokens, or private credentials here.
   to about `45.27 rad`. The session was stopped with `0xFD`; bridge and enable
   state are now idle. Do not use `Kd=2` with this trajectory/transport timing
   until the cause is isolated.
+
+### 2026-09-01 - Restored ADC path motion regression
+
+- The current-loop experiment's TIMER0-CH3 ADC-trigger image was a real system
+  regression: ADC validity never established and MOTOR_MODE could not arm. It
+  was reverted to the prior software-triggered injected-ADC path in `866949f`.
+  The deployed image is
+  `artifacts/athena_current_loop_test_20260831/motorcontrol.bin`, SHA-256
+  `036ee8933c97b01d6fbac801c2eb1f2e7ba259d600cbbec63a90d46f887fd03e`.
+- Remote motion regression on `192.168.31.20` confirmed the restored image is
+  not in a no-motion state. A 3 s output-side `+0.5 rad/s` velocity request
+  (`Kp=0`, `Kd=1`, output reduction 9:1) moved the motor-side feedback from
+  `45.58` to `68.51 rad`; a subsequent `-0.5 rad/s` request moved it from
+  `87.64` down to `87.44 rad`. Both sessions sent an explicit `0xFD` stop.
+- Position-path checks also moved: output target `9.8 rad` (`88.2 rad` motor
+  target, `Kp=8`, `Kd=0.5`, `+0.3 Nm`) covered `86.86..87.31 rad`; reverse
+  target `9.4 rad` covered `87.64..87.50 rad`. The remaining following error
+  and reverse torque peaks require later controller-quality work, but do not
+  justify reopening phase order, electrical angle, or commutation direction.
