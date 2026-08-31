@@ -58,6 +58,15 @@ void current_loop_test_start(float step_amps, uint8_t axis)
     current_test_final_i_q = 0;
     current_test_offset_b = (int16_t)controller.adc_b_offset;
     current_test_offset_c = (int16_t)controller.adc_c_offset;
+    /* Each trial is independent.  A preceding step can leave a nonzero PI
+     * integrator even after its reference returns to zero; retaining it would
+     * energize the nominal 300-cycle baseline of the next trial. */
+    controller.i_d_des = 0.0f;
+    controller.i_q_des = 0.0f;
+    controller.i_d_des_filt = 0.0f;
+    controller.i_q_des_filt = 0.0f;
+    controller.d_int = 0.0f;
+    controller.q_int = 0.0f;
     current_test_final = 0.0f;
     for (uint32_t i = 0U; i < CURRENT_TEST_SAMPLES; ++i) current_test_samples[i] = 0;
     current_test_active = 1U;
