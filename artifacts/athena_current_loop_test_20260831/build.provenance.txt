@@ -1,7 +1,7 @@
-source_commit=51df630
+source_commit=7f35f2e
 branch=experiment/current-loop-pi-measurement
 profile=SAFE_BRINGUP=0
 build=ALLOW_DIRTY_BUILD=1
 compiler=/Users/choqy/workspace/xiaomi_dog/.toolchains/arm-gnu-15.3/bin
-image_sha256=0cbf02326fb1137f5dafee0a06353d48326bd92cbe3e0c202cdd6dc110e8e12f
+image_sha256=85f7b63efdc7cd90a65e05db8b2807a7e4bdb491701173d51ad8fbcec3b8c133
 purpose=RAM-only d/q current-loop PI tuning experiment; not a release image
