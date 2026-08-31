@@ -492,6 +492,15 @@ class Runner:
                 while time.monotonic() < settle_deadline:
                     serial_port.write(neutral)
                     time.sleep(0.02)
+                # Record the firmware's own gate evidence immediately before
+                # arming. These are read-only snapshots: state/next/ready,
+                # DRV-PWM-ADC-encoder flags, and ADC validity/count.
+                for snapshot_page in (82, 83, 121):
+                    snapshot = bytearray((0xA5, 0x5A, 1, 0x02, 0,
+                                          snapshot_page, 0, 0))
+                    snapshot[7] = _diag_crc8(snapshot[:7])
+                    serial_port.write("t7018" + snapshot.hex().upper() + "\r")
+                    time.sleep(0.02)
                 frame = bytearray((0xA5, 0x5A, 1, 0x07, 0, page, argument, 0))
                 frame[7] = _diag_crc8(frame[:7])
                 serial_port.write("t7018" + frame.hex().upper() + "\r")
