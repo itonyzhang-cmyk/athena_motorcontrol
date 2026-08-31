@@ -301,9 +301,6 @@ void analog_sample (ControllerStruct *controller){
 		controller->adc_c_raw = adc_inserted_data_read(ADC_CH_IB, ADC_INSERTED_CHANNEL_0);
 	}
 
-    adc_software_trigger_enable(ADC_CH_MAIN, ADC_INSERTED_CHANNEL);
-    adc_software_trigger_enable(ADC_CH_VBUS, ADC_INSERTED_CHANNEL);
-
     if (adc_wait_for_eoic(ADC_CH_MAIN) != 0 ||
         adc_wait_for_eoic(ADC_CH_VBUS) != 0) {
         adc_flag_clear(ADC_CH_MAIN, ADC_FLAG_EOIC);
