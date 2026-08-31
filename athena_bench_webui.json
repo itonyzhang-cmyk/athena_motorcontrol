@@ -1,6 +1,6 @@
 {
-  "normal_sha": "036ee8933c97b01d6fbac801c2eb1f2e7ba259d600cbbec63a90d46f887fd03e",
-  "normal_image": "artifacts/athena_current_loop_test_20260831/motorcontrol.bin",
+  "normal_sha": "72e97d79b56eaadc70db1af0d0cdca8d95ad1e58f33cb8352790e607f35900fb",
+  "normal_image": "artifacts/athena_adc_sync_midpoint_20260901/motorcontrol.bin",
   "firmware_mit": {
     "position_min": -100.0,
     "position_max": 100.0,

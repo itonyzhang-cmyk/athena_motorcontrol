@@ -1,0 +1,7 @@
+source_commit=b4200a1
+branch=experiment/current-loop-pi-measurement
+profile=SAFE_BRINGUP=0 ADC_SYNC_TRIGGER=1
+build=ALLOW_DIRTY_BUILD=1 ALLOW_EXPERIMENTAL_RELEASE=1
+compiler=/Users/choqy/workspace/xiaomi_dog/.toolchains/arm-gnu-15.3/bin
+image_sha256=72e97d79b56eaadc70db1af0d0cdca8d95ad1e58f33cb8352790e607f35900fb
+purpose=isolated PWM-midpoint ADC synchronization experiment; not a release image
