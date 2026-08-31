@@ -236,15 +236,6 @@ void MX_TIM0_Init(void)
     timer_channel_output_shadow_config(TIMER0, TIMER_CH_2, TIMER_OC_SHADOW_ENABLE);
     timer_channel_output_pulse_value_config(TIMER0, TIMER_CH_2, 0);
 
-    /* Hidden compare channel used solely as the deterministic ADC sampling
-     * trigger.  CH3 has no GPIO output; its compare event is at the PWM
-     * midpoint, away from the three phase switching edges. */
-    timer_channel_output_config(TIMER0, TIMER_CH_3, &timer_ocintpara);
-    timer_channel_output_mode_config(TIMER0, TIMER_CH_3, TIMER_OC_MODE_TIMING);
-    timer_channel_output_fast_config(TIMER0, TIMER_CH_3, TIMER_OC_FAST_ENABLE);
-    timer_channel_output_shadow_config(TIMER0, TIMER_CH_3, TIMER_OC_SHADOW_ENABLE);
-    timer_channel_output_pulse_value_config(TIMER0, TIMER_CH_3, SVPWM_PERIOD / 2U);
-
     /* Break, Deadtime */
     timer_break_struct_para_init(&timer_breakpara);
     timer_breakpara.runoffstate      = TIMER_ROS_STATE_DISABLE;

@@ -467,12 +467,9 @@ void MX_ADC01_Init(void)
   adc_inserted_channel_config(ADC0, 0U, ADC_CHANNEL_11, ADC_SAMPLETIME_1POINT5); // SOB
   adc_inserted_channel_config(ADC1, 0U, ADC_CHANNEL_10, ADC_SAMPLETIME_1POINT5); // SOC
 
-  /* Sample both shunts from the fixed TIMER0-CH3 compare point.  A software
-   * trigger from the update ISR moves with ISR latency and can land on a
-   * MOSFET edge, creating false current spikes. */
-  adc_external_trigger_source_config(ADC0, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_T0_CH3);
+  adc_external_trigger_source_config(ADC0, ADC_INSERTED_CHANNEL, ADC0_1_2_EXTTRIG_INSERTED_NONE);
   adc_external_trigger_config(ADC0, ADC_INSERTED_CHANNEL, ENABLE);
-  adc_external_trigger_source_config(ADC1, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_T0_CH3);
+  adc_external_trigger_source_config(ADC1, ADC_INSERTED_CHANNEL, ADC0_1_2_EXTTRIG_INSERTED_NONE);
   adc_external_trigger_config(ADC1, ADC_INSERTED_CHANNEL, ENABLE);
 
   adc_dma_mode_enable(ADC0);
