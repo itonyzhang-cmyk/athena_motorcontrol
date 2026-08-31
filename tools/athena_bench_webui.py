@@ -483,8 +483,15 @@ class Runner:
                 serial_port.write(ENABLE_FRAME)
                 # The firmware keeps the bridge in a bounded DRV charge-pump
                 # and neutral-PWM settle window before MOTOR_MODE is ready.
-                # Arming the internal test earlier is rejected as BUSY.
-                time.sleep(0.18)
+                # Keep it alive with a neutral MIT frame while waiting: a
+                # plain sleep exceeds the configured CAN watchdog and returns
+                # the FSM to MENU_MODE before the diagnostic can arm the test.
+                neutral = format_slcan(1, encode_command(0.0, 0.0, 0.0, 0.0, 0.0,
+                                                         self.mit_ranges))
+                settle_deadline = time.monotonic() + 0.14
+                while time.monotonic() < settle_deadline:
+                    serial_port.write(neutral)
+                    time.sleep(0.02)
                 frame = bytearray((0xA5, 0x5A, 1, 0x07, 0, page, argument, 0))
                 frame[7] = _diag_crc8(frame[:7])
                 serial_port.write("t7018" + frame.hex().upper() + "\r")
