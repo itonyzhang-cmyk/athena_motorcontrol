@@ -183,21 +183,6 @@ uint32_t current_loop_test_snapshot(uint8_t page)
 #include "safety.h"
 #include "ivt_protection.h"
 
-#ifndef STM32F446
-#define ADC_EOIC_POLL_LIMIT 2048U
-
-static int adc_wait_for_eoic(uint32_t adc_periph)
-{
-	uint32_t remaining = ADC_EOIC_POLL_LIMIT;
-	while (RESET == adc_flag_get(adc_periph, ADC_FLAG_EOIC)) {
-		if (remaining-- == 0U) {
-			return -1;
-		}
-	}
-	return 0;
-}
-#endif
-
 static void evaluate_i_v_t_protection(ControllerStruct *controller)
 {
     const IvtProtectionConfig config = {
@@ -301,8 +286,12 @@ void analog_sample (ControllerStruct *controller){
 		controller->adc_c_raw = adc_inserted_data_read(ADC_CH_IB, ADC_INSERTED_CHANNEL_0);
 	}
 
-    if (adc_wait_for_eoic(ADC_CH_MAIN) != 0 ||
-        adc_wait_for_eoic(ADC_CH_VBUS) != 0) {
+    /* CH3 fires at a deterministic point in the PWM cycle.  At this update
+     * interrupt the conversion from the preceding CH3 event is complete; do
+     * not block waiting for the next event, which would deadlock the first
+     * cycle after enabling the hardware trigger. */
+    if (adc_flag_get(ADC_CH_MAIN, ADC_FLAG_EOIC) == RESET ||
+        adc_flag_get(ADC_CH_VBUS, ADC_FLAG_EOIC) == RESET) {
         adc_flag_clear(ADC_CH_MAIN, ADC_FLAG_EOIC);
         adc_flag_clear(ADC_CH_VBUS, ADC_FLAG_EOIC);
         controller->adc_valid = 0U;
