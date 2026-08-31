@@ -481,7 +481,10 @@ class Runner:
         try:
             with self._open_serial(tty) as serial_port:
                 serial_port.write(ENABLE_FRAME)
-                time.sleep(0.05)
+                # The firmware keeps the bridge in a bounded DRV charge-pump
+                # and neutral-PWM settle window before MOTOR_MODE is ready.
+                # Arming the internal test earlier is rejected as BUSY.
+                time.sleep(0.18)
                 frame = bytearray((0xA5, 0x5A, 1, 0x07, 0, page, argument, 0))
                 frame[7] = _diag_crc8(frame[:7])
                 serial_port.write("t7018" + frame.hex().upper() + "\r")
