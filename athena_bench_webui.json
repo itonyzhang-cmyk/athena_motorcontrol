@@ -1,5 +1,5 @@
 {
-  "normal_sha": "26870f17fa8cf03fe8329d238202c6791ccdb266e31a6f01e18fd19ec65a2920",
+  "normal_sha": "0cbf02326fb1137f5dafee0a06353d48326bd92cbe3e0c202cdd6dc110e8e12f",
   "normal_image": "artifacts/athena_current_loop_test_20260831/motorcontrol.bin",
   "firmware_mit": {
     "position_min": -100.0,
