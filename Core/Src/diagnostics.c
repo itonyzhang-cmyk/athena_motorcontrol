@@ -449,6 +449,12 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
         case 238U: return current_loop_test_snapshot(238U);
         case 239U: return current_loop_test_snapshot(239U);
         case 240U: return current_loop_test_snapshot(240U);
+        case 241U: return current_loop_test_snapshot(241U);
+        case 242U: return current_loop_test_snapshot(242U);
+        case 243U: return current_loop_test_snapshot(243U);
+        case 244U: return current_loop_test_snapshot(244U);
+        case 245U: return current_loop_test_snapshot(245U);
+        case 246U: return current_loop_test_snapshot(246U);
         case 95U: return (uint32_t)state.state |
                           ((uint32_t)state.next_state << 8) |
                           ((uint32_t)comm_encoder_cal.started << 16) |

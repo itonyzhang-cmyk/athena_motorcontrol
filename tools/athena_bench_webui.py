@@ -491,13 +491,13 @@ class Runner:
         # therefore need roughly 400 ms, plus startup margin.
         time.sleep(0.6)
         values = {}
-        pages = list(range(150, 158)) + list(range(160, 220)) + list(range(226, 241))
+        pages = list(range(150, 158)) + list(range(160, 220)) + list(range(226, 247))
         for page in pages:
             ok, message = self.send_diag(0x02, page)
             if not ok:
                 return False, message
             time.sleep(0.025)
-        self.log(f"内部 {axis} 轴电流阶跃已执行: step={amps:g} A; ISR 同步结果页 150..157、160..219、226..240 已请求")
+        self.log(f"内部 {axis} 轴电流阶跃已执行: step={amps:g} A; ISR 同步结果页 150..157、160..219、226..246 已请求")
         return True, "内部电流阶跃测试完成，结果已写入日志"
 
     def current_loop_test_set_gains(self, k_p: float, k_i: float) -> tuple[bool, str]:

@@ -31,6 +31,10 @@ static volatile int16_t current_test_peak_raw_b, current_test_peak_raw_c;
 static volatile int16_t current_test_peak_i_d, current_test_peak_i_q;
 static volatile int16_t current_test_min_raw_b, current_test_min_raw_c;
 static volatile int16_t current_test_min_i_d, current_test_min_i_q;
+static volatile int16_t current_test_peak_v_d, current_test_peak_v_q;
+static volatile int16_t current_test_peak_dtc_u, current_test_peak_dtc_v, current_test_peak_dtc_w;
+static volatile int16_t current_test_min_v_d, current_test_min_v_q;
+static volatile int16_t current_test_min_dtc_u, current_test_min_dtc_v, current_test_min_dtc_w;
 static volatile int16_t current_test_offset_b, current_test_offset_c;
 static volatile uint8_t current_test_axis;
 #define CURRENT_TEST_SAMPLES 60U
@@ -71,6 +75,16 @@ void current_loop_test_start(float step_amps, uint8_t axis)
     current_test_min_raw_c = 0;
     current_test_min_i_d = 0;
     current_test_min_i_q = 0;
+    current_test_peak_v_d = 0;
+    current_test_peak_v_q = 0;
+    current_test_peak_dtc_u = 0;
+    current_test_peak_dtc_v = 0;
+    current_test_peak_dtc_w = 0;
+    current_test_min_v_d = 0;
+    current_test_min_v_q = 0;
+    current_test_min_dtc_u = 0;
+    current_test_min_dtc_v = 0;
+    current_test_min_dtc_w = 0;
     current_test_offset_b = (int16_t)controller.adc_b_offset;
     current_test_offset_c = (int16_t)controller.adc_c_offset;
     /* Each trial is independent.  A preceding step can leave a nonzero PI
@@ -143,6 +157,16 @@ uint32_t current_loop_test_snapshot(uint8_t page)
                        ((uint32_t)(uint16_t)current_test_min_raw_c << 16);
     case 240U: return (uint32_t)(uint16_t)current_test_min_i_d |
                        ((uint32_t)(uint16_t)current_test_min_i_q << 16);
+    case 241U: return (uint32_t)(uint16_t)current_test_peak_v_d |
+                       ((uint32_t)(uint16_t)current_test_peak_v_q << 16);
+    case 242U: return (uint32_t)(uint16_t)current_test_peak_dtc_u |
+                       ((uint32_t)(uint16_t)current_test_peak_dtc_v << 16);
+    case 243U: return (uint32_t)(uint16_t)current_test_peak_dtc_w;
+    case 244U: return (uint32_t)(uint16_t)current_test_min_v_d |
+                       ((uint32_t)(uint16_t)current_test_min_v_q << 16);
+    case 245U: return (uint32_t)(uint16_t)current_test_min_dtc_u |
+                       ((uint32_t)(uint16_t)current_test_min_dtc_v << 16);
+    case 246U: return (uint32_t)(uint16_t)current_test_min_dtc_w;
     default:
         if (page >= 160U && page < 160U + CURRENT_TEST_SAMPLES)
             return (uint32_t)(int32_t)current_test_samples[page - 160U];
@@ -609,10 +633,20 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
                    current_test_peak_raw_c = (int16_t)controller->adc_c_raw;
                    current_test_peak_i_d = (int16_t)(controller->i_d * 1000.0f);
                    current_test_peak_i_q = (int16_t)(controller->i_q * 1000.0f);
+                   current_test_peak_v_d = (int16_t)(controller->v_d * 1000.0f);
+                   current_test_peak_v_q = (int16_t)(controller->v_q * 1000.0f);
+                   current_test_peak_dtc_u = (int16_t)(controller->dtc_u * 10000.0f);
+                   current_test_peak_dtc_v = (int16_t)(controller->dtc_v * 10000.0f);
+                   current_test_peak_dtc_w = (int16_t)(controller->dtc_w * 10000.0f);
                    current_test_min_raw_b = current_test_peak_raw_b;
                    current_test_min_raw_c = current_test_peak_raw_c;
                    current_test_min_i_d = current_test_peak_i_d;
                    current_test_min_i_q = current_test_peak_i_q;
+                   current_test_min_v_d = current_test_peak_v_d;
+                   current_test_min_v_q = current_test_peak_v_q;
+                   current_test_min_dtc_u = current_test_peak_dtc_u;
+                   current_test_min_dtc_v = current_test_peak_dtc_v;
+                   current_test_min_dtc_w = current_test_peak_dtc_w;
                    current_test_seen = 1U;
                } else {
                    if (measured > current_test_peak) {
@@ -622,6 +656,11 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
                        current_test_peak_raw_c = (int16_t)controller->adc_c_raw;
                        current_test_peak_i_d = (int16_t)(controller->i_d * 1000.0f);
                        current_test_peak_i_q = (int16_t)(controller->i_q * 1000.0f);
+                       current_test_peak_v_d = (int16_t)(controller->v_d * 1000.0f);
+                       current_test_peak_v_q = (int16_t)(controller->v_q * 1000.0f);
+                       current_test_peak_dtc_u = (int16_t)(controller->dtc_u * 10000.0f);
+                       current_test_peak_dtc_v = (int16_t)(controller->dtc_v * 10000.0f);
+                       current_test_peak_dtc_w = (int16_t)(controller->dtc_w * 10000.0f);
                    }
                    if (measured < current_test_min) {
                        current_test_min = measured;
@@ -630,6 +669,11 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
                        current_test_min_raw_c = (int16_t)controller->adc_c_raw;
                        current_test_min_i_d = (int16_t)(controller->i_d * 1000.0f);
                        current_test_min_i_q = (int16_t)(controller->i_q * 1000.0f);
+                       current_test_min_v_d = (int16_t)(controller->v_d * 1000.0f);
+                       current_test_min_v_q = (int16_t)(controller->v_q * 1000.0f);
+                       current_test_min_dtc_u = (int16_t)(controller->dtc_u * 10000.0f);
+                       current_test_min_dtc_v = (int16_t)(controller->dtc_v * 10000.0f);
+                       current_test_min_dtc_w = (int16_t)(controller->dtc_w * 10000.0f);
                    }
                }
                /* 60 evenly spaced samples over the 5700-cycle step window. */
