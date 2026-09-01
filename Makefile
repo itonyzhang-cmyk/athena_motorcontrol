@@ -174,8 +174,18 @@ startup_gd32f30x_hd.s
 # binaries
 #######################################
 PREFIX = arm-none-eabi-
-# The gcc compiler bin path can be either defined in make command via GCC_PATH variable (> make GCC_PATH=xxx)
-# either it can be added to the PATH environment variable.
+# Always use the project-local Arm GNU toolchain.  A Homebrew bare-metal
+# compiler may lack Newlib headers and must never be selected implicitly.
+EXPECTED_GCC_PATH := /Users/choqy/workspace/xiaomi_dog/.toolchains/arm-gnu-15.3/bin
+ifneq ($(origin GCC_PATH),undefined)
+ifneq ($(abspath $(GCC_PATH)),$(EXPECTED_GCC_PATH))
+$(error Refusing non-project GCC_PATH=$(GCC_PATH); use $(EXPECTED_GCC_PATH))
+endif
+endif
+GCC_PATH := $(EXPECTED_GCC_PATH)
+ifeq ($(wildcard $(GCC_PATH)/$(PREFIX)gcc),)
+$(error Required project toolchain not found: $(GCC_PATH)/$(PREFIX)gcc)
+endif
 ifdef GCC_PATH
 CC = $(GCC_PATH)/$(PREFIX)gcc
 AS = $(GCC_PATH)/$(PREFIX)gcc -x assembler-with-cpp
