@@ -241,9 +241,9 @@ void MX_TIM0_Init(void)
      * compare match. Timing mode leaves OC3REF static after its first match,
      * so it produced one injected conversion and then starved the loop. Keep
      * the board pin disabled but generate an internal PWM edge at midpoint. */
-    timer_oc_parameter_struct adc_trigger_oc = timer_ocintpara;
-    adc_trigger_oc.outputstate = TIMER_CCX_DISABLE;
-    timer_channel_output_config(TIMER0, TIMER_CH_3, &adc_trigger_oc);
+    /* Keep CC3 enabled: on this GD32 the ADC trigger is gated by the
+     * channel's compare-enable bit even when the pin is not bonded out. */
+    timer_channel_output_config(TIMER0, TIMER_CH_3, &timer_ocintpara);
     timer_channel_output_mode_config(TIMER0, TIMER_CH_3, TIMER_OC_MODE_PWM0);
     timer_channel_output_fast_config(TIMER0, TIMER_CH_3, TIMER_OC_FAST_DISABLE);
     timer_channel_output_shadow_config(TIMER0, TIMER_CH_3, TIMER_OC_SHADOW_ENABLE);
