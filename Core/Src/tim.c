@@ -199,7 +199,14 @@ void MX_TIM0_Init(void)
     /* Clock source */
     timer_internal_clock_config(TIMER0);
 
+    /* ADC_SYNC_TRIGGER uses the carrier update event as a recurring injected
+     * conversion trigger. The GD32 CH3 trigger path is not functional on this
+     * board, while UPDATE is documented and emitted every PWM period. */
+#ifdef ADC_SYNC_TRIGGER
+    timer_master_output_trigger_source_select(TIMER0, TIMER_TRI_OUT_SRC_UPDATE);
+#else
     timer_master_output_trigger_source_select(TIMER0, TIMER_TRI_OUT_SRC_RESET);
+#endif
     timer_master_slave_mode_config(TIMER0, TIMER_MASTER_SLAVE_MODE_DISABLE);
 
     /* auto-reload preload enable */
@@ -237,17 +244,7 @@ void MX_TIM0_Init(void)
     timer_channel_output_pulse_value_config(TIMER0, TIMER_CH_2, 0);
 
 #ifdef ADC_SYNC_TRIGGER
-    /* The ADC trigger mux consumes the CH3 OC edge, not merely the counter
-     * compare match. Timing mode leaves OC3REF static after its first match,
-     * so it produced one injected conversion and then starved the loop. Keep
-     * the board pin disabled but generate an internal PWM edge at midpoint. */
-    /* Keep CC3 enabled: on this GD32 the ADC trigger is gated by the
-     * channel's compare-enable bit even when the pin is not bonded out. */
-    timer_channel_output_config(TIMER0, TIMER_CH_3, &timer_ocintpara);
-    timer_channel_output_mode_config(TIMER0, TIMER_CH_3, TIMER_OC_MODE_PWM0);
-    timer_channel_output_fast_config(TIMER0, TIMER_CH_3, TIMER_OC_FAST_DISABLE);
-    timer_channel_output_shadow_config(TIMER0, TIMER_CH_3, TIMER_OC_SHADOW_ENABLE);
-    timer_channel_output_pulse_value_config(TIMER0, TIMER_CH_3, SVPWM_PERIOD / 2U);
+    /* No CH3 setup is needed: ADC_SYNC_TRIGGER selects TIMER0 UPDATE. */
 #endif
 
     /* Break, Deadtime */

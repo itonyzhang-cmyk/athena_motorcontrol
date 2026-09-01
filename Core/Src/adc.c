@@ -471,13 +471,13 @@ void MX_ADC01_Init(void)
    * isolated current-loop experiment instead uses the hidden TIMER0 CH3
    * midpoint event, where the shunt amplifiers have settled. */
 #ifdef ADC_SYNC_TRIGGER
-  adc_external_trigger_source_config(ADC0, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_T0_CH3);
+  adc_external_trigger_source_config(ADC0, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_T0_TRGO);
 #else
   adc_external_trigger_source_config(ADC0, ADC_INSERTED_CHANNEL, ADC0_1_2_EXTTRIG_INSERTED_NONE);
 #endif
   adc_external_trigger_config(ADC0, ADC_INSERTED_CHANNEL, ENABLE);
 #ifdef ADC_SYNC_TRIGGER
-  adc_external_trigger_source_config(ADC1, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_T0_CH3);
+  adc_external_trigger_source_config(ADC1, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_T0_TRGO);
 #else
   adc_external_trigger_source_config(ADC1, ADC_INSERTED_CHANNEL, ADC0_1_2_EXTTRIG_INSERTED_NONE);
 #endif
@@ -544,7 +544,7 @@ void MX_ADC2_Init(void)
   adc_inserted_channel_config(ADC2, 0U, ADC_CHANNEL_13, ADC_SAMPLETIME_55POINT5);
 
 #ifdef ADC_SYNC_TRIGGER
-  adc_external_trigger_source_config(ADC2, ADC_INSERTED_CHANNEL, ADC2_EXTTRIG_INSERTED_T0_CH3);
+  adc_external_trigger_source_config(ADC2, ADC_INSERTED_CHANNEL, ADC2_EXTTRIG_INSERTED_T0_TRGO);
 #else
   adc_external_trigger_source_config(ADC2, ADC_INSERTED_CHANNEL, ADC0_1_2_EXTTRIG_INSERTED_NONE);
 #endif
