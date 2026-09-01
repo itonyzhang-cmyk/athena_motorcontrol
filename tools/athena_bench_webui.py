@@ -523,7 +523,7 @@ class Runner:
         if not (math.isfinite(k_p) and math.isfinite(k_i) and 0.001 <= k_p <= 0.250 and 0.0 <= k_i <= 0.100):
             return False, "实验 P 必须为 0.001..0.250 V/A，I 必须为 0..0.100/采样"
         # The diagnostic argument is one byte.  Milliscale encoding preserves
-        # the normal firmware baseline P=0.100, I=0.045, unlike the former
+        # the factory-equivalent firmware baseline P=0.050, I=0.0255, unlike the former
         # 0.0001 encoding which made a valid baseline impossible to send.
         for page, value in ((15, int(round(k_p * 1000.0))), (16, int(round(k_i * 1000.0)))):
             ok, message = self.send_diag(0x07, page, value)

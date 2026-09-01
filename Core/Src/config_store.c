@@ -60,7 +60,9 @@ void config_apply_defaults(int int_regs[CONFIG_INT_WORDS],
     /* Deliberately disabled until scales/sensor sources are characterized. */
     int_regs[CONFIG_IVT_PROTECT_ENABLE] = 0;
 
-    float_regs[CONFIG_I_BW] = 1000.0f;
+    /* Factory-equivalent starting point: I_BW=500 Hz gives K_SCALE*I_BW
+     * = 0.05 V/A, matching the factory kp_d/kp_q descriptor values. */
+    float_regs[CONFIG_I_BW] = 500.0f;
     float_regs[CONFIG_I_MAX] = 40.0f;
     float_regs[CONFIG_I_FW_MAX] = 0.0f;
     float_regs[CONFIG_R_NOMINAL] = 0.0f;

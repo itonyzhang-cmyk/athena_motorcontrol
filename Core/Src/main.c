@@ -225,7 +225,7 @@ int main(void)
    * diagnostic phase. The reserved pages are neither read nor written. */
   memset(__float_reg, 0, sizeof(__float_reg));
   memset(__int_reg, 0, sizeof(__int_reg));
-  I_BW = 1000.0f;
+  I_BW = 500.0f;
   I_MAX = 0.0f;
   PPAIRS = 1.0f;
   GR = 1.0f;
@@ -241,7 +241,7 @@ int main(void)
   /* Sanitize configs in case flash is empty*/
   if(E_ZERO==-1){E_ZERO = 0;}
   if(M_ZERO==-1){M_ZERO = 0;}
-  if(isnan(I_BW) || I_BW==-1){I_BW = 1000;}
+  if(isnan(I_BW) || I_BW==-1){I_BW = 500;}
   if(isnan(I_MAX) || I_MAX ==-1){I_MAX=40;}
   if(isnan(I_FW_MAX) || I_FW_MAX ==-1){I_FW_MAX=0;}
   if(CAN_ID==-1){CAN_ID = 1;}
