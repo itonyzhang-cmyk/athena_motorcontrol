@@ -1,0 +1,6 @@
+{
+  "normal_sha": "24e2a7353f1470c69e365cbd88a10a21c0f3c9306439bb738f58de7d4e7ab31e",
+  "normal_image": "artifacts/athena_adc_sync_pwm_enabled_20260901/motorcontrol.bin",
+  "firmware_mit": {"position_min": -100.0, "position_max": 100.0, "velocity_min": -65.0, "velocity_max": 65.0, "kp_max": 500.0, "kd_max": 5.0, "current_limit_a": 40.0, "torque_constant_nm_per_a": 1.0},
+  "output_reduction": 9.0
+}
