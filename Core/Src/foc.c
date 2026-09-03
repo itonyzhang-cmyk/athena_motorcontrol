@@ -30,6 +30,45 @@ static int adc_wait_for_eoic(uint32_t adc_periph)
 }
 #endif
 
+#ifdef ADC_SYNC_TRIGGER
+#define ADC_SYNC_OFFSET_SAMPLES 128U
+static volatile uint8_t adc_sync_offset_active;
+static volatile uint16_t adc_sync_offset_count;
+static volatile uint32_t adc_sync_offset_sum_b, adc_sync_offset_sum_c;
+static volatile uint16_t adc_sync_offset_mean_b, adc_sync_offset_mean_c;
+
+uint8_t adc_offset_calibration_pending(void)
+{
+	return adc_sync_offset_active;
+}
+
+uint32_t adc_offset_calibration_status(void)
+{
+	return (uint32_t)adc_sync_offset_active |
+		((uint32_t)adc_sync_offset_count << 8);
+}
+
+uint32_t adc_offset_calibration_mean(void)
+{
+	return (uint32_t)adc_sync_offset_mean_b |
+		((uint32_t)adc_sync_offset_mean_c << 16);
+}
+
+static void adc_sync_offset_accumulate(ControllerStruct *controller)
+{
+	if (adc_sync_offset_active == 0U) return;
+	adc_sync_offset_sum_b += controller->adc_b_raw;
+	adc_sync_offset_sum_c += controller->adc_c_raw;
+	if (++adc_sync_offset_count < ADC_SYNC_OFFSET_SAMPLES) return;
+
+	controller->adc_b_offset = (int)(adc_sync_offset_sum_b / ADC_SYNC_OFFSET_SAMPLES);
+	controller->adc_c_offset = (int)(adc_sync_offset_sum_c / ADC_SYNC_OFFSET_SAMPLES);
+	adc_sync_offset_mean_b = (uint16_t)controller->adc_b_offset;
+	adc_sync_offset_mean_c = (uint16_t)controller->adc_c_offset;
+	adc_sync_offset_active = 0U;
+}
+#endif
+
 static void evaluate_i_v_t_protection(ControllerStruct *controller)
 {
     const IvtProtectionConfig config = {
@@ -154,6 +193,7 @@ void analog_sample (ControllerStruct *controller){
 	controller->i_a = -controller->i_b - controller->i_c;
 	controller->adc_valid = 1U;
 	controller->adc_sample_count++;
+	adc_sync_offset_accumulate(controller);
 #else
 	if(!PHASE_ORDER){
 		controller->adc_b_raw = adc_inserted_data_read(ADC_CH_IB, ADC_INSERTED_CHANNEL_0);
@@ -292,9 +332,13 @@ void zero_current_live(ControllerStruct *controller){
 	 * already queued before the bridge transition, then average a short window
 	 * without changing PWM state. */
 #ifdef ADC_SYNC_TRIGGER
+	/* This function runs in the PWM ISR. UPDATE samples arrive only on future
+	 * carrier cycles, so record a request and accumulate them in analog_sample
+	 * instead of blocking here. The motor gate remains closed until complete. */
 	if (controller->adc_valid == 0U) return;
-	controller->adc_b_offset = controller->adc_b_raw;
-	controller->adc_c_offset = controller->adc_c_raw;
+	adc_sync_offset_sum_b = adc_sync_offset_sum_c = 0U;
+	adc_sync_offset_count = 0U;
+	adc_sync_offset_active = 1U;
 	return;
 #else
 #ifdef STM32F446

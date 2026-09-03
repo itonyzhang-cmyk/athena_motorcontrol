@@ -517,7 +517,8 @@ class Runner:
         elif name == "snapshot":
             requests = [(0x02, page, 0) for page in
                         (0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-                         82, 83, 84, 85, 86, 87, 90, 91, 92, 93, 94)]
+                         82, 83, 84, 85, 86, 87, 90, 91, 92, 93, 94,
+                         116, 117, 118, 119, 120, 121, 122, 143, 144, 145, 146)]
             requests += [(0x03, page, 0) for page in (9, 10, 11, 12, 13)]
         elif name == "drv-status":
             requests = [(0x02, page, 0) for page in

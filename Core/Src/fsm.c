@@ -139,6 +139,9 @@ static MotorGateResult motor_gate_preflight(void)
 		 const uint8_t nfault_high =
 			 (uint8_t)(gpio_input_bit_get(GPIOA, GPIO_PIN_12) != RESET);
 		 if (drv_enable_ready() != 0 && comm_encoder.valid != 0U && controller.adc_valid != 0U &&
+#ifdef ADC_SYNC_TRIGGER
+			 adc_offset_calibration_pending() == 0U &&
+#endif
 			 nfault_high != 0U) {
 			 /* drv.fault is a software latch from the previous session.  The
 			  * explicit 0xFC recovery request permits clearing it once the

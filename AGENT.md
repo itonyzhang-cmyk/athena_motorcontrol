@@ -1509,3 +1509,26 @@ Do not record secrets, access tokens, or private credentials here.
   (`f885e33cb91b74c23dffcec8f2316fd846b324fd236a854adfefad184b226ae8`).
   Do not flash the opt-in path as a normal image until it independently passes
   the same bidirectional-motion regression.
+
+### 2026-09-04 - UPDATE path offset averaging and current-loop validation
+
+- The first UPDATE candidate had valid conversions but used one live ADC sample
+  as the CSA offset, which weakened MIT motion. The synchronized path now
+  averages 128 completed PWM-UPDATE samples after neutral PWM is enabled and
+  keeps MOTOR_MODE gated until that average completes. Diagnostic pages 143/144
+  report the collection state and B/C offset means; pages 145/146 report live
+  `i_d/i_q` in milliamps. The normal software-triggered build remains
+  byte-identical to the pre-change image.
+- Candidate image `c0658db34db8922b7d62bd4fb791a03860eabbaef7b394baf0ddef47c6f206c7`
+  was flashed and read back exactly on `192.168.31.20`. After boot, page 143
+  reported `active=0,count=128`, page 144 reported B/C means around `1930/1990`,
+  and ADC validity remained set with zero timeout count.
+- With UPDATE sampling active, a position trajectory at `Kp=8`, `Kd=0.5`,
+  directional friction `0.3 Nm` moved motor-side feedback about `31.21 -> 32.24`
+  rad forward and `32.22 -> 30.95` rad reverse. A 5 s constant-speed run at
+  output `+0.5 rad/s` (`Kp=0`, `Kd=1`) moved approximately `31.01 -> 96.84`
+  motor-side rad over 262 frames; max gap was `29.8 ms`, and explicit `0xFD`
+  stopped the run. During the run, diagnostics captured `i_q_des=2.143 A` and
+  phase currents near `a=-0.161 A,b=-0.543 A`; no ADC timeout, CAN, or DRV fault
+  occurred. This establishes the UPDATE path as a usable closed current/FOC
+  path; MIT gain optimization can proceed on this image.

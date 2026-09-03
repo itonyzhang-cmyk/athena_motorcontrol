@@ -70,6 +70,12 @@ void svm(float v_max, float u, float v, float w, float *dtc_u, float *dtc_v, flo
 void zero_current(ControllerStruct *controller);
 /* Re-sample the CSA offsets after the live neutral PWM bridge is enabled. */
 void zero_current_live(ControllerStruct *controller);
+#ifdef ADC_SYNC_TRIGGER
+/* UPDATE-triggered ADC mode collects this offset over whole PWM periods. */
+uint8_t adc_offset_calibration_pending(void);
+uint32_t adc_offset_calibration_status(void);
+uint32_t adc_offset_calibration_mean(void);
+#endif
 void reset_foc(ControllerStruct *controller);
 void reset_observer(ObserverStruct *observer);
 void init_controller_params(ControllerStruct *controller);

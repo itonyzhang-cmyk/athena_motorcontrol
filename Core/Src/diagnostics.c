@@ -469,6 +469,15 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
 		case 121U: return (uint32_t)controller.adc_valid |
 		                  ((controller.adc_sample_count & 0x00FFFFFFU) << 8);
 		case 122U: return (uint32_t)controller.adc_timeout_count;
+#ifdef ADC_SYNC_TRIGGER
+		/* UPDATE-synchronized sampling diagnostics. Page 143 packs active in
+		 * bit 0 and completed/collected offset samples in bits 8..23; page 144
+		 * returns the two raw ADC means captured with neutral PWM enabled. */
+		case 143U: return adc_offset_calibration_status();
+		case 144U: return adc_offset_calibration_mean();
+		case 145U: return milli_payload(controller.i_d);
+		case 146U: return milli_payload(controller.i_q);
+#endif
 		/* Captured from the active-low nFAULT ISR before EN_GATE is dropped.
 		 * Pages 123-136 retain the last runtime fault until the next fault. */
 		case 123U: return drv_runtime_fault_evidence(0U); /* timestamp_ms */
