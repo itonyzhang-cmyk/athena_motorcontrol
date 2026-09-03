@@ -30,6 +30,10 @@ FWDGT_SELFTEST ?= 0
 CAN_PROBE ?= 0
 ALLOW_DIRTY_BUILD ?= 0
 ALLOW_EXPERIMENTAL_RELEASE ?= 0
+# Optional ADC timing experiment.  The software-triggered conversion path is
+# the motion-verified normal default; UPDATE-triggered conversion is compiled
+# only when explicitly requested for an isolated bench image.
+ADC_SYNC_TRIGGER ?= 0
 
 # A normal image is a hardware-facing release artifact.  Refuse to build it
 # from a dirty checkout unless the caller explicitly opts into an experiment.
@@ -209,6 +213,10 @@ AS_DEFS =
 # C defines
 C_DEFS =  \
 -DGD32F30X_HD
+
+ifeq ($(ADC_SYNC_TRIGGER),1)
+C_DEFS += -DADC_SYNC_TRIGGER
+endif
 
 ifeq ($(SAFE_BRINGUP), 1)
 C_DEFS += -DSAFE_BRINGUP=1

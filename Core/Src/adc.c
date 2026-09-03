@@ -467,9 +467,17 @@ void MX_ADC01_Init(void)
   adc_inserted_channel_config(ADC0, 0U, ADC_CHANNEL_11, ADC_SAMPLETIME_1POINT5); // SOB
   adc_inserted_channel_config(ADC1, 0U, ADC_CHANNEL_10, ADC_SAMPLETIME_1POINT5); // SOC
 
+#ifdef ADC_SYNC_TRIGGER
+  adc_external_trigger_source_config(ADC0, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_T0_TRGO);
+#else
   adc_external_trigger_source_config(ADC0, ADC_INSERTED_CHANNEL, ADC0_1_2_EXTTRIG_INSERTED_NONE);
+#endif
   adc_external_trigger_config(ADC0, ADC_INSERTED_CHANNEL, ENABLE);
+#ifdef ADC_SYNC_TRIGGER
+  adc_external_trigger_source_config(ADC1, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_T0_TRGO);
+#else
   adc_external_trigger_source_config(ADC1, ADC_INSERTED_CHANNEL, ADC0_1_2_EXTTRIG_INSERTED_NONE);
+#endif
   adc_external_trigger_config(ADC1, ADC_INSERTED_CHANNEL, ENABLE);
 
   adc_dma_mode_enable(ADC0);
@@ -532,7 +540,11 @@ void MX_ADC2_Init(void)
 
   adc_inserted_channel_config(ADC2, 0U, ADC_CHANNEL_13, ADC_SAMPLETIME_55POINT5);
 
+#ifdef ADC_SYNC_TRIGGER
+  adc_external_trigger_source_config(ADC2, ADC_INSERTED_CHANNEL, ADC2_EXTTRIG_INSERTED_T0_TRGO);
+#else
   adc_external_trigger_source_config(ADC2, ADC_INSERTED_CHANNEL, ADC0_1_2_EXTTRIG_INSERTED_NONE);
+#endif
   adc_external_trigger_config(ADC2, ADC_INSERTED_CHANNEL, ENABLE);
 
   adc_dma_mode_enable(ADC2);

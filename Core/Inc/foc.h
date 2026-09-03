@@ -46,6 +46,7 @@ typedef struct{
     float inverter_tab[128];								// Inverter linearization table
     uint8_t invert_dtc;										// Inverter duty cycle inverting/non-inverting
     uint8_t adc_valid;
+    uint8_t adc_stale_cycles;
     uint32_t adc_sample_count;
     uint32_t adc_timeout_count;
     uint32_t torque_ramp_cycles;

@@ -15,7 +15,7 @@
 #include "safety.h"
 #include "ivt_protection.h"
 
-#ifndef STM32F446
+#if !defined(STM32F446) && !defined(ADC_SYNC_TRIGGER)
 #define ADC_EOIC_POLL_LIMIT 2048U
 
 static int adc_wait_for_eoic(uint32_t adc_periph)
@@ -124,6 +124,37 @@ void analog_sample (ControllerStruct *controller){
     controller->i_b = controller->i_scale*(float)(controller->adc_b_raw - controller->adc_b_offset);
     controller->i_c = -controller->i_a - controller->i_b;
 #else
+#ifdef ADC_SYNC_TRIGGER
+	/* TIMER0 UPDATE completed the injected conversions in the preceding PWM
+	 * carrier period. Never block this ISR waiting for a future trigger. */
+	if (adc_flag_get(ADC_CH_MAIN, ADC_FLAG_EOIC) == RESET ||
+		adc_flag_get(ADC_CH_VBUS, ADC_FLAG_EOIC) == RESET) {
+		if (controller->adc_valid != 0U && ++controller->adc_stale_cycles > 4U) {
+			controller->adc_valid = 0U;
+			controller->adc_timeout_count++;
+			safety_force_outputs_off(SAFETY_FAULT_ADC_TIMEOUT);
+		}
+		return;
+	}
+	controller->adc_stale_cycles = 0U;
+	adc_flag_clear(ADC_CH_MAIN, ADC_FLAG_EOIC);
+	adc_flag_clear(ADC_CH_VBUS, ADC_FLAG_EOIC);
+	if(!PHASE_ORDER){
+		controller->adc_b_raw = adc_inserted_data_read(ADC_CH_IB, ADC_INSERTED_CHANNEL_0);
+		controller->adc_c_raw = adc_inserted_data_read(ADC_CH_IC, ADC_INSERTED_CHANNEL_0);
+	}
+	else{
+		controller->adc_b_raw = adc_inserted_data_read(ADC_CH_IC, ADC_INSERTED_CHANNEL_0);
+		controller->adc_c_raw = adc_inserted_data_read(ADC_CH_IB, ADC_INSERTED_CHANNEL_0);
+	}
+	controller->adc_vbus_raw = adc_inserted_data_read(ADC_CH_VBUS, ADC_INSERTED_CHANNEL_0);
+	controller->v_bus = (float)controller->adc_vbus_raw * V_SCALE;
+	controller->i_b = controller->i_scale * (float)(controller->adc_b_raw - controller->adc_b_offset);
+	controller->i_c = controller->i_scale * (float)(controller->adc_c_raw - controller->adc_c_offset);
+	controller->i_a = -controller->i_b - controller->i_c;
+	controller->adc_valid = 1U;
+	controller->adc_sample_count++;
+#else
 	if(!PHASE_ORDER){
 		controller->adc_b_raw = adc_inserted_data_read(ADC_CH_IB, ADC_INSERTED_CHANNEL_0);
 		controller->adc_c_raw = adc_inserted_data_read(ADC_CH_IC, ADC_INSERTED_CHANNEL_0);
@@ -158,6 +189,7 @@ void analog_sample (ControllerStruct *controller){
     controller->i_a = -controller->i_b - controller->i_c;
     controller->adc_valid = 1U;
     controller->adc_sample_count++;
+#endif
 #endif
 
     evaluate_i_v_t_protection(controller);
@@ -207,6 +239,13 @@ void svm(float v_max, float u, float v, float w, float *dtc_u, float *dtc_v, flo
 void zero_current(ControllerStruct *controller){
 	/* Measure zero-current ADC offset */
 
+#ifdef ADC_SYNC_TRIGGER
+	/* There may be no UPDATE edge while startup is running. The live neutral
+	 * bridge sequence captures the first completed synchronized sample. */
+	(void)controller;
+	return;
+#else
+
 #ifdef STM32F446
     int adc_a_offset = 0;
     int adc_b_offset = 0;
@@ -242,6 +281,8 @@ void zero_current(ControllerStruct *controller){
     controller->adc_c_offset = adc_c_offset/n;
 #endif
 
+#endif
+
     }
 
 void zero_current_live(ControllerStruct *controller){
@@ -250,6 +291,12 @@ void zero_current_live(ControllerStruct *controller){
 	 * been enabled and the DRV charge pump has settled.  Discard conversions
 	 * already queued before the bridge transition, then average a short window
 	 * without changing PWM state. */
+#ifdef ADC_SYNC_TRIGGER
+	if (controller->adc_valid == 0U) return;
+	controller->adc_b_offset = controller->adc_b_raw;
+	controller->adc_c_offset = controller->adc_c_raw;
+	return;
+#else
 #ifdef STM32F446
 	int adc_a_offset = 0;
 	int adc_b_offset = 0;
@@ -286,6 +333,7 @@ void zero_current_live(ControllerStruct *controller){
 #else
 	controller->adc_b_offset = adc_b_offset / samples;
 	controller->adc_c_offset = adc_c_offset / samples;
+#endif
 #endif
 }
 

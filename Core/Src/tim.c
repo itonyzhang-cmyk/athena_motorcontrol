@@ -199,7 +199,13 @@ void MX_TIM0_Init(void)
     /* Clock source */
     timer_internal_clock_config(TIMER0);
 
+    /* UPDATE recurs once per PWM carrier cycle. It is an opt-in ADC timing
+     * experiment; the normal software-triggered ADC path retains RESET. */
+#ifdef ADC_SYNC_TRIGGER
+    timer_master_output_trigger_source_select(TIMER0, TIMER_TRI_OUT_SRC_UPDATE);
+#else
     timer_master_output_trigger_source_select(TIMER0, TIMER_TRI_OUT_SRC_RESET);
+#endif
     timer_master_slave_mode_config(TIMER0, TIMER_MASTER_SLAVE_MODE_DISABLE);
 
     /* auto-reload preload enable */
