@@ -30,10 +30,9 @@ FWDGT_SELFTEST ?= 0
 CAN_PROBE ?= 0
 ALLOW_DIRTY_BUILD ?= 0
 ALLOW_EXPERIMENTAL_RELEASE ?= 0
-# Optional ADC timing experiment.  The software-triggered conversion path is
-# the motion-verified normal default; UPDATE-triggered conversion is compiled
-# only when explicitly requested for an isolated bench image.
-ADC_SYNC_TRIGGER ?= 0
+# TIMER0 UPDATE synchronized injected-ADC sampling is the validated normal
+# control path. Set ADC_SYNC_TRIGGER=0 only for an explicit comparison image.
+ADC_SYNC_TRIGGER ?= 1
 
 # A normal image is a hardware-facing release artifact.  Refuse to build it
 # from a dirty checkout unless the caller explicitly opts into an experiment.

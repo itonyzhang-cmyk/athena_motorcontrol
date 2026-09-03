@@ -1551,3 +1551,6 @@ Do not record secrets, access tokens, or private credentials here.
   retained roughly `0.53 rad` final motor-side following error. It is not an
   asserted universal optimum; load-specific gravity/friction terms and a
   structured gain sweep remain required before declaring final MIT gains.
+- Following the completed current-loop, position, and velocity regressions,
+  the normal build default is `ADC_SYNC_TRIGGER=1`. Setting it to `0` is now
+  an explicit software-triggered comparison build, not the deployed default.
