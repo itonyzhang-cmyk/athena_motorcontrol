@@ -1496,3 +1496,16 @@ Do not record secrets, access tokens, or private credentials here.
   to about `45.27 rad`. The session was stopped with `0xFD`; bridge and enable
   state are now idle. Do not use `Kd=2` with this trajectory/transport timing
   until the cause is isolated.
+
+### 2026-09-03 - Optional UPDATE-synchronized ADC path migrated
+
+- Commit `71a48d3` adds the TIMER0 UPDATE-triggered injected-ADC path to the
+  normal source line as an explicit build option (`ADC_SYNC_TRIGGER=1`). It
+  changes the trigger source and consumes completed conversions without
+  blocking the PWM ISR; stale conversions fail closed after a bounded count.
+- The normal default remains `ADC_SYNC_TRIGGER=0`, using the motion-verified
+  software-triggered ADC path. A default build after the migration was
+  byte-identical to the pre-migration normal image
+  (`f885e33cb91b74c23dffcec8f2316fd846b324fd236a854adfefad184b226ae8`).
+  Do not flash the opt-in path as a normal image until it independently passes
+  the same bidirectional-motion regression.
