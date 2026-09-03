@@ -1532,3 +1532,22 @@ Do not record secrets, access tokens, or private credentials here.
   phase currents near `a=-0.161 A,b=-0.543 A`; no ADC timeout, CAN, or DRV fault
   occurred. This establishes the UPDATE path as a usable closed current/FOC
   path; MIT gain optimization can proceed on this image.
+
+### 2026-09-04 - UPDATE path MIT regression and starting gains
+
+- Read-only in-motion current evidence was captured while the UPDATE path was
+  running: a position trajectory reported `i_q_des=-0.648 A`, filtered q-axis
+  current `-0.686 A`, measured `i_q=-0.725 A`, and `i_d=-0.002 A`. This shows
+  q-axis current tracking with the non-torque-producing d axis near zero, not
+  merely a CAN feedback/torque-packing result.
+- A 5 s output `+0.5 rad/s` velocity session (`Kp=0`, `Kd=1`, friction
+  magnitude `0.3 Nm`) moved motor-side position about `31.01 -> 96.84 rad`.
+  The mirrored 4 s `-0.5 rad/s` session moved it `96.69 -> 43.99 rad`. Both
+  sessions used the 20 ms host cadence, had maximum frame gaps below `29.9 ms`,
+  sent `0xFD`, and retained zero ADC timeout/fault evidence.
+- For empty-load position work, `Kp=20`, `Kd=1`, directional friction
+  magnitude `0.3 Nm` is the current conservative starting point. It completed
+  a reverse medium-distance move `98.43 -> 96.63 rad` without runaway, but
+  retained roughly `0.53 rad` final motor-side following error. It is not an
+  asserted universal optimum; load-specific gravity/friction terms and a
+  structured gain sweep remain required before declaring final MIT gains.
