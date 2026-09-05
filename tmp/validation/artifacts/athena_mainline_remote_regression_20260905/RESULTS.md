@@ -15,7 +15,8 @@
 
 - 工程：`~/workspace/xiaomi_dog/athena_motorcontrol`
 - Git 分支：`cyberdog-safe-bringup`
-- 当前代码提交：`00837104b4dc2ab6c97e5283b3d3bed4af81fe31`
+- 当前主线提交：`a4d9df0571cc612629a453f46ec1c28267d8d58b`
+- 实际刷写/测试工具提交：`00837104b4dc2ab6c97e5283b3d3bed4af81fe31`
 - 正式镜像来源提交：`197f5cde318640f3332ed525ea29b96cab55c478`
 - 正式镜像：`artifacts/athena_mainline_release_197f5cd_20260905/motorcontrol.bin`
 - 工具链：项目内 Arm GNU Toolchain 15.3.1
