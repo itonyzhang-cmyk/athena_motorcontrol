@@ -10,6 +10,7 @@
 #include "diag_protocol.h"
 #include "drv8323.h"
 #include "fsm.h"
+#include "foc.h"
 #include "gpio.h"
 #include "hw_config.h"
 #include "safety.h"
@@ -40,6 +41,36 @@ static int config_stage_int[CONFIG_INT_WORDS];
 static float config_stage_float[CONFIG_FLOAT_WORDS];
 static uint8_t config_stage_ready;
 static uint8_t config_stage_dirty;
+/* 0 idle, 1 queued, 2 committed, 3 failed.  The commit itself is performed
+ * by diagnostics_service() from the foreground loop, never from CAN RX. */
+static volatile uint8_t config_commit_status;
+static volatile uint8_t config_commit_pending;
+/* Detail for the last queued transaction: 0 none, 1 queued, 2 success,
+ * 3 preference open/erase, 4 payload program/readback, 5 final reload. */
+static volatile uint8_t config_commit_detail;
+
+static void config_pause_runtime_irqs(void)
+{
+    /* TIMER0 is the 30 kHz control ISR and CAN RX can pre-empt it.  Both must
+     * be stopped before FMC erase/program starts; otherwise a CAN burst can
+     * interrupt a Flash operation and the A/B readback can fail. */
+    NVIC_DisableIRQ(TIMER0_UP_IRQn);
+    NVIC_DisableIRQ(USBD_LP_CAN0_RX0_IRQn);
+    NVIC_ClearPendingIRQ(TIMER0_UP_IRQn);
+    NVIC_ClearPendingIRQ(USBD_LP_CAN0_RX0_IRQn);
+    __DSB();
+    __ISB();
+}
+
+static void config_resume_runtime_irqs(void)
+{
+    NVIC_ClearPendingIRQ(TIMER0_UP_IRQn);
+    NVIC_ClearPendingIRQ(USBD_LP_CAN0_RX0_IRQn);
+    NVIC_EnableIRQ(TIMER0_UP_IRQn);
+    NVIC_EnableIRQ(USBD_LP_CAN0_RX0_IRQn);
+    __DSB();
+    __ISB();
+}
 
 typedef struct {
     uint8_t is_float;
@@ -70,7 +101,7 @@ static const ConfigField config_fields[] = {
     {1U, 23U}, /* 18 KP_MAX */
     {1U, 24U}, /* 19 KD_MAX */
     {1U, 8U}, /* 20 TEMP_MAX */
-    {0U, 7U}, /* 21 IVT_PROTECT_ENABLE */
+    {0U, 134U}, /* 21 IVT_PROTECT_ENABLE, after ENCODER_LUT[0..127] */
     {1U, 25U}, /* 22 I_TRIP */
     {1U, 26U}, /* 23 VBUS_MIN */
     {1U, 27U}, /* 24 VBUS_MAX */
@@ -110,8 +141,18 @@ static uint32_t config_control_request(const DiagRequest *request, uint8_t *stat
     uint8_t *bytes;
 
     *status = DIAG_STATUS_OK;
+    if (request->page == 0xFBU) {
+        return config_commit_status;
+    }
+    if (request->page == 0xFCU) {
+        return config_commit_detail;
+    }
     if (request->page >= 0x20U &&
         request->page < (uint8_t)(0x20U + CONFIG_FIELD_COUNT * 4U)) {
+        if (config_commit_pending != 0U) {
+            *status = DIAG_STATUS_BUSY;
+            return 0U;
+        }
         uint8_t relative = (uint8_t)(request->page - 0x20U);
         field = (uint8_t)(relative / 4U);
         offset = (uint8_t)(relative % 4U);
@@ -146,7 +187,8 @@ static uint32_t config_control_request(const DiagRequest *request, uint8_t *stat
     }
     if (request->page == 0xF9U) {
         if (state.state != MENU_MODE || state.next_state != MENU_MODE ||
-            safety_get_faults() != 0U || drv.fault != 0U || config_stage_dirty == 0U) {
+            safety_get_faults() != 0U || drv.fault != 0U || config_stage_dirty == 0U ||
+            config_commit_pending != 0U) {
             *status = DIAG_STATUS_BUSY;
             return 0U;
         }
@@ -155,13 +197,16 @@ static uint32_t config_control_request(const DiagRequest *request, uint8_t *stat
             *status = DIAG_STATUS_BAD_PAGE;
             return 0U;
         }
-        memcpy(__int_reg, config_stage_int, sizeof(config_stage_int));
-        memcpy(__float_reg, config_stage_float, sizeof(config_stage_float));
-        if (fsm_save_preferences() != 0) {
-            *status = DIAG_STATUS_UNAVAILABLE;
-            return 0U;
-        }
-        config_stage_dirty = 0U;
+        /* Only queue the transaction here.  This function is called from the
+         * CAN RX interrupt; erasing/programming the A/B page here can block
+         * TIMER0 and the independent watchdog long enough to reset the MCU.
+         * The request has already passed the stable-MENU/no-fault guard, so
+         * pause both runtime IRQ sources only for the short handoff.  The
+         * actual Flash transaction remains in the foreground service. */
+        config_commit_pending = 1U;
+        config_commit_status = 1U;
+        config_commit_detail = 1U;
+        config_pause_runtime_irqs();
         return 1U;
     }
     if (request->page == 0xFAU) {
@@ -171,6 +216,48 @@ static uint32_t config_control_request(const DiagRequest *request, uint8_t *stat
     }
     *status = DIAG_STATUS_BAD_PAGE;
     return 0U;
+}
+
+void diagnostics_service(void)
+{
+    if (config_commit_pending == 0U) return;
+
+    /* F9 was accepted only after the stable-MENU/no-fault guard above.  The
+     * runtime IRQs are already paused by the CAN handoff, so state cannot
+     * change before this foreground transaction begins.  Re-checking the
+     * state here caused a false rejection when the request pre-empted the
+     * final TIMER0 FSM transition. */
+
+    memcpy(__int_reg, config_stage_int, sizeof(config_stage_int));
+    memcpy(__float_reg, config_stage_float, sizeof(config_stage_float));
+
+    /* The normal TIMER0 ISR performs the complete 30 kHz ADC/encoder/FOC
+     * step, including a history copy.  Leaving it enabled while the GD32 FMC
+     * page transaction polls its status can starve the foreground until the
+     * watchdog resets, leaving the commit permanently queued.  This path is
+     * only reachable in a stable MENU state with the gate driver disabled;
+     * pause the control-rate IRQ for the bounded Flash transaction and feed
+     * the watchdog from preference_writer's foreground loop. */
+    config_pause_runtime_irqs();
+    const int save_result = fsm_save_preferences();
+    config_resume_runtime_irqs();
+    if (save_result != 0) {
+        /* Restore the last valid A/B slot into RAM after a failed write. */
+        (void)preference_writer_load(&prefs);
+        config_commit_pending = 0U;
+        config_commit_status = 3U;
+        /* Keep the writer's negative result distinct from the foreground
+         * guard so a hardware run can identify the first failed stage. */
+        config_commit_detail = (uint8_t)(save_result == -3 ? 3 :
+                                         save_result == -4 ? 4 :
+                                         save_result == -5 ? 5 : 7);
+        return;
+    }
+    config_stage_dirty = 0U;
+    config_stage_ready = 0U;
+    config_commit_pending = 0U;
+    config_commit_status = 2U;
+    config_commit_detail = 2U;
 }
 
 void diagnostics_debug_clear(void);
@@ -284,6 +371,12 @@ static uint32_t encoder_lut_checksum(void)
 static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
 {
     *status = DIAG_STATUS_OK;
+
+#ifndef STM32F446
+    if (request->opcode == DIAG_OPCODE_GET_SNAPSHOT &&
+        request->page >= 160U && request->page < 220U)
+        return current_loop_test_snapshot(request->page);
+#endif
 
     switch (request->opcode) {
     case DIAG_OPCODE_PING:
@@ -408,8 +501,22 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
         case 84U: return milli_payload(I_MAX);
         case 85U: return milli_payload(controller.i_q_des);
         case 86U: return milli_payload(controller.i_q_filt);
-        case 87U: return (uint32_t)(uint16_t)current_milli16(controller.i_a) |
-                          ((uint32_t)(uint16_t)current_milli16(controller.i_b) << 16);
+        case 87U:
+            /* When PWM/ADC sampling is inactive, i_a/i_b retain the last
+             * control-loop sample.  Returning that cached value as live
+             * current caused the WebUI to display bogus idle readings such
+             * as -16 A.  Report the sample as unavailable instead. */
+            /* adc_valid remains latched after the last PWM sample. It does
+             * not prove that the power stage is currently active: after a
+             * test or timeout, the cached sample must not be presented as a
+             * live winding current while the gate is off. */
+            if (controller.adc_valid == 0U || state.state != MOTOR_MODE ||
+                (TIMER_CCHP(TIMER0) & TIMER_CCHP_POEN) == 0U) {
+                *status = DIAG_STATUS_UNAVAILABLE;
+                return 0U;
+            }
+            return (uint32_t)(uint16_t)current_milli16(controller.i_a) |
+                              ((uint32_t)(uint16_t)current_milli16(controller.i_b) << 16);
         case 88U: return (TIMER_CH0CV(TIMER0) & 0xFFFFU) |
                           ((TIMER_CH1CV(TIMER0) & 0xFFFFU) << 16);
         case 89U: return (TIMER_CH2CV(TIMER0) & 0xFFFFU) |
@@ -419,6 +526,49 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
         case 92U: return milli_payload(controller.kp);
         case 93U: return milli_payload(controller.kd);
         case 94U: return milli_payload(controller.t_ff);
+        case 150U: return current_loop_test_snapshot(150U);
+        case 151U: return current_loop_test_snapshot(151U);
+        case 152U: return current_loop_test_snapshot(152U);
+        case 153U: return current_loop_test_snapshot(153U);
+        case 154U: return current_loop_test_snapshot(154U);
+        case 155U: return current_loop_test_snapshot(155U);
+        case 156U: return current_loop_test_snapshot(156U);
+        case 157U: return current_loop_test_snapshot(157U);
+        case 158U: return current_loop_test_snapshot(158U);
+        case 159U: return current_loop_test_snapshot(159U);
+        case 147U: return current_loop_test_snapshot(147U);
+        case 148U: return current_loop_test_snapshot(148U);
+        case 149U: return current_loop_test_snapshot(149U);
+        case 220U: return current_loop_test_snapshot(220U);
+        case 221U: return current_loop_test_snapshot(221U);
+        case 222U: return current_loop_test_snapshot(222U);
+        case 223U: return current_loop_test_snapshot(223U);
+        case 224U: return current_loop_test_snapshot(224U);
+        case 225U: return current_loop_test_snapshot(225U);
+        case 226U: return current_loop_test_snapshot(226U);
+        case 227U: return current_loop_test_snapshot(227U);
+        case 228U: return current_loop_test_snapshot(228U);
+        case 229U: return current_loop_test_snapshot(229U);
+        case 230U: return current_loop_test_snapshot(230U);
+        case 231U: return current_loop_test_snapshot(231U);
+        case 232U: return current_loop_test_snapshot(232U);
+        case 233U: return current_loop_test_snapshot(233U);
+        case 234U: return current_loop_test_snapshot(234U);
+        case 235U: return current_loop_test_snapshot(235U);
+        case 236U: return current_loop_test_snapshot(236U);
+        case 237U: return current_loop_test_snapshot(237U);
+        case 238U: return current_loop_test_snapshot(238U);
+        case 239U: return current_loop_test_snapshot(239U);
+        case 240U: return current_loop_test_snapshot(240U);
+        case 241U: return current_loop_test_snapshot(241U);
+        case 242U: return current_loop_test_snapshot(242U);
+        case 243U: return current_loop_test_snapshot(243U);
+        case 244U: return current_loop_test_snapshot(244U);
+        case 245U: return current_loop_test_snapshot(245U);
+        case 246U: return current_loop_test_snapshot(246U);
+        case 247U: case 248U: case 249U: case 250U: case 251U:
+        case 252U: case 253U: case 254U: case 255U:
+            return adc_baseline_test_snapshot(request->page);
         case 95U: return (uint32_t)state.state |
                           ((uint32_t)state.next_state << 8) |
                           ((uint32_t)comm_encoder_cal.started << 16) |
@@ -469,15 +619,6 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
 		case 121U: return (uint32_t)controller.adc_valid |
 		                  ((controller.adc_sample_count & 0x00FFFFFFU) << 8);
 		case 122U: return (uint32_t)controller.adc_timeout_count;
-#ifdef ADC_SYNC_TRIGGER
-		/* UPDATE-synchronized sampling diagnostics. Page 143 packs active in
-		 * bit 0 and completed/collected offset samples in bits 8..23; page 144
-		 * returns the two raw ADC means captured with neutral PWM enabled. */
-		case 143U: return adc_offset_calibration_status();
-		case 144U: return adc_offset_calibration_mean();
-		case 145U: return milli_payload(controller.i_d);
-		case 146U: return milli_payload(controller.i_q);
-#endif
 		/* Captured from the active-low nFAULT ISR before EN_GATE is dropped.
 		 * Pages 123-136 retain the last runtime fault until the next fault. */
 		case 123U: return drv_runtime_fault_evidence(0U); /* timestamp_ms */
@@ -504,6 +645,10 @@ static uint32_t diagnostic_payload(const DiagRequest *request, uint8_t *status)
 		case 141U: return milli_payload(TEMP_TRIP);
 		case 142U: return (uint32_t)(uint16_t)controller.adc_vbus_raw |
 		                  ((uint32_t)controller.adc_valid << 16);
+		case 143U: return zero_current_live_snapshot(0U);
+		case 144U: return zero_current_live_snapshot(1U);
+		case 145U: return zero_current_live_snapshot(2U);
+		case 146U: return zero_current_live_snapshot(3U);
 #endif
 #ifdef BRINGUP_INJECT
         case 20U: /* fallthrough to shared handler */
@@ -657,6 +802,50 @@ static uint32_t handle_control_request(const DiagRequest *request, uint8_t *stat
             return 0U;
         }
         return value;
+    case 13U: /* Arm internal +q current step; argument is 0.1 A units. */
+    case 14U: /* Arm internal +d current step; argument is 0.1 A units. */
+    case 18U: /* Arm internal -q current step; argument is magnitude in 0.1 A units. */
+    case 19U: /* Arm internal -d current step; argument is magnitude in 0.1 A units. */
+        {
+            uint32_t busy_reason = 0U;
+            if (request->argument < 1U || request->argument > 20U) busy_reason |= (1U << 0);
+            if (state.state != MOTOR_MODE) busy_reason |= (1U << 1);
+            if (drv_enable_ready() == 0U) busy_reason |= (1U << 2);
+            if (safety_get_faults() != 0U) busy_reason |= (1U << 3);
+            if (controller.adc_valid == 0U) busy_reason |= (1U << 4);
+            if (current_loop_test_active() != 0U) busy_reason |= (1U << 5);
+            if (busy_reason != 0U) {
+            *status = DIAG_STATUS_BUSY;
+                return busy_reason;
+            }
+        }
+        current_loop_test_start((request->page == 18U || request->page == 19U ? -1.0f : 1.0f) *
+                                (float)request->argument * 0.1f,
+                                (request->page == 13U || request->page == 18U) ? 1U : 0U);
+        return (uint32_t)(int32_t)((request->page == 18U || request->page == 19U ? -1.0f : 1.0f) *
+                                   (float)request->argument * 100.0f);
+    case 15U: /* RAM-only P gain, encoded in 0.001 V/A units. */
+        if (current_loop_test_set_gains((float)request->argument * 0.001f,
+                                        controller.ki_q) == 0U) {
+            *status = DIAG_STATUS_BUSY;
+            return 0U;
+        }
+        return request->argument;
+    case 16U: /* RAM-only PI zero, encoded in 0.001 per-sample units. */
+        if (current_loop_test_set_gains(controller.k_q,
+                                        (float)request->argument * 0.001f) == 0U) {
+            *status = DIAG_STATUS_BUSY;
+            return 0U;
+        }
+        return request->argument;
+    case 17U: /* Arm neutral-PWM ADC baseline capture. */
+        if (state.state != MOTOR_MODE || drv_enable_ready() == 0U || safety_get_faults() != 0U ||
+            current_loop_test_active() != 0U || adc_baseline_test_active() != 0U) {
+            *status = DIAG_STATUS_BUSY;
+            return 0U;
+        }
+        adc_baseline_test_start();
+        return 1000U;
     default:
         *status = DIAG_STATUS_UNSUPPORTED;
         return 0U;

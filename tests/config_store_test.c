@@ -18,7 +18,7 @@ void config_store_tests(void)
     assert(int_regs[1] == 1);
     assert(int_regs[2] == 0);
     assert(int_regs[3] == 3000);
-    assert(int_regs[7] == 0);
+    assert(int_regs[134] == 0);
     assert(float_regs[25] == 0.0f);
     assert(float_regs[26] == 0.0f);
     assert(float_regs[27] == 0.0f);
@@ -75,16 +75,20 @@ void config_store_tests(void)
     int_regs[2] = DIAG_CAN_RESPONSE_ID;
     assert(!config_payload_valid(int_regs, float_regs));
     config_apply_defaults(int_regs, float_regs);
-    int_regs[7] = 1;
+    /* Encoder linearization owns int_regs[6..133]; its samples must never
+     * influence the unrelated I/V/T protection configuration. */
+    int_regs[7] = -60;
+    assert(config_payload_valid(int_regs, float_regs));
+    int_regs[134] = 1;
     assert(!config_payload_valid(int_regs, float_regs));
     float_regs[25] = 20.0f;
     assert(config_payload_valid(int_regs, float_regs));
-    int_regs[7] = 2;
+    int_regs[134] = 2;
     assert(!config_payload_valid(int_regs, float_regs));
     float_regs[26] = 18.0f;
     float_regs[27] = 30.0f;
     assert(config_payload_valid(int_regs, float_regs));
-    int_regs[7] = 4;
+    int_regs[134] = 4;
     assert(!config_payload_valid(int_regs, float_regs));
     float_regs[28] = 80.0f;
     assert(config_payload_valid(int_regs, float_regs));

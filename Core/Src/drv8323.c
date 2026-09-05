@@ -351,7 +351,8 @@ int drv_enable_ready(void)
 	 * a transient-low nFAULT would immediately tear down an otherwise valid
 	 * enable session.  drv_service_enable() owns the bounded grace window and
 	 * clears it after the deadline. */
-	return drv_enable_verified != 0U && drv_enable_window == 0U;
+	return drv_enable_verified != 0U && drv_enable_window == 0U &&
+	       zero_current_live_active() == 0U;
 #endif
 }
 
@@ -370,6 +371,7 @@ void drv_disable_gd(DRVStruct drv){
 	timer_channel_output_state_config(TIM_PWM, TIM_CH_W, TIMER_CCX_DISABLE);
 	timer_primary_output_config(TIM_PWM, DISABLE);
 	gpio_bit_reset(ENABLE_PIN);
+	zero_current_live_cancel();
 	drv_enable_pending = 0U;
 	drv_enable_verified = 0U;
 	drv_enable_window = 0U;

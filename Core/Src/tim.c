@@ -199,9 +199,11 @@ void MX_TIM0_Init(void)
     /* Clock source */
     timer_internal_clock_config(TIMER0);
 
-    /* UPDATE recurs once per PWM carrier cycle. It is an opt-in ADC timing
-     * experiment; the normal software-triggered ADC path retains RESET. */
-#ifdef ADC_SYNC_TRIGGER
+    /* Production ADC_SYNC_TRIGGER uses UPDATE as the recurring injected ADC
+     * trigger. RESET remains a named experiment-only negative control. */
+#if defined(ADC_SYNC_TRIGGER) && defined(ADC_SYNC_TRIGGER_RESET)
+    timer_master_output_trigger_source_select(TIMER0, TIMER_TRI_OUT_SRC_RESET);
+#elif defined(ADC_SYNC_TRIGGER)
     timer_master_output_trigger_source_select(TIMER0, TIMER_TRI_OUT_SRC_UPDATE);
 #else
     timer_master_output_trigger_source_select(TIMER0, TIMER_TRI_OUT_SRC_RESET);
@@ -241,6 +243,10 @@ void MX_TIM0_Init(void)
     timer_channel_output_fast_config(TIMER0, TIMER_CH_2, TIMER_OC_FAST_ENABLE);
     timer_channel_output_shadow_config(TIMER0, TIMER_CH_2, TIMER_OC_SHADOW_ENABLE);
     timer_channel_output_pulse_value_config(TIMER0, TIMER_CH_2, 0);
+
+#ifdef ADC_SYNC_TRIGGER
+    /* No CH3 setup is needed: ADC_SYNC_TRIGGER selects TIMER0 UPDATE. */
+#endif
 
     /* Break, Deadtime */
     timer_break_struct_para_init(&timer_breakpara);

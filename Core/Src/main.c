@@ -441,6 +441,11 @@ int main(void)
   while (1)
   {
     runtime_watchdog_main_heartbeat();
+#ifndef STM32F446
+    /* Configuration Flash transactions are deliberately deferred out of the
+     * CAN RX ISR so they cannot starve TIMER0 or the FWDGT service. */
+    diagnostics_service();
+#endif
 #if defined(BRINGUP_INJECT)
     static uint32_t inject_last_report_ms;
     inject_service();

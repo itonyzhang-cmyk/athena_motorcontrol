@@ -77,7 +77,15 @@ void order_phases(EncoderStruct *encoder, ControllerStruct *controller, CalStruc
 		return;
 	}
 	measured_ppairs = (int)lroundf(2.0f * PI_F / angle_delta);
-	if (measured_ppairs < 1 || measured_ppairs > PPAIRS_MAX) {
+	/* The mechanical displacement is noisy under load.  A small quantisation
+	 * error can round a valid 21-pole-pair motor to 22 (as observed at 2 A),
+	 * while the LUT storage and runtime configuration are bounded to the
+	 * already validated PPAIRS value.  Use the configured value when the
+	 * measurement is within two pole pairs; reject larger disagreements. */
+	int configured_ppairs = (int)lroundf(PPAIRS);
+	if (configured_ppairs < 1 || configured_ppairs > PPAIRS_MAX ||
+	    measured_ppairs < 1 || measured_ppairs > PPAIRS_MAX + 2 ||
+	    abs(measured_ppairs - configured_ppairs) > 2) {
 		reset_foc(controller);
 		cal->failed = 1U;
 		cal->done_ordering = 1U;
@@ -89,7 +97,7 @@ void order_phases(EncoderStruct *encoder, ControllerStruct *controller, CalStruc
 		       measured_ppairs, angle_delta);
 		return;
 	}
-	cal->ppairs = (uint8_t)measured_ppairs;
+	cal->ppairs = (uint8_t)configured_ppairs;
 
 	if(cal->theta_start < theta_end){
 		cal->phase_order = 0;
@@ -99,7 +107,7 @@ void order_phases(EncoderStruct *encoder, ControllerStruct *controller, CalStruc
 		cal->phase_order = 1;
 		printf("Swapping phase sign\r\n");
 	}
-    printf("Pole Pairs: %d\r\n", cal->ppairs);
+	printf("Pole Pairs: %d (measured %d)\r\n", cal->ppairs, measured_ppairs);
     printf("Start: %.3f   End: %.3f\r\n", cal->theta_start, theta_end);
     PHASE_ORDER = cal->phase_order;
     PPAIRS = (float)cal->ppairs;

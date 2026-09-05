@@ -45,7 +45,9 @@ NORMAL_ERASE_SIZE=0x3C000
 # Keep the audited normal image selectable without restarting the WebUI. The
 # same JSON is read by athena_bench_webui.py; these defaults remain a safe
 # fallback if the config file is temporarily unavailable.
-NORMAL_CONFIG="${REPO_DIR}/athena_bench_webui.json"
+# A one-shot override permits a hash-locked experimental image without
+# changing the WebUI's selected normal-release artifact.
+NORMAL_CONFIG="${NORMAL_CONFIG:-${REPO_DIR}/athena_bench_webui.json}"
 if [[ -f "${NORMAL_CONFIG}" ]] && command -v python3 >/dev/null 2>&1; then
     _normal_config_line="$(python3 - "${NORMAL_CONFIG}" <<'PY'
 import json, sys
@@ -129,7 +131,7 @@ Safety properties:
 
 Environment overrides:
   OPENOCD_BIN, OPENOCD_INTERFACE, OPENOCD_TARGET, OPENOCD_SPEED_KHZ,
-  OPENOCD_CPUTAPID
+  OPENOCD_CPUTAPID, NORMAL_CONFIG
 EOF
 }
 

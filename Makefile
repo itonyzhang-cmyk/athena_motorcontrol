@@ -30,9 +30,12 @@ FWDGT_SELFTEST ?= 0
 CAN_PROBE ?= 0
 ALLOW_DIRTY_BUILD ?= 0
 ALLOW_EXPERIMENTAL_RELEASE ?= 0
-# TIMER0 UPDATE synchronized injected-ADC sampling is the validated normal
-# control path. Set ADC_SYNC_TRIGGER=0 only for an explicit comparison image.
+# TIMER0 UPDATE-triggered injected sampling is the production path. The
+# software-triggered path remains available only as an explicit regression
+# comparison with ADC_SYNC_TRIGGER=0.
 ADC_SYNC_TRIGGER ?= 1
+# Experiment-only negative control: select TIMER0 RESET instead of UPDATE.
+ADC_SYNC_TRIGGER_RESET ?= 0
 
 # A normal image is a hardware-facing release artifact.  Refuse to build it
 # from a dirty checkout unless the caller explicitly opts into an experiment.
@@ -173,8 +176,18 @@ startup_gd32f30x_hd.s
 # binaries
 #######################################
 PREFIX = arm-none-eabi-
-# The gcc compiler bin path can be either defined in make command via GCC_PATH variable (> make GCC_PATH=xxx)
-# either it can be added to the PATH environment variable.
+# Always use the project-local Arm GNU toolchain.  A Homebrew bare-metal
+# compiler may lack Newlib headers and must never be selected implicitly.
+EXPECTED_GCC_PATH := /Users/choqy/workspace/xiaomi_dog/.toolchains/arm-gnu-15.3/bin
+ifneq ($(origin GCC_PATH),undefined)
+ifneq ($(abspath $(GCC_PATH)),$(EXPECTED_GCC_PATH))
+$(error Refusing non-project GCC_PATH=$(GCC_PATH); use $(EXPECTED_GCC_PATH))
+endif
+endif
+GCC_PATH := $(EXPECTED_GCC_PATH)
+ifeq ($(wildcard $(GCC_PATH)/$(PREFIX)gcc),)
+$(error Required project toolchain not found: $(GCC_PATH)/$(PREFIX)gcc)
+endif
 ifdef GCC_PATH
 CC = $(GCC_PATH)/$(PREFIX)gcc
 AS = $(GCC_PATH)/$(PREFIX)gcc -x assembler-with-cpp
@@ -215,6 +228,9 @@ C_DEFS =  \
 
 ifeq ($(ADC_SYNC_TRIGGER),1)
 C_DEFS += -DADC_SYNC_TRIGGER
+endif
+ifeq ($(ADC_SYNC_TRIGGER_RESET),1)
+C_DEFS += -DADC_SYNC_TRIGGER_RESET
 endif
 
 ifeq ($(SAFE_BRINGUP), 1)

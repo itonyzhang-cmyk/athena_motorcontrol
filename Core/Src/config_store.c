@@ -11,7 +11,7 @@ enum {
     CONFIG_CAN_TIMEOUT = 3,
     CONFIG_M_ZERO = 4,
     CONFIG_E_ZERO = 5,
-    CONFIG_IVT_PROTECT_ENABLE = 7
+    CONFIG_IVT_PROTECT_ENABLE = 134
 };
 
 enum {
@@ -60,6 +60,8 @@ void config_apply_defaults(int int_regs[CONFIG_INT_WORDS],
     /* Deliberately disabled until scales/sensor sources are characterized. */
     int_regs[CONFIG_IVT_PROTECT_ENABLE] = 0;
 
+    /* Preserve the last motion-verified normal default.  Lower bandwidth is
+     * an experiment, not an implicit replacement for a normal image. */
     float_regs[CONFIG_I_BW] = 1000.0f;
     float_regs[CONFIG_I_MAX] = 40.0f;
     float_regs[CONFIG_I_FW_MAX] = 0.0f;

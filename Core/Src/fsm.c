@@ -105,14 +105,21 @@ void enter_motor_mode(void)
 int fsm_save_preferences(void)
 {
 	if (!preference_writer_open(&prefs)) {
-		return -1;
+		diagnostics_debug_record(DIAG_DEBUG_EVENT_CALIBRATION_SAVE, 2U);
+		return -3;
 	}
 	if (!preference_writer_flush(&prefs)) {
 		preference_writer_close(&prefs);
-		return -1;
+		diagnostics_debug_record(DIAG_DEBUG_EVENT_CALIBRATION_SAVE, 3U);
+		return -4;
 	}
 	preference_writer_close(&prefs);
-	return preference_writer_load(&prefs) ? 0 : -1;
+	if (!preference_writer_load(&prefs)) {
+		diagnostics_debug_record(DIAG_DEBUG_EVENT_CALIBRATION_SAVE, 4U);
+		return -5;
+	}
+	diagnostics_debug_record(DIAG_DEBUG_EVENT_CALIBRATION_SAVE, 1U);
+	return 0;
 }
 
 static MotorGateResult motor_gate_preflight(void)
@@ -138,11 +145,8 @@ static MotorGateResult motor_gate_preflight(void)
 		 drv_service_enable(drv);
 		 const uint8_t nfault_high =
 			 (uint8_t)(gpio_input_bit_get(GPIOA, GPIO_PIN_12) != RESET);
-		 if (drv_enable_ready() != 0 && comm_encoder.valid != 0U && controller.adc_valid != 0U &&
-#ifdef ADC_SYNC_TRIGGER
-			 adc_offset_calibration_pending() == 0U &&
-#endif
-			 nfault_high != 0U) {
+		 if (drv_enable_ready() != 0 && comm_encoder.valid != 0U &&
+			 controller.adc_valid != 0U && nfault_high != 0U) {
 			 /* drv.fault is a software latch from the previous session.  The
 			  * explicit 0xFC recovery request permits clearing it once the
 			  * physical nFAULT input has returned high; drv_service_enable() still
@@ -231,10 +235,20 @@ static MotorGateResult motor_gate_preflight(void)
 				 }
 				 //for(int i = 0; i<128*PPAIRS; i++){printf("%d\r\n", error_array[i]);}
 				 E_ZERO = comm_encoder_cal.ezero;
+				 /* The persisted register is also the live commutation offset.
+				  * Leaving comm_encoder.e_zero at its pre-calibration value makes
+				  * the next MOTOR_MODE session use a stale electrical frame until
+				  * reset, even when calibration itself completed successfully. */
+				 comm_encoder.e_zero = E_ZERO;
 				 printf("E_ZERO: %d  %f\r\n", E_ZERO, TWO_PI_F*fmodf((comm_encoder.ppairs*(float)(-E_ZERO))/((float)ENC_CPR), 1.0f));
 				 memcpy(&comm_encoder.offset_lut, comm_encoder_cal.lut_arr, sizeof(comm_encoder.offset_lut));
 				 memcpy(&ENCODER_LUT, comm_encoder_cal.lut_arr, sizeof(comm_encoder_cal.lut_arr));
 				 //for(int i = 0; i<128; i++){printf("%d\r\n", ENCODER_LUT[i]);}
+				 /* Programming the configuration page must run with PWM stopped.
+				  * The diagnostics transaction already uses MENU_MODE; calibration
+				  * used to erase/program while TIMER0 was still commutating. */
+				 drv_disable_gd(drv);
+				 reset_foc(&controller);
 				 if (fsm_save_preferences() != 0) {
 					 printf("Configuration save rejected; previous data preserved.\r\n");
 				 }
@@ -252,7 +266,8 @@ static MotorGateResult motor_gate_preflight(void)
 				 }
 				 /* If CAN has timed out, reset all commands */
 				 uint8_t gate_ok = 1U;
-				 if((CAN_TIMEOUT > 0 ) && (controller.timeout > CAN_TIMEOUT)){
+				 if((CAN_TIMEOUT > 0 ) && (controller.timeout > CAN_TIMEOUT) &&
+				    current_loop_test_active() == 0U){
 					diagnostics_debug_record(DIAG_DEBUG_EVENT_WATCHDOG_TIMEOUT,
 							(uint32_t)controller.timeout);
 					/* A timeout is a power-stage stop, not merely a zero reference.
@@ -278,8 +293,12 @@ static MotorGateResult motor_gate_preflight(void)
 				 }
 			 /* Otherwise, commutate */
 			 if (gate_ok != 0U){
-				 torque_control(&controller);
-				 field_weaken(&controller);
+					if (adc_baseline_test_active() == 0U) torque_control(&controller);
+				 /* The firmware field-weakening loop is not part of the
+				  * internal current-step experiment; otherwise it overwrites
+				  * the d-axis test reference before the PI loop sees it. */
+					if (current_loop_test_active() == 0U && adc_baseline_test_active() == 0U)
+					 field_weaken(&controller);
 				 commutate(&controller, &comm_encoder);
 			 }
 			 /* Count only an active MOTOR session and saturate the counter.  A

@@ -90,7 +90,8 @@ struct query_page {
 
 static const uint8_t snapshot_pages[] = {
     0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-    116, 117, 118, 119, 120, 121, 122
+    95, 96, 97, 113, 114, 115,
+    116, 117, 118, 119, 120, 121, 122, 143, 144
 };
 
 static const uint8_t counter_pages[] = {9, 10, 11, 12, 13};
@@ -675,6 +676,29 @@ static const char *snapshot_name(uint8_t page)
     case 134: return "fault_vbus_filt_mV";
     case 135: return "fault_duty_u_v_x10000";
     case 136: return "fault_duty_w_x10000";
+    case 143: return "live_offset_status";
+    case 144: return "live_offset_avg_bc";
+    case 145: return "live_offset_sum_b";
+    case 146: return "live_offset_sum_c";
+    case 147: return "current_test_final_v_d_v_q_mV";
+    case 148: return "current_test_final_d_int_q_int_mV";
+    case 149: return "current_test_final_v_ref_mV";
+    case 150: return "current_test_status";
+    case 151: return "current_test_step_mA";
+    case 152: return "current_test_peak_mA";
+    case 153: return "current_test_min_mA";
+    case 154: return "current_test_final_mA";
+    case 155: return "current_test_axis";
+    case 156: return "current_test_kq_u";
+    case 157: return "current_test_kiq_u";
+    case 158: return "current_test_dtheta_elec_tenths_rad_s";
+    case 159: return "current_test_v_max_mV";
+    case 220: return "current_test_other_peak_mA";
+    case 221: return "current_test_other_min_mA";
+    case 222: return "current_test_theta_mech_start_mrad";
+    case 223: return "current_test_theta_elec_start_mrad";
+    case 224: return "current_test_theta_mech_final_mrad";
+    case 225: return "current_test_theta_elec_final_mrad";
     case 99: return "debug_status";
     default: return "unknown_snapshot";
     }
@@ -972,6 +996,14 @@ static int run_snapshot(struct client *client)
                   sizeof(snapshot_pages)) != 0) return -1;
     return run_pages(client, OPCODE_COUNTER, counter_pages,
                      sizeof(counter_pages));
+}
+
+static int run_snapshot_page(struct client *client, uint8_t page)
+{
+    struct response response;
+    if (query(client, OPCODE_SNAPSHOT, page, &response) != 0) return -1;
+    print_response(&response);
+    return response.status == 0U ? 0 : -1;
 }
 
 static int find_table_entry(double value, const double *table, size_t count,
@@ -1359,12 +1391,12 @@ static void usage(const char *program)
 {
     fprintf(stderr,
             "Usage: %s [OPTIONS] COMMAND\n"
-            "Commands: ping, info, snapshot, watch, export\n"
+            "Commands: ping, info, snapshot, snapshot-page PAGE, watch, export\n"
             "          inject VECTOR DUTY_PCT DURATION_MS, stop, drv, drv-wake,\n"
             "          drv-wake-status\n"
             "          drv-status, control esc|motor|encoder|zero|abort|debug-on|debug-off|debug-clear|debug-status\n"
             "          control calibrate CURRENT_A, control debug-log INDEX\n"
-            "          config get | config set FIELD VALUE [--commit] | config commit | config abort\n"
+            "          config get | config set FIELD VALUE [--commit] | config commit | config status | config detail | config abort\n"
             "Options:\n"
             "  --channel 0|1              UC12 CAN channel (default 0)\n"
             "  --timeout-ms N             response timeout (default 1000)\n"
@@ -1439,7 +1471,7 @@ int main(int argc, char **argv)
      * `config set p_min -100` value into an option. */
     for (int index = 1; index < argc; ++index) {
         if (!strcmp(argv[index], "ping") || !strcmp(argv[index], "info") ||
-            !strcmp(argv[index], "snapshot") || !strcmp(argv[index], "watch") ||
+            !strcmp(argv[index], "snapshot") || !strcmp(argv[index], "snapshot-page") || !strcmp(argv[index], "watch") ||
             !strcmp(argv[index], "export") || !strcmp(argv[index], "inject") ||
             !strcmp(argv[index], "stop") || !strcmp(argv[index], "drv") ||
             !strcmp(argv[index], "drv-wake") || !strcmp(argv[index], "drv-wake-status") ||
@@ -1499,6 +1531,7 @@ int main(int argc, char **argv)
     if (do_self_test) return self_test();
     if (optind + 1 != argc &&
         !(optind + 4 == argc && !strcmp(argv[optind], "inject")) &&
+        !(optind + 2 == argc && !strcmp(argv[optind], "snapshot-page")) &&
         !(optind + 2 <= argc && optind + 3 >= argc && !strcmp(argv[optind], "control")) &&
         !(optind + 2 <= argc && optind + 5 >= argc && !strcmp(argv[optind], "config"))) {
         usage(argv[0]);
@@ -1506,7 +1539,7 @@ int main(int argc, char **argv)
     }
     command = argv[optind];
     if (strcmp(command, "ping") && strcmp(command, "info") &&
-        strcmp(command, "snapshot") && strcmp(command, "watch") &&
+        strcmp(command, "snapshot") && strcmp(command, "snapshot-page") && strcmp(command, "watch") &&
         strcmp(command, "export") && strcmp(command, "inject") &&
         strcmp(command, "stop") && strcmp(command, "drv") &&
         strcmp(command, "drv-wake") && strcmp(command, "drv-wake-status") &&
@@ -1540,6 +1573,8 @@ int main(int argc, char **argv)
             if (optind + 3 >= argc || optind + 5 < argc) return 2;
         } else if (strcmp(argv[optind + 1], "get") &&
                    strcmp(argv[optind + 1], "commit") &&
+                   strcmp(argv[optind + 1], "status") &&
+                   strcmp(argv[optind + 1], "detail") &&
                    strcmp(argv[optind + 1], "abort")) return 2;
     }
 
@@ -1560,6 +1595,10 @@ int main(int argc, char **argv)
     }
     if (result == 0 && !strcmp(command, "info")) result = run_info(&client);
     else if (result == 0 && !strcmp(command, "snapshot")) result = run_snapshot(&client);
+    else if (result == 0 && !strcmp(command, "snapshot-page")) {
+        if (optind + 1 >= argc) { usage(argv[0]); result = -1; }
+        else result = run_snapshot_page(&client, (uint8_t)strtoul(argv[optind + 1], NULL, 0));
+    }
     else if (result == 0 && !strcmp(command, "watch")) result = run_watch(&client, 0);
     else if (result == 0 && !strcmp(command, "export")) result = run_watch(&client, 1);
     else if (result == 0 && !strcmp(command, "inject") && have_inject_args)
@@ -1581,7 +1620,11 @@ int main(int argc, char **argv)
             result = run_config_write(&client, argv[optind + 2], argv[optind + 3], commit);
         } else {
             struct response response;
-            uint8_t page = !strcmp(subcommand, "commit") ? 0xF9U : 0xFAU;
+            uint8_t page;
+            if (!strcmp(subcommand, "commit")) page = 0xF9U;
+            else if (!strcmp(subcommand, "status")) page = 0xFBU;
+            else if (!strcmp(subcommand, "detail")) page = 0xFCU;
+            else page = 0xFAU;
             result = (control(&client, page, 0U, &response) == 0 && response.status == 0U) ? 0 : -1;
             print_response(&response);
         }
