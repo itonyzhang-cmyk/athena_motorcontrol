@@ -1,2 +1,9 @@
 build
+build-*/
+__pycache__/
+*.pyc
+
+# Bench binaries and raw experiment captures are evidence, not source. A
+# reviewed release artifact must be added explicitly with provenance.
+/artifacts/*
 GD32F30x_Firmware_Library*

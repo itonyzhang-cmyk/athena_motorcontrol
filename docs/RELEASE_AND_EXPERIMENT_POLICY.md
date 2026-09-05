@@ -51,6 +51,11 @@ the full regression suite, and commit it before using it as a later baseline.
 If it fails, discard the uncommitted experiment rather than retaining an
 alternative firmware source.
 
+Generated build directories, Python caches, and bench artifacts are ignored by
+default. A formal artifact may be force-added only together with its provenance
+record, source commit, compiler identity, and SHA-256; an untracked binary is
+never a selectable firmware baseline.
+
 ## Review and disposition
 
 At the next suitable review point, every experiment must be assigned one
