@@ -46,9 +46,17 @@
 - 本次重启后已恢复服务，UC12 桥接为 `/dev/ttys001`，1 Mbit/s。
 - 已完成只读 `diag-ping`、`diag-snapshot`、`diag-drv-status`；CAN 响应正常。
 - 只读页观察：`state=0`、`runtime_gate_flags=0x0000000C`、`runtime_i_max=40.000 A`。
-- 当前未使能、未运动、未执行刷写；新工程已同步到 `~/workspace/xiaomi_dog/`，远端 Git 工作区应保持干净。
+- 新工程已同步到 `~/workspace/xiaomi_dog/`，远端 Git 工作区应保持干净；主线正式镜像已完成刷写、读回、启动和校准。
 - 重启后旧 WebUI 曾指向 `83e8828b...` 镜像；本次交接后应切换为本主线正式镜像，
   不得把旧 SHA 当成主线验证结果。
+
+## 本次交接后的验证状态
+
+- 远端 WebUI 和 UC12 桥接均从新工程目录启动，不再依赖 `~/athena_runtime` 中的旧代码。
+- 主线与 v8 使用同一 BIN SHA；单帧 MIT、位置正向/反向和低速轨迹已完成实机回归。
+- 详细证据：`tmp/validation/artifacts/athena_mainline_remote_regression_20260905/RESULTS.md`。
+- 后续修改只能在 `cyberdog-safe-bringup` 主线进行；实验构建必须进入 `tmp/validation/`，
+  并记录来源、目标、放弃条件和是否晋级主线。
 
 ## 远端继续工作的顺序
 

@@ -7,7 +7,15 @@
 
 | Version | Source | Image SHA-256 | Role | Hardware status |
 | --- | --- | --- | --- | --- |
-| `mainline-197f5cd` | `cyberdog-safe-bringup@197f5cde318640f3332ed525ea29b96cab55c478` | `e640fd1f1fa5bdee1a86b3c4d6b9a9d1ef4ac64832d54b3318aa42f2ee53c077` | Current normal firmware; promoted v8 current-loop/MIT changes plus mainline WebUI tracking | Binary rebuilt and symbol-audited; remote runtime validation pending flash to the post-reboot board |
+| `mainline-197f5cd` | `cyberdog-safe-bringup@197f5cde318640f3332ed525ea29b96cab55c478` | `e640fd1f1fa5bdee1a86b3c4d6b9a9d1ef4ac64832d54b3318aa42f2ee53c077` | Current normal firmware; promoted v8 current-loop/MIT changes plus mainline WebUI tracking | 31.20 已完成 hash-locked 刷写、读回、启动、校准和 MIT 位置/速度回归 |
+
+### 2026-09-05 主线与 v8 远端回归
+
+- 详细报告：`tmp/validation/artifacts/athena_mainline_remote_regression_20260905/RESULTS.md`
+- 主线当前代码提交：`00837104b4dc2ab6c97e5283b3d3bed4af81fe31`
+- 该提交还修复了远端 OpenOCD 必须显式传入脚本目录的问题；不改变正式 BIN 内容。
+- 结果：主线 BIN 与 v8 BIN 字节级一致，目标板实际运动方向、停止帧、校准门禁和
+  低速摩擦受限行为与 v8 证据一致。
 
 ## Promoted v8 equivalence
 
