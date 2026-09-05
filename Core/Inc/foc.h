@@ -70,6 +70,11 @@ void svm(float v_max, float u, float v, float w, float *dtc_u, float *dtc_v, flo
 void zero_current(ControllerStruct *controller);
 /* Re-sample the CSA offsets after the live neutral PWM bridge is enabled. */
 void zero_current_live(ControllerStruct *controller);
+#ifndef STM32F446
+uint8_t zero_current_live_active(void);
+void zero_current_live_cancel(void);
+uint32_t zero_current_live_snapshot(uint8_t page);
+#endif
 void reset_foc(ControllerStruct *controller);
 void reset_observer(ObserverStruct *observer);
 void init_controller_params(ControllerStruct *controller);
@@ -79,6 +84,9 @@ void current_loop_test_start(float step_amps, uint8_t axis);
 uint8_t current_loop_test_active(void);
 uint32_t current_loop_test_snapshot(uint8_t page);
 uint8_t current_loop_test_set_gains(float k_p, float k_i);
+void adc_baseline_test_start(void);
+uint8_t adc_baseline_test_active(void);
+uint32_t adc_baseline_test_snapshot(uint8_t page);
 void limit_current_ref (ControllerStruct *controller);
 void update_observer(ControllerStruct *controller, ObserverStruct *observer);
 void field_weaken(ControllerStruct *controller);

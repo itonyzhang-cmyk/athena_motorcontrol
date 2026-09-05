@@ -23,6 +23,23 @@ To select a different port or provide a token yourself:
 python3 tools/athena_bench_webui.py --port 8788 --token a-long-private-token
 ```
 
+For an experimental image, set `ATHENA_BENCH_CONFIG` to that artifact's
+explicit configuration file. This does not change `athena_bench_webui.json`:
+
+```sh
+ATHENA_BENCH_CONFIG=artifacts/athena_config_commit_async_v8_20260905/flash_config.json \
+  python3 tools/athena_bench_webui.py --port 8788 --token a-long-private-token
+```
+
+Record the selected configuration path and the SHA shown by the WebUI before
+any motion test. Never use an experimental config as the normal release
+pointer.
+
+The current UC12 bridge schedule defaults to a 20 ms MIT interval. Keep the
+bridge's latest-value queueing and the firmware's approximately 100 ms
+watchdog margin intact; a 5 ms host interval is not an accepted motion-test
+baseline.
+
 Only share the token URL with people permitted to operate the bench. The panel
 does not use TLS, so it is intended for a trusted private LAN only.
 

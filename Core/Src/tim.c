@@ -199,10 +199,11 @@ void MX_TIM0_Init(void)
     /* Clock source */
     timer_internal_clock_config(TIMER0);
 
-    /* ADC_SYNC_TRIGGER uses the carrier update event as a recurring injected
-     * conversion trigger. The GD32 CH3 trigger path is not functional on this
-     * board, while UPDATE is documented and emitted every PWM period. */
-#ifdef ADC_SYNC_TRIGGER
+    /* Production ADC_SYNC_TRIGGER uses UPDATE as the recurring injected ADC
+     * trigger. RESET remains a named experiment-only negative control. */
+#if defined(ADC_SYNC_TRIGGER) && defined(ADC_SYNC_TRIGGER_RESET)
+    timer_master_output_trigger_source_select(TIMER0, TIMER_TRI_OUT_SRC_RESET);
+#elif defined(ADC_SYNC_TRIGGER)
     timer_master_output_trigger_source_select(TIMER0, TIMER_TRI_OUT_SRC_UPDATE);
 #else
     timer_master_output_trigger_source_select(TIMER0, TIMER_TRI_OUT_SRC_RESET);

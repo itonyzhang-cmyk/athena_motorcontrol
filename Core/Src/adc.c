@@ -467,9 +467,8 @@ void MX_ADC01_Init(void)
   adc_inserted_channel_config(ADC0, 0U, ADC_CHANNEL_11, ADC_SAMPLETIME_1POINT5); // SOB
   adc_inserted_channel_config(ADC1, 0U, ADC_CHANNEL_10, ADC_SAMPLETIME_1POINT5); // SOC
 
-  /* The normal profile starts injected conversions in the update ISR.  The
-   * isolated current-loop experiment instead uses the hidden TIMER0 CH3
-   * midpoint event, where the shunt amplifiers have settled. */
+  /* TIMER0 TRGO drives simultaneous phase-current injected conversions. The
+   * selected TRGO event is UPDATE in production, configured in MX_TIM0_Init. */
 #ifdef ADC_SYNC_TRIGGER
   adc_external_trigger_source_config(ADC0, ADC_INSERTED_CHANNEL, ADC0_1_EXTTRIG_INSERTED_T0_TRGO);
 #else

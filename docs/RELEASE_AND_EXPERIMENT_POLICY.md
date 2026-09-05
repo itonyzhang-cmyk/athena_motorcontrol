@@ -14,6 +14,29 @@ Before flashing, verify all of the following as one tuple:
 source commit + branch + build provenance + artifact SHA + readback SHA
 ```
 
+### Post-flash calibration gate
+
+Every normal-firmware flash requires a new motor calibration on the flashed
+image. Do not reuse `E_ZERO` or the encoder LUT from a previous image, even
+though `flash-normal` preserves the configuration pages: changes to ADC, PWM,
+encoder, or FOC code can change the electrical-angle interpretation.
+
+An image is not eligible for normal operation, MIT/trajectory acceptance, or
+release until all of the following are recorded for the exact artifact SHA and
+board UID:
+
+1. Calibration completes without failure and reports completed ordering and
+   calibration stages.
+2. The A/B configuration write succeeds.
+3. `PPAIRS`, nonzero `E_ZERO`, LUT checksum, and configuration CRC are read
+   back immediately after calibration.
+4. After `boot-normal`, those same values remain unchanged and there is no
+   safety, DRV, or ADC-timeout fault.
+
+The calibration record must include the calibration current and diagnostics
+pages 95 through 115. A completed flash readback alone proves the application
+binary, not that its electrical-angle calibration is valid.
+
 ## Temporary validation
 
 Temporary experiments must use a separate local branch or an explicitly named

@@ -7,6 +7,7 @@
 
 #include "foc.h"
 #include "structs.h"
+#include <math.h>
 
 #ifndef STM32F446
 /* Internal current-loop step test.  CAN only arms it; the 30 kHz ISR owns
@@ -17,6 +18,12 @@ static volatile float current_test_step;
 static volatile float current_test_peak;
 static volatile float current_test_min;
 static volatile float current_test_final;
+static volatile float current_test_other_peak;
+static volatile float current_test_other_min;
+static volatile float current_test_start_theta_mech;
+static volatile float current_test_start_theta_elec;
+static volatile float current_test_final_theta_mech;
+static volatile float current_test_final_theta_elec;
 static volatile uint8_t current_test_seen;
 static volatile int16_t current_test_start_raw_b, current_test_start_raw_c;
 static volatile int16_t current_test_start_i_b, current_test_start_i_c;
@@ -36,18 +43,129 @@ static volatile int16_t current_test_peak_dtc_u, current_test_peak_dtc_v, curren
 static volatile int16_t current_test_min_v_d, current_test_min_v_q;
 static volatile int16_t current_test_min_dtc_u, current_test_min_dtc_v, current_test_min_dtc_w;
 static volatile int16_t current_test_offset_b, current_test_offset_c;
+static volatile int16_t current_test_final_dtheta_elec;
+static volatile int16_t current_test_final_v_max;
+static volatile int16_t current_test_final_v_d, current_test_final_v_q;
+static volatile int16_t current_test_final_d_int, current_test_final_q_int;
+static volatile int16_t current_test_final_v_ref;
 static volatile uint8_t current_test_axis;
-#define CURRENT_TEST_SAMPLES 60U
-static volatile int16_t current_test_samples[CURRENT_TEST_SAMPLES];
+#define ADC_BASELINE_SAMPLES 1000U
+static volatile uint8_t adc_baseline_active;
+static volatile uint32_t adc_baseline_count, adc_baseline_valid;
+static volatile uint32_t adc_baseline_sum_b, adc_baseline_sum_c, adc_baseline_sum_vbus;
+static volatile uint16_t adc_baseline_min_b, adc_baseline_min_c, adc_baseline_min_vbus;
+static volatile uint16_t adc_baseline_max_b, adc_baseline_max_c, adc_baseline_max_vbus;
+
+/* Live CSA offset capture runs from the timer-driven ADC path.  It must not
+ * block the 30 kHz ISR waiting for future UPDATE events, so the enable
+ * sequence starts this accumulator and the following UPDATE samples finish
+ * it. */
+#define LIVE_OFFSET_SAMPLES 64U
+static volatile uint8_t live_offset_active;
+static volatile uint8_t live_offset_complete;
+static volatile uint16_t live_offset_count;
+static volatile uint32_t live_offset_sum_b, live_offset_sum_c;
+static volatile uint16_t live_offset_avg_b, live_offset_avg_c;
+
+void adc_baseline_test_start(void)
+{
+    adc_baseline_count = adc_baseline_valid = 0U;
+    adc_baseline_sum_b = adc_baseline_sum_c = adc_baseline_sum_vbus = 0U;
+    adc_baseline_min_b = adc_baseline_min_c = adc_baseline_min_vbus = 0xFFFFU;
+    adc_baseline_max_b = adc_baseline_max_c = adc_baseline_max_vbus = 0U;
+    adc_baseline_active = 1U;
+}
+uint8_t adc_baseline_test_active(void) { return adc_baseline_active; }
+uint32_t adc_baseline_test_snapshot(uint8_t page)
+{
+    uint32_t n = adc_baseline_count ? adc_baseline_count : 1U;
+    switch (page) {
+    case 247U: return (uint32_t)adc_baseline_active | (adc_baseline_count << 8);
+    /* Pages 248..251 are physical ADC0/ADC1 values.  They deliberately do
+     * not follow PHASE_ORDER, so the two configurations can be compared. */
+    case 248U: return adc_baseline_min_b | ((uint32_t)adc_baseline_max_b << 16);
+    case 249U: return adc_baseline_min_c | ((uint32_t)adc_baseline_max_c << 16);
+    case 250U: return adc_baseline_sum_b / n;
+    case 251U: return adc_baseline_sum_c / n;
+    case 252U: return adc_baseline_min_vbus | ((uint32_t)adc_baseline_max_vbus << 16);
+    case 253U: return adc_baseline_sum_vbus / n;
+    case 254U: return adc_baseline_valid;
+    case 255U: return (uint32_t)controller.phase_order;
+    default: return 0U;
+    }
+}
+
+uint8_t zero_current_live_active(void) { return live_offset_active; }
+
+void zero_current_live_cancel(void)
+{
+    live_offset_active = 0U;
+    live_offset_complete = 0U;
+    live_offset_count = 0U;
+    live_offset_sum_b = 0U;
+    live_offset_sum_c = 0U;
+}
+
+uint32_t zero_current_live_snapshot(uint8_t page)
+{
+    switch (page) {
+    case 0U:
+        return (uint32_t)live_offset_active |
+               ((uint32_t)live_offset_count << 8) |
+               ((uint32_t)live_offset_complete << 16);
+    case 1U:
+        return (uint32_t)live_offset_avg_b |
+               ((uint32_t)live_offset_avg_c << 16);
+    case 2U:
+        return live_offset_sum_b;
+    case 3U:
+        return live_offset_sum_c;
+    default:
+        return 0U;
+    }
+}
+
+static void zero_current_live_accumulate(ControllerStruct *controller)
+{
+    if (live_offset_active == 0U || controller->adc_valid == 0U) return;
+
+    live_offset_sum_b += (uint32_t)controller->adc_b_raw;
+    live_offset_sum_c += (uint32_t)controller->adc_c_raw;
+    live_offset_count++;
+    if (live_offset_count >= LIVE_OFFSET_SAMPLES) {
+        live_offset_avg_b = (uint16_t)(live_offset_sum_b / LIVE_OFFSET_SAMPLES);
+        live_offset_avg_c = (uint16_t)(live_offset_sum_c / LIVE_OFFSET_SAMPLES);
+        controller->adc_b_offset = (int)live_offset_avg_b;
+        controller->adc_c_offset = (int)live_offset_avg_c;
+        live_offset_active = 0U;
+        live_offset_complete = 1U;
+    }
+}
+/* Pages 160..189 hold an edge-aligned D/Q time series; 190..219 hold the
+ * matching physical ADC1/ADC0 readings. Thirty 30 kHz samples at a 32-cycle
+ * stride cover 31 ms of the PI rise, starting at the reference edge. */
+#define CURRENT_TEST_EDGE_SAMPLES 30U
+#define CURRENT_TEST_EDGE_START_TICK 300U
+#define CURRENT_TEST_EDGE_STRIDE 32U
+static volatile int16_t current_test_edge_d[CURRENT_TEST_EDGE_SAMPLES];
+static volatile int16_t current_test_edge_q[CURRENT_TEST_EDGE_SAMPLES];
+static volatile uint16_t current_test_edge_raw_b[CURRENT_TEST_EDGE_SAMPLES];
+static volatile uint16_t current_test_edge_raw_c[CURRENT_TEST_EDGE_SAMPLES];
 
 void current_loop_test_start(float step_amps, uint8_t axis)
 {
-    if (!(step_amps >= 0.1f && step_amps <= 2.0f) || axis > 1U) return;
+    if (!(fabsf(step_amps) >= 0.1f && fabsf(step_amps) <= 2.0f) || axis > 1U) return;
     current_test_step = step_amps;
     current_test_axis = axis;
     current_test_tick = 0U;
     current_test_peak = 0.0f;
     current_test_min = 0.0f;
+    current_test_other_peak = 0.0f;
+    current_test_other_min = 0.0f;
+    current_test_start_theta_mech = 0.0f;
+    current_test_start_theta_elec = 0.0f;
+    current_test_final_theta_mech = 0.0f;
+    current_test_final_theta_elec = 0.0f;
     current_test_seen = 0U;
     current_test_start_raw_b = 0;
     current_test_start_raw_c = 0;
@@ -85,6 +203,13 @@ void current_loop_test_start(float step_amps, uint8_t axis)
     current_test_min_dtc_u = 0;
     current_test_min_dtc_v = 0;
     current_test_min_dtc_w = 0;
+    current_test_final_dtheta_elec = 0;
+    current_test_final_v_max = 0;
+    current_test_final_v_d = 0;
+    current_test_final_v_q = 0;
+    current_test_final_d_int = 0;
+    current_test_final_q_int = 0;
+    current_test_final_v_ref = 0;
     current_test_offset_b = (int16_t)controller.adc_b_offset;
     current_test_offset_c = (int16_t)controller.adc_c_offset;
     /* Each trial is independent.  A preceding step can leave a nonzero PI
@@ -97,7 +222,12 @@ void current_loop_test_start(float step_amps, uint8_t axis)
     controller.d_int = 0.0f;
     controller.q_int = 0.0f;
     current_test_final = 0.0f;
-    for (uint32_t i = 0U; i < CURRENT_TEST_SAMPLES; ++i) current_test_samples[i] = 0;
+    for (uint32_t i = 0U; i < CURRENT_TEST_EDGE_SAMPLES; ++i) {
+        current_test_edge_d[i] = 0;
+        current_test_edge_q[i] = 0;
+        current_test_edge_raw_b[i] = 0U;
+        current_test_edge_raw_c[i] = 0U;
+    }
     current_test_active = 1U;
 }
 
@@ -129,6 +259,23 @@ uint32_t current_loop_test_snapshot(uint8_t page)
     case 155U: return current_test_axis;
     case 156U: return (uint32_t)(int32_t)(controller.k_q * 1000000.0f);
     case 157U: return (uint32_t)(int32_t)(controller.ki_q * 1000000.0f);
+    /* Latched before the step reference is cleared; these describe the
+     * energized current-loop operating point, not post-test idle state. */
+    case 158U: return (uint32_t)(int32_t)current_test_final_dtheta_elec;
+    case 159U: return (uint32_t)(int32_t)current_test_final_v_max;
+    case 147U: return (uint32_t)(uint16_t)current_test_final_v_d |
+                       ((uint32_t)(uint16_t)current_test_final_v_q << 16);
+    case 148U: return (uint32_t)(uint16_t)current_test_final_d_int |
+                       ((uint32_t)(uint16_t)current_test_final_q_int << 16);
+    case 149U: return (uint32_t)(int32_t)current_test_final_v_ref;
+    /* The non-target axis extrema distinguish real d/q coupling from the
+     * q value coincident with a target-axis overshoot. */
+    case 220U: return (uint32_t)(int32_t)(current_test_other_peak * 1000.0f);
+    case 221U: return (uint32_t)(int32_t)(current_test_other_min * 1000.0f);
+    case 222U: return (uint32_t)(int32_t)(current_test_start_theta_mech * 1000.0f);
+    case 223U: return (uint32_t)(int32_t)(current_test_start_theta_elec * 1000.0f);
+    case 224U: return (uint32_t)(int32_t)(current_test_final_theta_mech * 1000.0f);
+    case 225U: return (uint32_t)(int32_t)(current_test_final_theta_elec * 1000.0f);
     case 226U: return (uint32_t)(uint16_t)current_test_start_raw_b |
                        ((uint32_t)(uint16_t)current_test_start_raw_c << 16);
     case 227U: return (uint32_t)(uint16_t)current_test_start_i_b |
@@ -168,8 +315,16 @@ uint32_t current_loop_test_snapshot(uint8_t page)
                        ((uint32_t)(uint16_t)current_test_min_dtc_v << 16);
     case 246U: return (uint32_t)(uint16_t)current_test_min_dtc_w;
     default:
-        if (page >= 160U && page < 160U + CURRENT_TEST_SAMPLES)
-            return (uint32_t)(int32_t)current_test_samples[page - 160U];
+        if (page >= 160U && page < 160U + CURRENT_TEST_EDGE_SAMPLES) {
+            const uint8_t index = page - 160U;
+            return (uint32_t)(uint16_t)current_test_edge_d[index] |
+                   ((uint32_t)(uint16_t)current_test_edge_q[index] << 16);
+        }
+        if (page >= 190U && page < 190U + CURRENT_TEST_EDGE_SAMPLES) {
+            const uint8_t index = page - 190U;
+            return (uint32_t)current_test_edge_raw_b[index] |
+                   ((uint32_t)current_test_edge_raw_c[index] << 16);
+        }
         return 0U;
     }
 }
@@ -184,7 +339,6 @@ uint32_t current_loop_test_snapshot(uint8_t page)
 #include "ivt_protection.h"
 
 #ifndef STM32F446
-#ifndef ADC_SYNC_TRIGGER
 #define ADC_EOIC_POLL_LIMIT 2048U
 
 static int adc_wait_for_eoic(uint32_t adc_periph)
@@ -197,7 +351,7 @@ static int adc_wait_for_eoic(uint32_t adc_periph)
 	}
 	return 0;
 }
-#else
+#ifdef ADC_SYNC_TRIGGER
 #define ADC_SYNC_STALE_LIMIT 4U
 #endif
 #endif
@@ -324,6 +478,7 @@ void analog_sample (ControllerStruct *controller){
 	}
 	controller->adc_vbus_raw = adc_inserted_data_read(ADC_CH_VBUS, ADC_INSERTED_CHANNEL_0);
 	controller->v_bus = (float)controller->adc_vbus_raw * V_SCALE;
+	zero_current_live_accumulate(controller);
 	controller->i_b = controller->i_scale * (float)(controller->adc_b_raw - controller->adc_b_offset);
 	controller->i_c = controller->i_scale * (float)(controller->adc_c_raw - controller->adc_c_offset);
 	controller->i_a = -controller->i_b - controller->i_c;
@@ -365,6 +520,31 @@ void analog_sample (ControllerStruct *controller){
     controller->adc_valid = 1U;
     controller->adc_sample_count++;
 #endif
+	if (adc_baseline_active != 0U) {
+		/* Diagnostic-only fresh conversion: keep the production FOC sample
+		 * path unchanged, then trigger and read a separate sample for timing
+		 * characterization. */
+		adc_software_trigger_enable(ADC_CH_MAIN, ADC_INSERTED_CHANNEL);
+		adc_software_trigger_enable(ADC_CH_VBUS, ADC_INSERTED_CHANNEL);
+		if (adc_wait_for_eoic(ADC_CH_MAIN) == 0 && adc_wait_for_eoic(ADC_CH_VBUS) == 0) {
+			adc_flag_clear(ADC_CH_MAIN, ADC_FLAG_EOIC);
+			adc_flag_clear(ADC_CH_VBUS, ADC_FLAG_EOIC);
+			uint16_t b=(uint16_t)adc_inserted_data_read(ADC_CH_IB, ADC_INSERTED_CHANNEL_0);
+			uint16_t c=(uint16_t)adc_inserted_data_read(ADC_CH_IC, ADC_INSERTED_CHANNEL_0);
+			uint16_t v=(uint16_t)adc_inserted_data_read(ADC_CH_VBUS, ADC_INSERTED_CHANNEL_0);
+		if (b<adc_baseline_min_b) adc_baseline_min_b=b;
+		if (c<adc_baseline_min_c) adc_baseline_min_c=c;
+		if (v<adc_baseline_min_vbus) adc_baseline_min_vbus=v;
+		if (b>adc_baseline_max_b) adc_baseline_max_b=b;
+		if (c>adc_baseline_max_c) adc_baseline_max_c=c;
+		if (v>adc_baseline_max_vbus) adc_baseline_max_vbus=v;
+		adc_baseline_sum_b+=b; adc_baseline_sum_c+=c; adc_baseline_sum_vbus+=v; adc_baseline_valid++;
+			if (++adc_baseline_count >= ADC_BASELINE_SAMPLES) adc_baseline_active=0U;
+		} else {
+			adc_flag_clear(ADC_CH_MAIN, ADC_FLAG_EOIC);
+			adc_flag_clear(ADC_CH_VBUS, ADC_FLAG_EOIC);
+		}
+	}
 
     evaluate_i_v_t_protection(controller);
 #endif
@@ -468,12 +648,21 @@ void zero_current_live(ControllerStruct *controller){
 	 * already queued before the bridge transition, then average a short window
 	 * without changing PWM state. */
 #ifdef ADC_SYNC_TRIGGER
-	/* The midpoint trigger is asynchronous to this ISR. Waiting here would
-	 * consume future PWM events while the ISR is blocked. The latest completed
-	 * synchronized sample is the only valid live-offset input. */
-	if (controller->adc_valid == 0U) return;
-	controller->adc_b_offset = controller->adc_b_raw;
-	controller->adc_c_offset = controller->adc_c_raw;
+	/* The midpoint trigger is asynchronous to this ISR. Start a bounded
+	 * accumulator and let subsequent UPDATE samples complete it; waiting here
+	 * would consume future PWM events while the ISR is blocked. */
+	/* A synchronized conversion may not have completed in the exact service
+	 * cycle that reaches this point. Start anyway; the accumulator only counts
+	 * subsequent valid UPDATE samples and the ready gate remains closed until
+	 * all 64 samples have been committed. */
+	if (live_offset_active != 0U) return;
+	live_offset_sum_b = 0U;
+	live_offset_sum_c = 0U;
+	live_offset_count = 0U;
+	live_offset_complete = 0U;
+	live_offset_avg_b = (uint16_t)controller->adc_b_offset;
+	live_offset_avg_c = (uint16_t)controller->adc_c_offset;
+	live_offset_active = 1U;
 	return;
 #else
 #ifdef STM32F446
@@ -658,6 +847,13 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
 
        controller->v_max = OVERMODULATION*controller->v_bus_filt*(DTC_MAX-DTC_MIN)*SQRT1_3;
        controller->i_max = I_MAX; //I_MAX*(!controller->otw_flag) + I_MAX_CONT*controller->otw_flag;
+	if (adc_baseline_active != 0U) {
+		controller->i_d_des = controller->i_q_des = 0.0f;
+		controller->v_d = controller->v_q = 0.0f;
+		controller->dtc_u = controller->dtc_v = controller->dtc_w = 0.5f;
+		set_dtc(controller);
+		return;
+	}
 
 #ifndef STM32F446
        if (current_test_active != 0U) {
@@ -673,6 +869,8 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
                current_test_start_i_c = (int16_t)(controller->i_c * 1000.0f);
                current_test_start_i_d = (int16_t)(controller->i_d * 1000.0f);
                current_test_start_i_q = (int16_t)(controller->i_q * 1000.0f);
+               current_test_start_theta_mech = controller->theta_mech;
+               current_test_start_theta_elec = controller->theta_elec;
            }
            if (current_test_tick == 300U) {
                current_test_step_i_b = (int16_t)(controller->i_b * 1000.0f);
@@ -682,9 +880,12 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
            }
            if (current_test_tick >= 300U) {
                const float measured = current_test_axis == 0U ? controller->i_d : controller->i_q;
+               const float other = current_test_axis == 0U ? controller->i_q : controller->i_d;
                if (current_test_seen == 0U) {
                    current_test_peak = measured;
                    current_test_min = measured;
+                   current_test_other_peak = other;
+                   current_test_other_min = other;
                    current_test_peak_tick = current_test_tick;
                    current_test_min_tick = current_test_tick;
                    current_test_peak_raw_b = (int16_t)controller->adc_b_raw;
@@ -733,12 +934,9 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
                        current_test_min_dtc_v = (int16_t)(controller->dtc_v * 10000.0f);
                        current_test_min_dtc_w = (int16_t)(controller->dtc_w * 10000.0f);
                    }
+                   if (other > current_test_other_peak) current_test_other_peak = other;
+                   if (other < current_test_other_min) current_test_other_min = other;
                }
-               /* 60 evenly spaced samples over the 5700-cycle step window. */
-               if (((current_test_tick - 300U) % 95U) == 0U &&
-                   ((current_test_tick - 300U) / 95U) < CURRENT_TEST_SAMPLES)
-                   current_test_samples[(current_test_tick - 300U) / 95U] =
-                       (int16_t)(measured * 1000.0f);
                if (current_test_tick >= 5900U) {
                    current_test_final = measured;
                    current_test_final_raw_b = (int16_t)controller->adc_b_raw;
@@ -747,7 +945,26 @@ void commutate(ControllerStruct *controller, EncoderStruct *encoder)
                    current_test_final_i_c = (int16_t)(controller->i_c * 1000.0f);
                    current_test_final_i_d = (int16_t)(controller->i_d * 1000.0f);
                    current_test_final_i_q = (int16_t)(controller->i_q * 1000.0f);
+                   current_test_final_dtheta_elec = (int16_t)(controller->dtheta_elec * 10.0f);
+                   current_test_final_v_max = (int16_t)(controller->v_max * 1000.0f);
+                   current_test_final_v_d = (int16_t)(controller->v_d * 1000.0f);
+                   current_test_final_v_q = (int16_t)(controller->v_q * 1000.0f);
+                   current_test_final_d_int = (int16_t)(controller->d_int * 1000.0f);
+                   current_test_final_q_int = (int16_t)(controller->q_int * 1000.0f);
+                   current_test_final_v_ref = (int16_t)(controller->v_ref * 1000.0f);
+                   current_test_final_theta_mech = controller->theta_mech;
+                   current_test_final_theta_elec = controller->theta_elec;
                }
+           }
+           if (current_test_tick >= CURRENT_TEST_EDGE_START_TICK &&
+               ((current_test_tick - CURRENT_TEST_EDGE_START_TICK) % CURRENT_TEST_EDGE_STRIDE) == 0U &&
+               ((current_test_tick - CURRENT_TEST_EDGE_START_TICK) / CURRENT_TEST_EDGE_STRIDE) < CURRENT_TEST_EDGE_SAMPLES) {
+               const uint8_t index = (uint8_t)((current_test_tick - CURRENT_TEST_EDGE_START_TICK) /
+                                               CURRENT_TEST_EDGE_STRIDE);
+               current_test_edge_d[index] = (int16_t)(controller->i_d * 1000.0f);
+               current_test_edge_q[index] = (int16_t)(controller->i_q * 1000.0f);
+               current_test_edge_raw_b[index] = (uint16_t)controller->adc_b_raw;
+               current_test_edge_raw_c[index] = (uint16_t)controller->adc_c_raw;
            }
            current_test_tick++;
            if (current_test_tick >= 6000U) {

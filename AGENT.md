@@ -167,6 +167,119 @@ Do not record secrets, access tokens, or private credentials here.
 
 ## Session Log
 
+### 2026-09-05 - 31 ms d 轴上升沿时间序列实测
+
+- 镜像 `athena_update_rise_trace_20260905/motorcontrol.bin` 已刷写并启动，配置区保留。
+- `+d 0.5 A`：d 轴约在 3.2 ms 达到 0.267 A、8.5 ms 达到 0.436 A、约 10.7 ms 达到 0.434 A；之后在约 0.45..0.58 A 间波动。q 轴在前 2 ms 最大约 0.057 A，3 ms 后基本在 +/-0.05 A 内。
+- `-d 0.5 A`：d 轴约在 3.2 ms 达到 -0.250 A、8.5 ms 达到 -0.434 A、约 10.7 ms 达到 -0.412 A；约 10..31 ms 稳态 -0.45..-0.53 A。q 轴全程约 +/-0.05 A。
+- 正负上升时间基本一致，剩余 q 轴瞬态对称且在 50 mA 量级；未见固定的一周期 ADC 滞后。此前“正负不对称”主要由未完成校准造成，当前电流环建立时间约 8..11 ms。
+
+### 2026-09-05 - UPDATE 电流环动态闭环完成验证
+
+- 实验镜像 `artifacts/athena_update_rise_trace_20260905/motorcontrol.bin`
+  （SHA-256 `b47d73476d6a895fff01e6f2539667d4a5fb27b74c13fc2ca6456019424cffdd`）
+  已通过唯一工具链构建、主机测试、正常镜像符号审计和 hash-locked 正常刷写。
+  产物来源、dirty 状态和私有刷写配置记录在同目录 `PROVENANCE.md` 与
+  `flash_config.json`；正式 `athena_bench_webui.json` 仍指向原正式镜像，未被实验改写。
+- 目标板 UID `39305137-14303434-47457A29`。远端流程完成双份 512 KiB 预写备份、
+  120 页逐页擦写/验证、应用区完整读回、配置页和 Option Bytes 保持不变；
+  `boot-normal` 成功。2 A 校准完成且 A/B 配置保持：page 95 在校准期间
+  `0x03000000`，page 96 `PPAIRS=21`，page 113 `E_ZERO=0x0EB5`，page 114
+  `0x172CE79E`，page 115 `0xD3F9B699`；重启后 113..115 仍一致。
+- UPDATE 路径电流阶跃在同一 UC12 桥接会话中通过：默认 `Kp=0.05,
+  Ki=0.045` 下，`+d/-d 0.5 A` 最终约 `+0.506/-0.463 A`，边沿约 8 个
+  32-cycle 采样点达到 90%（约 8.5 ms），全窗口非目标轴峰值约
+  `+0.126/-0.146 A`。动态页（147..149、158..159）在最终 `-d` 试验中读到
+  `v_d=-0.129 V`、`v_q=-0.006 V`、`v_ref=0.129 V`、`v_max=7.474 V`，
+  `dtheta_elec` 仅约 `-3.8 rad/s`，因此不是电压饱和或高速反电动势导致的 d 轴失稳。
+- 低速 `q=+/-0.2 A` 也能分别达到约 `+0.223/-0.241 A`（默认增益实测），
+  d/q 符号和 ADC 中点均正确。`q=+/-0.5 A` 会产生实际电磁转矩；一侧机械负载
+  使转子明显运动，随后 d/q 读数出现动态偏差，不能作为静止 PI 失败证据。
+- RAM-only 增益对照：`Kp=0.08, Ki=0.06` 将 d 轴 90% 建立时间缩短到约
+  4..6 ms；`Kp=0.10, Ki=0.06` 也可稳定跟踪，但瞬态串扰增大。所有实验增益
+  均未写入 Flash，最终通过 `boot-normal` 恢复并确认默认 `0.05/0.045`。
+- 最终发送停止帧后 page 82=`state=MENU/ready=0`、page 83=`0x0000000C`，
+  page 87 返回 `UNAVAILABLE` 且电流为 0，确认功率级已关断。结论：UPDATE
+  同步采样的内部电流 PI 闭环已完成可用性验证；当前剩余的约 0.1..0.15 A
+  瞬态非目标轴耦合属于建立过程，q 轴大阶跃的方向不对称来自机械运动工况，
+  不是 ADC 同步、负值编码或校准持久化回归。未将 RAM-only 候选增益提升为生产默认值。
+
+
+### 2026-09-05 - d/q 电流阶跃边沿时间序列
+
+- 新增实验镜像 `athena_update_edge_trace_20260905/motorcontrol.bin`，SHA-256
+  `5af80e7c11270ecbf854412fa0f6eadd382fe06daad519c3977778d993b00534`，已刷写并
+  `boot-normal` 通过；配置区未擦写。
+- page 160..189 现在记录阶跃边沿 30 组 D/Q 电流，page 190..219 记录同一时刻
+  的物理 B/C ADC 原始值。首版 30 点覆盖阶跃约 1 ms；实测 d 轴边沿电流约在
+  `0.02..0.10 A` 的噪声/建立量级，不能覆盖完整 PI 上升过程。
+- 已构建下一版 `athena_update_rise_trace_20260905`（SHA-256
+  `c06d3e151353d80ada49a701bae19fa3f8159a1f55ee85980e5da45427f79bec`），将采样
+  stride 改为 32 个 30 kHz 控制周期，30 点覆盖约 31 ms；该镜像待下一次刷写后
+  用于量化 10%/90% 上升时间及 ADC 一周期滞后。
+
+### 2026-09-05 - 校准菜单顺序修正后刷写与 UPDATE 阶跃复测
+
+- 实验镜像 `athena_calibration_menu_fix_20260905/motorcontrol.bin` 已刷写到
+  `192.168.31.20`，SHA-256 `fc2ff76120fb4d141d2cb74b6af65af172adf07aa0e05cacea2ccbd4005fc5d3`。
+  120 页逐页擦写/验证通过，配置区和 Option Bytes 未改变，`boot-normal` 通过。
+- 修正后的校准事务实测通过：page 95=`0x01010101`（MENU/MENU、started=1、
+  done_ordering=1、done_cal=1、failed=0）；page 96=`0x01911500`（phase_order=0、
+  PPAIRS=21、sample_count=401）；page 97=0；配置 CRC/LUT checksum 与原持久化值一致。
+- UPDATE 同步采样下 `+d/-d/+q` 0.5 A 阶跃均成功执行，无 CAN/ADC/DRV/watchdog 故障。
+  `+d` 全窗口非目标轴极值约 `[-0.084, +0.172] A`，起止机械角约
+  `6.14→6.14 rad`、电角约 `1.93→1.92 rad`；`-d` 约 `[-0.411,+0.020] A`，
+  机械角 `6.14→6.14 rad`、电角 `2.02→2.02 rad`；`+q` 约 `[-0.005,+0.507] A`，
+  机械角 `6.14→12.25 rad`、电角 `2.02→3.02 rad`。这说明校准后 d 轴不再引起明显转子位移，
+  但 q 轴阶跃会产生实际转动；d 轴正负全窗口串扰仍不对称，需在锁转子/缩短窗口条件下继续定位，
+  暂不能据此进入 MIT 参数最终调试。
+
+### 2026-09-05 - 完整校准后 d 轴瞬态串扰复测
+
+- 纠正 page95 位定义后确认：`0x03000000` 才表示 `done_ordering=1` 且
+  `done_cal=1`；page97=`0xAD2E`，page113 同值，配置 CRC/LUT checksum 已更新。
+- 完整校准后重复 `+d/-d 0.5 A`：两次起止机械角均保持约 `6.66 rad`，起止电角分别
+  约 `0.233/0.233 rad` 与 `0.241/0.241 rad`，不存在转子位移造成的假串扰。
+- `+d` 非目标 q 轴窗口约 `-0.158..+0.120 A`；`-d` 约 `-0.156..+0.098 A`，
+  正负已基本对称。此前 `-d` 出现约 `-0.5 A` q 轴的异常来自未完成 e-zero/LUT
+  校准（仅完成 phase ordering），不是 UPDATE 采样或负值编码问题。
+- 当前剩余约 0.15 A 的对称瞬态属于阶跃初始 300 周期/电流 PI 建立过程，下一步应
+  缩短采样窗口或增加分段时间序列，评估 PI 上升时间与采样相位；不应再修改相序或
+  编码器零点。
+
+### 2026-09-05 - 默认 UPDATE 采样与校准状态路径修正
+
+- `Makefile` 已将 `ADC_SYNC_TRIGGER ?= 1` 设为默认，正式构建默认使用 TIMER0
+  UPDATE 触发 ADC 注入采样；旧软件触发路径只能显式指定 `ADC_SYNC_TRIGGER=0`。
+- 复核发现 WebUI 刷写后校准顺序错误：先发 `0xFC` 会使 FSM 进入 `MOTOR_MODE`，随后
+  诊断 page 4 按设计因状态不符返回 BUSY，导致校准未启动。已改为发送 `0xFD`，等待
+  FSM 提交 `MENU_MODE`，再发送校准命令，并用中性帧保活 15 s。
+- 该修正尚未刷写；下一步须构建带唯一 SHA 的实验镜像，刷写后确认 page 95 的
+  `done_ordering=1/done_cal=1`、page 96 的 `PPAIRS` 及配置 CRC，再继续 d/q 瞬态定位。
+
+### 2026-09-05 - UPDATE 同步采样 d/q 轴严格对照
+
+- 远端目标：`192.168.31.20`，板卡 UID `39305137-14303434-47457A29`；运行镜像
+  `artifacts/athena_diag_busy_update_neg2_20260905/motorcontrol.bin`，SHA-256
+  `c15fa76f3ed0ccd90f0e5255294e346607b5769462f59c0d85acc01ec1318e7e`。
+- 在同一桥接会话下重复执行 `+d/-d`、`+q/-q` 0.5 A 以及 d 轴 0.1 A 对照，均由
+  固件 ISR 内部完成阶跃，测试结束自动清零参考；没有 CAN 丢帧、ADC 超时、DRV
+  故障或看门狗故障。
+- 典型结果（0.5 A）：`+d` 最终约 `+0.455 A`、`-d` 最终约 `-0.723 A`；
+  `+q` 最终约 `+0.751 A`、`-q` 最终约 `-0.630 A`。正负请求均确实生效，但
+  d/q 交叉分量明显（例如正 d 时 q 峰值约 `+0.67 A`，负 d 时 q 峰值约
+  `-0.60 A`），两侧 Vd 也分别达到约 `+2.6 V/-3.3 V`。
+- ADC 中点仍稳定在 B≈1932、C≈1989 counts，阶跃前后原始 ADC 按正负方向
+  对称变化；因此本轮证据不支持“负值被拒绝”“ADC 中点漂移”或简单通道符号错误。
+- 当前最可能原因是电角度零点/相位对齐误差导致 d 轴注入转化为 q 轴转矩，转子
+  在 5.7k 周期阶跃窗口内发生位置变化，进而造成正负方向不对称；不能据此直接
+  修改生产相序或编码器方向。下一步应增加阶跃起止电角度/机械角度快照，并在
+  锁定转子或更短窗口下复测，再决定是否需要重新做 E_ZERO/相位校准。
+- 随后通过释放 WebUI 桥接、直接运行远端 `athena_diag_uc12 drv-status` 读取到：
+  `PPAIRS=21.000`、`PHASE_ORDER=0`、`E_ZERO=0`，校准状态页 95/96 也为 0。
+  因而当前镜像实际使用的是未完成校准的零电角度，而不是一个已验证的 E_ZERO；
+  这与 d/q 交叉分量和正反向不对称相吻合。桥接已重新启动，未改写配置。
+
 ### 2026-08-29 - Motor-side MIT boundary and upper-controller reduction
 
 - The AS5047 magnetic encoder is now the sole firmware position source and
@@ -1515,3 +1628,147 @@ Do not record secrets, access tokens, or private credentials here.
   target `9.4 rad` covered `87.64..87.50 rad`. The remaining following error
   and reverse torque peaks require later controller-quality work, but do not
   justify reopening phase order, electrical angle, or commutation direction.
+
+### 2026-09-03 - Software-ADC normal-path regression restored
+
+- The TIMER0 UPDATE-triggered ADC and reduced-current-PI image was kept as an
+  isolated experiment after it failed to reproduce prior physical motion. The
+  normal control defaults are explicitly restored to the last motion-verified
+  software-triggered ADC path: `ADC_SYNC_TRIGGER=0`, `I_BW=1000`, and
+  `KI_D=KI_Q=0.045`. MIT decode, torque equation, phase order, and CAN
+  watchdog handling were reviewed against baseline `866949f` and were not
+  altered by this restoration.
+- The isolated regression artifact is
+  `artifacts/athena_motion_regression_software_adc_20260903/motorcontrol.bin`,
+  SHA-256 `1954cfb4c6b4ad2a62c05a1880583f118ad73558c0b1288a42750ffb9474e0cd`.
+  Its `PROVENANCE.md` records the dirty experimental source state and exact
+  build command, and explicitly disallows treating it as a release artifact.
+- On `192.168.31.20`, hash-gated flashing completed after two matching 512 KiB
+  pre-flash reads; all 120 pages were verified and full readback matched the
+  source image. The target then booted normally. Three non-enable MIT frames
+  returned feedback with no motor action.
+- With a 20 ms host interval, output-side position trajectories (`Kp=8`,
+  `Kd=0.5`, directional friction magnitude `0.3 Nm`) produced physical
+  motor-side motion in both directions: forward `26.98..28.62 rad`, then
+  reverse `28.59..26.79 rad`. Both 162-frame sessions ended with explicit
+  `0xFD`; maximum transmit gaps were `29.8 ms` and `29.6 ms`. A 2 s
+  output-side `+0.2 rad/s` constant-speed run (`Kp=0`, `Kd=0.5`) moved from
+  `26.82..31.85 rad` across 112 frames with a `29.9 ms` maximum gap and
+  explicit stop. Post-motion DRV snapshot/status requests returned protocol
+  status zero; no CAN, DRV, or ADC fault was observed.
+
+### 2026-09-05 - Post-flash mandatory calibration gate and persistence proof
+
+- Every normal-firmware flash now requires calibration on the just-flashed
+  image before any MIT or trajectory acceptance. `flash-normal` preserving the
+  configuration area is not an exemption: ADC, PWM, encoder, or FOC changes can
+  change the electrical-angle interpretation, so a previous image's `E_ZERO`
+  and encoder LUT must not be inherited as acceptance evidence.
+- The deployed calibration-layout-fix artifact was
+  `/Users/choqy/athena_runtime/athena_motorcontrol/artifacts/athena_calibration_layout_fix_20260905/motorcontrol.bin`,
+  SHA-256 `848673b5aa7098f9b4cd1e61b4a831c364785a3fbcf7629b8d10b1d62520da7c`,
+  built with `SAFE_BRINGUP=0` and `ADC_SYNC_TRIGGER=1`. It was programmed to
+  board UID `39305137-14303434-47457A29` through the normal guarded flow:
+  dual 512 KiB pre-flash reads, 120 verified pages, application readback, and
+  boot all passed.
+- Calibration `control calibrate 2.0` completed with approximately `0.295 rad`
+  displacement, verified `PPAIRS=21`, d-axis current about `1.994 A`, q-axis
+  crosstalk about `0.104 A`, `E_ZERO=50573`, LUT checksum `751B38A0`, and
+  configuration CRC `6B231EEC`. The configuration-save diagnostic event 11
+  reported payload `1` (success). A subsequent `boot-normal` retained the same
+  `PPAIRS`, `E_ZERO`, and LUT checksum with no safety, DRV, or ADC-timeout
+  fault.
+- Root causes fixed in this image: calibration now accepts a pole-pair
+  measurement within two counts of the validated 21-pair configuration and
+  retains 21 for the LUT; a successful calibration updates runtime
+  `comm_encoder.e_zero`; and `IVT_PROTECT_ENABLE` was moved from encoder-LUT
+  storage `__int_reg[7]` to `__int_reg[134]`, preventing LUT writes from
+  invalidating the A/B configuration payload. Configuration saving disables the
+  gate and resets FOC before writing flash.
+- Post-calibration internal current steps demonstrated active signed paths and
+  basic d/q decoupling: `+d 0.5 A` peaked `0.644 A` and settled `0.422 A` with
+  q crosstalk about `0.015 A`; `+q 0.5 A` peaked `0.843 A` and settled `0.572 A`
+  with d crosstalk about `-0.019 A`; `-d` and `-q 0.5 A` settled about
+  `-0.502 A` and `-0.503 A`. This is calibration and current-path evidence,
+  not a claim of final current-loop tuning.
+- Required record for every later normal flash: artifact provenance and SHA,
+  board UID, calibration current, diagnostics pages 95--115, successful A/B
+  save, and a post-reboot equality check for `PPAIRS`, `E_ZERO`, LUT checksum,
+  and configuration CRC. Without all of these, the image is not a normal-run
+  candidate.
+
+### 2026-09-05 - d/q crosstalk repeat and diagnostic-metrics gate
+
+- Repeated the existing flashed image's firmware-owned `+d/-d 0.5 A` steps four
+  times. All runs entered `MOTOR_MODE` with `adc=1`, `enc=1`, and no DRV/CAN/
+  ADC-timeout fault. Target-axis final values were approximately `+0.527 A`,
+  `-0.527 A`, `+0.513 A`, and `-0.510 A`; the coincident q readings were small
+  (`+0.005 A`, `+0.007 A`, `+0.001 A`, `-0.003 A`). Existing extrema evidence
+  still showed transient q excursions up to roughly `+0.32 A`, so this was not
+  sufficient to claim full-window near-zero coupling or start MIT tuning.
+- Added read-only experiment pages 220/221 to capture the non-target axis
+  maximum/minimum over the entire ISR step window. This changes no FOC,
+  commutation, PI, MIT, or persistent configuration behavior. Host tests pass.
+- Built the explicitly dirty experimental image
+  `artifacts/athena_dq_crosstalk_metrics_20260905/motorcontrol.bin` with
+  `SAFE_BRINGUP=0 ADC_SYNC_TRIGGER=1 ALLOW_DIRTY_BUILD=1`; SHA-256
+  `5f2dfdeef45bd113ae61139805aa0b901ea56817a5936bc64e281b32ef936e20`.
+  Its provenance and private flash configuration are recorded beside the
+  artifact; the WebUI normal-release JSON was not changed.
+- The image was flashed to UID `39305137-14303434-47457A29` through the guarded
+  normal flow. Dual 512 KiB pre-flash reads matched, 120 pages were verified,
+  application readback matched the source exactly, and configuration/Option
+  Bytes were unchanged. After boot, the persisted baseline remained
+  `PPAIRS=21`, `E_ZERO=50573`, config CRC `6B231EEC`, LUT checksum `751B38A0`.
+- A direct one-shot calibration request alone left page 95 at
+  `started=1, done_ordering=1, done_cal=0`; this is an incomplete calibration,
+  not acceptance evidence. The reason is that this command path did not keep
+  the CAN session alive with neutral MIT frames. Therefore MIT tuning is
+  intentionally blocked until calibration is rerun in one exclusive UC12
+  session with `0xFC`, neutral keepalive, successful A/B save, and reboot
+  equality checks.
+
+### 2026-09-05 - Post-flash calibration keepalive and full-window d-axis result
+
+- Added a WebUI `/api/bridge/calibrate` action that sends `0xFC`, then the
+  calibration request while continuously refreshing neutral MIT frames for 15 s.
+  This prevents the CAN watchdog from aborting an otherwise valid calibration.
+- After flashing the diagnostic-metrics image, this keepalive session completed:
+  page 95=`0x01010202` (`done_ordering=1`, `done_cal=1`, no failure), page 96
+  reported `PPAIRS=21`, and pages 113/114/115 reported `E_ZERO=50573`, config
+  CRC `6B231EEC`, and LUT checksum `751B38A0`. After `boot-normal`, those
+  persisted values were unchanged and the gate remained disabled with
+  `adc=1`, `enc=1`, and no DRV fault.
+- The final full-window `+d/-d 0.5 A` tests using diagnostic pages 220/221
+  produced target-axis final values of approximately `+0.502 A` and `-0.419 A`.
+  Non-target-axis extrema were `+0.172/-0.164 A` for +d and `+0.150/-0.163 A`
+  for -d; final non-target values were about `-0.011 A` and `-0.103 A`.
+  Thus steady-state coupling is small in the positive case but the full-window
+  transient coupling remains about 0.15--0.17 A and reverse settling is not
+  symmetric. The criterion “q-axis crosstalk near zero” is not met.
+- MIT parameter tuning remains blocked. Next diagnostic work must isolate the
+  transient source (electrical-angle/rotor movement versus current-loop phase
+  response) using the new extrema pages and shorter/locked-rotor or repeated
+  calibrated trials; do not change phase order, E_ZERO, PI gains, or MIT gains
+  based on this single result.
+
+### 2026-09-06 - v8 MIT target revalidation and position candidate
+
+- 目标重新限定为：只在 v8 实验镜像上验证电机侧 MIT 五参数；WebUI 仅做输出端
+  P/V 的 9:1 映射。电流环/UPDATE 路径不在本轮重新修改，旧镜像和旧范围不一致
+  数据不再作为证据。
+- 实际镜像为 `artifacts/athena_config_commit_async_v8_20260905/motorcontrol.bin`，
+  SHA-256 `e640fd1f1fa5bdee1a86b3c4d6b9a9d1ef4ac64832d54b3318aa42f2ee53c077`，源
+  HEAD `5360904c`，分支 `experiment/current-loop-pi-measurement`，实验脏工作区。
+- `Kp=10/Kd=0.5/重力=0/摩擦幅值=0.3 Nm` 的正反向小步长和约 1.08 rad
+  电机侧大步长均完成，最大帧间隔 `28.7..29.9 ms`，显式 `0xFD` 停止，无故障；
+  大步长最终误差约 `0.0006/0.0003 rad`。该组参数仅是当前 v8 空载候选，不是正式
+  默认值或负载参数。
+- 速度边界补测表明摩擦 `0.3 Nm` 不足以稳定恒速，`0.6 Nm` 可正反向运动，但
+  该值不晋级默认；速度模式仍需单独的恒速误差和停机判据。
+- 追加 `Kd=1` 速度边界时，3 s 小速度实验反馈范围扩大到 `4.02..8.19 rad`、
+  峰值力矩约 `1.61 Nm`，判定为速度模式不稳定；随后用位置候选参数恢复到目标，
+  位置环未回归。
+- 发现并修正远端 WebUI 指针漂移：同步本地 WebUI 前先备份旧文件，重启时显式设置
+  `ATHENA_BENCH_CONFIG` 指向 v8 `flash_config.json`；随后状态恢复为 v8 SHA，
+  且页面默认值为 `Kp=10/Kd=0.5/摩擦=0.3`。正常发布 JSON 未改写。

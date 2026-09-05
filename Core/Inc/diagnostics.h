@@ -31,6 +31,7 @@ extern DiagnosticCounters diagnostic_counters;
 #define DIAG_DEBUG_EVENT_DRV_FAULT          8U
 #define DIAG_DEBUG_EVENT_DEBUG_CONTROL      9U
 #define DIAG_DEBUG_EVENT_CALIBRATION_FAIL  10U
+#define DIAG_DEBUG_EVENT_CALIBRATION_SAVE  11U
 
 typedef struct {
     uint32_t timestamp_ms;
@@ -47,6 +48,9 @@ void diagnostics_debug_record(uint8_t event, uint32_t payload);
 
 #ifndef STM32F446
 void diagnostics_handle_can(const can_receive_message_struct *message);
+/* Service deferred configuration commits from the foreground context.  Flash
+ * erase/program must never run in the CAN RX ISR. */
+void diagnostics_service(void);
 void diagnostics_drv_wake_service(void);
 uint8_t diagnostics_drv_wake_window_active(void);
 void diagnostics_uart_report(void);

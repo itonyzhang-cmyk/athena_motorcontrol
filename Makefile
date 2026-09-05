@@ -30,10 +30,12 @@ FWDGT_SELFTEST ?= 0
 CAN_PROBE ?= 0
 ALLOW_DIRTY_BUILD ?= 0
 ALLOW_EXPERIMENTAL_RELEASE ?= 0
-# Experimental only: samples the two phase-current injected ADCs from the
-# hidden TIMER0 CH3 midpoint compare event.  Normal images retain the reviewed
-# software-trigger path until this profile has a complete bench acceptance.
-ADC_SYNC_TRIGGER ?= 0
+# TIMER0 UPDATE-triggered injected sampling is the production path. The
+# software-triggered path remains available only as an explicit regression
+# comparison with ADC_SYNC_TRIGGER=0.
+ADC_SYNC_TRIGGER ?= 1
+# Experiment-only negative control: select TIMER0 RESET instead of UPDATE.
+ADC_SYNC_TRIGGER_RESET ?= 0
 
 # A normal image is a hardware-facing release artifact.  Refuse to build it
 # from a dirty checkout unless the caller explicitly opts into an experiment.
@@ -226,6 +228,9 @@ C_DEFS =  \
 
 ifeq ($(ADC_SYNC_TRIGGER),1)
 C_DEFS += -DADC_SYNC_TRIGGER
+endif
+ifeq ($(ADC_SYNC_TRIGGER_RESET),1)
+C_DEFS += -DADC_SYNC_TRIGGER_RESET
 endif
 
 ifeq ($(SAFE_BRINGUP), 1)

@@ -10,6 +10,7 @@
 #include "flash_writer.h"
 #include "user_config.h"
 #include "config_store.h"
+#include "runtime_watchdog.h"
 #include <string.h>
 
 #ifdef STM32F446
@@ -22,6 +23,15 @@
 static int slot0_int_regs[CONFIG_INT_WORDS];
 static float slot0_float_regs[CONFIG_FLOAT_WORDS];
 
+static void preference_watchdog_tick(void)
+{
+	/* Configuration commits temporarily pause TIMER0, which normally owns the
+	 * watchdog service.  Keep the same progress gate in the foreground so a
+	 * valid multi-page transaction cannot reset the board mid-write. */
+	runtime_watchdog_main_heartbeat();
+	runtime_watchdog_timer_service();
+}
+
 static FlashWriter preference_slot_writer(PreferenceWriter pr, uint8_t slot)
 {
 	FlashWriter writer = pr.fw;
@@ -33,9 +43,11 @@ static void preference_read_payload(FlashWriter writer)
 {
 	int offs;
 	for (offs = 0; offs < 256; offs++) {
+		preference_watchdog_tick();
 		__int_reg[offs] = flash_read_int(writer, offs);
 	}
 	for (; offs < 320; offs++) {
+		preference_watchdog_tick();
 		__float_reg[offs - 256] = flash_read_float(writer, offs);
 	}
 }
@@ -79,8 +91,10 @@ bool preference_writer_open(PreferenceWriter * pr) {
 	pr->target_slot = pr->active_slot < CONFIG_SLOT_COUNT ?
 		(uint8_t)((pr->active_slot + 1U) % CONFIG_SLOT_COUNT) : 0U;
 	pr->fw = preference_slot_writer(*pr, pr->target_slot);
-    flash_writer_open(&pr->fw);
-    pr->ready = true;
+	preference_watchdog_tick();
+	flash_writer_open(&pr->fw);
+	preference_watchdog_tick();
+	pr->ready = true;
     return true;
 }
 
@@ -105,12 +119,14 @@ bool preference_writer_flush(PreferenceWriter * pr) {
         pr->ready = false;
         return false;
     }
-    crc = config_payload_crc32(__int_reg, __float_reg);
-    for (offs = 0; offs < 256; offs++) {
-        flash_writer_write_int(pr->fw, offs, __int_reg[offs]);
-    }
-    for (; offs < 320; offs++) {
-        flash_writer_write_float(pr->fw, offs, __float_reg[offs - 256]);
+	crc = config_payload_crc32(__int_reg, __float_reg);
+	for (offs = 0; offs < 256; offs++) {
+		preference_watchdog_tick();
+		flash_writer_write_int(pr->fw, offs, __int_reg[offs]);
+	}
+	for (; offs < 320; offs++) {
+		preference_watchdog_tick();
+		flash_writer_write_float(pr->fw, offs, __float_reg[offs - 256]);
     }
     flash_writer_write_uint(pr->fw, CONFIG_METADATA_VERSION_INDEX,
                             CONFIG_FORMAT_VERSION);
@@ -149,6 +165,7 @@ bool preference_writer_load(PreferenceWriter *pr) {
 	uint8_t selected = 0xFFU;
 
 	for (uint8_t slot = 0U; slot < CONFIG_SLOT_COUNT; ++slot) {
+		preference_watchdog_tick();
 		FlashWriter writer = preference_slot_writer(*pr, slot);
 		preference_read_payload(writer);
 		valid[slot] = preference_slot_valid(writer);
