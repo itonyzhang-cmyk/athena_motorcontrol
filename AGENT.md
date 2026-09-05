@@ -1783,3 +1783,22 @@ Do not record secrets, access tokens, or private credentials here.
   dirty experiment may be hash-locked for a bounded bench test, but it must be
   either incorporated into the trunk after regression or discarded. No later
   firmware is to be built from `experiment/current-loop-pi-measurement`.
+
+### 2026-09-06 - 31.20 service restart and read-only CAN reconnection
+
+- 31.20 (`MacBookAir.lan`) was rebooted; the WebUI was restarted from
+  `~/athena_runtime/start_runtime.sh` with the existing operator token. The
+  service is listening on TCP 8788 and the UC12 bridge started successfully at
+  `/dev/ttys001` with the documented 1 Mbit/s configuration.
+- Read-only `diag-ping`, `diag-snapshot`, and `diag-drv-status` actions were
+  sent through the bridge. All three API actions and the returned `0x781`
+  diagnostic frames completed without a CAN timeout. Runtime page 82 reported
+  `state=0`, page 83 reported `runtime_gate_flags=0x0000000C`, and page 84
+  reported `runtime_i_max=40.000 A`; no enable or motion command was sent.
+- This is only a service/device connectivity check. The remote WebUI config
+  currently points to the older image
+  `83e8828b77d5b20217295be275517164e1c39467f3b407c4ba92890b32de5e89`
+  (`athena_live_offset_average_next_20260905`), while the local trunk release
+  at `520e79b` is `e640fd1f1fa5bdee1a86b3c4d6b9a9d1ef4ac64832d54b3318aa42f2ee53c077`.
+  Therefore no claim of mainline firmware validation is made and no flash was
+  performed in this step.
