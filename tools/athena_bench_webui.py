@@ -795,7 +795,12 @@ class Runner:
         with self.lock:
             tty = self.bridge_tty
             live = self.bridge is not None and self.bridge.poll() is None
-            start = self.last_feedback_position_rad
+            # Position trajectories use the host-owned unwrapped motor
+            # coordinate.  The MIT feedback field is finite [-100, 100] rad
+            # and can wrap while the physical motor continues turning.
+            start = (self.logical_position_rad
+                     if self.logical_position_rad is not None
+                     else self.last_feedback_position_rad)
             if self.enable_active or self.mit_check_active:
                 return False, "已有 CAN/MIT 动作运行中"
             if not live or not tty:
@@ -816,13 +821,15 @@ class Runner:
             self.enable_active = True
             self.mit_stop_event.clear()
             self.mit_session_frames = 0
+            # Keep the host-owned multi-turn coordinate live for both modes;
+            # only the transmitted MIT position is constrained to its finite
+            # wire range.
+            self.logical_position_rad = start
+            self._logical_feedback_position_rad = self.last_feedback_position_rad
+            self._logical_tracking_active = True
             if mode == "velocity":
-                # The MIT feedback position is finite, while the velocity
-                # feedback remains meaningful after it reaches an endpoint.
-                # Rebase the host-owned multi-turn coordinate at each session.
+                # Velocity mode rebases the logical coordinate at each session.
                 self.logical_position_rad = start
-                self._logical_feedback_position_rad = start
-                self._logical_tracking_active = True
             request = {"mode": mode, "kp": kp, "kd": kd,
                        "gravity_torque": gravity_torque, "friction_torque": friction_torque,
                        "duration": duration, "hold": hold, "start": start_output,
