@@ -8,7 +8,8 @@
 
 - 本地与远端工程：`athena_motorcontrol`
 - 唯一开发分支：`cyberdog-safe-bringup`
-- 当前主线提交：`197f5cde318640f3332ed525ea29b96cab55c478`
+- 当前主线提交：`27dad4d0b35c0580a9724aa89a7a7f80aa8c0690`
+- 正式镜像来源提交：`197f5cde318640f3332ed525ea29b96cab55c478`
 - 正式构建工具链：项目内 `.toolchains/arm-gnu-15.3/bin`
 - 正式构建命令：
   `GCC_PATH=/Users/choqy/workspace/xiaomi_dog/.toolchains/arm-gnu-15.3/bin make release-normal`
@@ -40,11 +41,12 @@
 ## 31.20 当前状态
 
 - SSH 主机：`192.168.31.20`（`MacBookAir.lan`）
-- WebUI：`~/athena_runtime/start_runtime.sh`，端口 `8788`
+- WebUI（本次交接后应使用）：`~/workspace/xiaomi_dog/athena_motorcontrol/tools/athena_bench_webui.py`，端口 `8788`
+- 旧运行目录：`~/athena_runtime/`，仅作为迁移前备份，不再作为固件来源。
 - 本次重启后已恢复服务，UC12 桥接为 `/dev/ttys001`，1 Mbit/s。
 - 已完成只读 `diag-ping`、`diag-snapshot`、`diag-drv-status`；CAN 响应正常。
 - 只读页观察：`state=0`、`runtime_gate_flags=0x0000000C`、`runtime_i_max=40.000 A`。
-- 当前未使能、未运动、未执行刷写。
+- 当前未使能、未运动、未执行刷写；新工程已同步到 `~/workspace/xiaomi_dog/`，远端 Git 工作区应保持干净。
 - 重启后旧 WebUI 曾指向 `83e8828b...` 镜像；本次交接后应切换为本主线正式镜像，
   不得把旧 SHA 当成主线验证结果。
 

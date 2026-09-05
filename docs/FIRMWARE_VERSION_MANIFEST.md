@@ -2,6 +2,9 @@
 
 ## Mainline release
 
+当前主线指针为 `cyberdog-safe-bringup@27dad4d0b35c0580a9724aa89a7a7f80aa8c0690`。
+该提交只登记发布产物和整理验证证据；下面的正式 BIN 仍由其明确记录的源提交构建。
+
 | Version | Source | Image SHA-256 | Role | Hardware status |
 | --- | --- | --- | --- | --- |
 | `mainline-197f5cd` | `cyberdog-safe-bringup@197f5cde318640f3332ed525ea29b96cab55c478` | `e640fd1f1fa5bdee1a86b3c4d6b9a9d1ef4ac64832d54b3318aa42f2ee53c077` | Current normal firmware; promoted v8 current-loop/MIT changes plus mainline WebUI tracking | Binary rebuilt and symbol-audited; remote runtime validation pending flash to the post-reboot board |

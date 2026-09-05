@@ -17,6 +17,7 @@ if [[ -z "${OPENOCD_BIN:-}" ]]; then
 fi
 OPENOCD_INTERFACE="${OPENOCD_INTERFACE:-interface/stlink.cfg}"
 OPENOCD_TARGET="${OPENOCD_TARGET:-target/stm32f1x.cfg}"
+OPENOCD_SCRIPT="${OPENOCD_SCRIPT:-}"
 OPENOCD_SPEED_KHZ="${OPENOCD_SPEED_KHZ:-100}"
 OPENOCD_CPUTAPID="${OPENOCD_CPUTAPID:-0x2ba01477}"
 
@@ -209,8 +210,13 @@ check_path_for_tcl() {
 openocd_capture() {
     local log_file="$1"
     local commands="$2"
+    local -a openocd_args
     check_path_for_tcl "${log_file}"
-    "${OPENOCD_BIN}" \
+    openocd_args=("${OPENOCD_BIN}")
+    if [[ -n "${OPENOCD_SCRIPT}" ]]; then
+        openocd_args+=( -s "${OPENOCD_SCRIPT}" )
+    fi
+    "${openocd_args[@]}" \
         -f "${OPENOCD_INTERFACE}" \
         -c "set CPUTAPID ${OPENOCD_CPUTAPID}" \
         -f "${OPENOCD_TARGET}" \
