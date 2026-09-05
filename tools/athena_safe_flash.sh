@@ -26,7 +26,7 @@ SAFE_IMAGE_SIZE=29380
 SAFE_IMAGE_BASE=0x08000000
 SAFE_ERASE_SIZE=0x7800
 
-INJECT_IMAGE_DEFAULT="${REPO_DIR}/artifacts/athena_inject_poen_stage_20260820/motorcontrol.bin"
+INJECT_IMAGE_DEFAULT="${REPO_DIR}/tmp/validation/artifacts/athena_inject_poen_stage_20260820/motorcontrol.bin"
 INJECT_IMAGE_SHA256="55e8d6816e087d8308888960a5ba91545a8c5ab521ca3b625bff137268bb8714"
 INJECT_IMAGE_SIZE=33764
 INJECT_IMAGE_BASE=0x08000000
@@ -66,7 +66,7 @@ PY
         NORMAL_IMAGE_SIZE="$(wc -c < "${NORMAL_IMAGE_DEFAULT}" | tr -d ' ')"
     fi
 fi
-EVAL_IMAGE_DEFAULT="${REPO_DIR}/artifacts/athena_normal_eval_20260821/motorcontrol.bin"
+EVAL_IMAGE_DEFAULT="${REPO_DIR}/tmp/validation/artifacts/athena_normal_eval_20260821/motorcontrol.bin"
 EVAL_IMAGE_SHA256="538da9dc8aac7c4e144de6d6b8f126fbc8f7fee348ef1976ed6b9a6e72330afa"
 EVAL_IMAGE_SIZE=52372
 EVAL_IMAGE_BASE=0x08000000

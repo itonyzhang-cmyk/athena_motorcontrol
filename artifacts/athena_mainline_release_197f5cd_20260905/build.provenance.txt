@@ -1,0 +1,7 @@
+commit=197f5cde318640f3332ed525ea29b96cab55c478
+branch=cyberdog-safe-bringup
+subject=docs: record post-reboot remote CAN reconnection
+source_policy=formal-release
+worktree=release-gate-clean
+compiler=arm-none-eabi-gcc (Arm GNU Toolchain 15.3.Rel1 (Build arm-15.149)) 15.3.1 20260627
+bin_sha256=e640fd1f1fa5bdee1a86b3c4d6b9a9d1ef4ac64832d54b3318aa42f2ee53c077

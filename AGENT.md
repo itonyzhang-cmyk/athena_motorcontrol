@@ -1784,6 +1784,23 @@ Do not record secrets, access tokens, or private credentials here.
   either incorporated into the trunk after regression or discarded. No later
   firmware is to be built from `experiment/current-loop-pi-measurement`.
 
+### 2026-09-05 - mainline release registration and cross-server handoff
+
+- The current formal normal image is registered at
+  `artifacts/athena_mainline_release_197f5cd_20260905/`, with source commit,
+  compiler and SHA in `build.provenance.txt`. The checked-in
+  `athena_bench_webui.json` points to this exact image.
+- Its BIN SHA-256 is
+  `e640fd1f1fa5bdee1a86b3c4d6b9a9d1ef4ac64832d54b3318aa42f2ee53c077`, equal to
+  the previously tested v8 BIN. The authoritative source is now the mainline
+  commit, not the old dirty v8 branch.
+- Historical generated artifacts and build trees are physically grouped under
+  `tmp/validation/`; they are audit evidence only. Source tests remain in
+  `tests/`, and no image under `tmp/validation/` is a normal flashing baseline.
+- `docs/CROSS_SERVER_HANDOFF_TEMP.md` is a temporary cross-server handoff for
+  the 31.20 Codex environment. Delete it after the remote Codex can operate
+  directly from `~/workspace/xiaomi_dog` and the handoff is no longer needed.
+
 ### 2026-09-06 - 31.20 service restart and read-only CAN reconnection
 
 - 31.20 (`MacBookAir.lan`) was rebooted; the WebUI was restarted from
