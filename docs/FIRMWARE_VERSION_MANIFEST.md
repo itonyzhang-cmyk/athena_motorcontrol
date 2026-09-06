@@ -2,8 +2,9 @@
 
 ## Mainline release
 
-当前主线指针为 `cyberdog-safe-bringup@61b6666709827d02d5f21bc4c8a76795a1be6847`。
-该提交只对齐文档 provenance；下面的正式 BIN 仍由其明确记录的源提交构建。
+主线代码基线（已验证代码）为 `cyberdog-safe-bringup@b6ba088996150f0285d2e499e0440ee8d860d091`。
+当前分支 HEAD 为 `cde33f76dad6339fcd61ee278f22d5dae08142ec`；`b6ba088..cde33f7`
+之间只有 provenance/交接文档修正，不改变固件源码或正式 BIN。
 
 | Version | Source | Image SHA-256 | Role | Hardware status |
 | --- | --- | --- | --- | --- |
@@ -13,7 +14,7 @@
 
 - 详细报告：`tmp/validation/artifacts/athena_mainline_remote_regression_20260905/RESULTS.md`
 - 本轮回归实际测试提交：`b6ba088996150f0285d2e499e0440ee8d860d091`
-- 当前主线 HEAD（仅文档修正后）：`61b6666709827d02d5f21bc4c8a76795a1be6847`
+- 回归报告原始记录提交：`a4d9df0571cc612629a453f46ec1c28267d8d58b`
 - 实际刷写/测试工具提交：`00837104b4dc2ab6c97e5283b3d3bed4af81fe31`
 - 该提交还修复了远端 OpenOCD 必须显式传入脚本目录的问题；不改变正式 BIN 内容。
 - 结果：主线 BIN 与 v8 BIN 字节级一致，目标板实际运动方向、停止帧、校准门禁和

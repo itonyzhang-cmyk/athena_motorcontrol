@@ -16,7 +16,8 @@
 - 工程：`~/workspace/xiaomi_dog/athena_motorcontrol`
 - Git 分支：`cyberdog-safe-bringup`
 - 回归测试实际使用的主线提交：`b6ba088996150f0285d2e499e0440ee8d860d091`
-- 报告整理后的当前主线 HEAD：`61b6666709827d02d5f21bc4c8a76795a1be6847`
+- 当前分支 HEAD（仅文档修正后）：`cde33f76dad6339fcd61ee278f22d5dae08142ec`
+- 回归报告原始记录提交：`a4d9df0571cc612629a453f46ec1c28267d8d58b`
 - 实际刷写/测试工具提交：`00837104b4dc2ab6c97e5283b3d3bed4af81fe31`
 - 正式镜像来源提交：`197f5cde318640f3332ed525ea29b96cab55c478`
 - 正式镜像：`artifacts/athena_mainline_release_197f5cd_20260905/motorcontrol.bin`
