@@ -8,7 +8,7 @@
 
 - 本地与远端工程：`athena_motorcontrol`
 - 唯一开发分支：`cyberdog-safe-bringup`
-- 当前主线提交：`27dad4d0b35c0580a9724aa89a7a7f80aa8c0690`
+- 当前主线提交：`b6ba088996150f0285d2e499e0440ee8d860d091`
 - 正式镜像来源提交：`197f5cde318640f3332ed525ea29b96cab55c478`
 - 正式构建工具链：项目内 `.toolchains/arm-gnu-15.3/bin`
 - 正式构建命令：
